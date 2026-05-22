@@ -88,9 +88,44 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           cd "$SRCROOT"
+          ZIP_DATA_O="Resources/zip_data.o"
+          ZIP_ACCESSOR_O="Resources/zip_accessor.o"
+          REQUIRED_EMBED_ARCHS=(arm64 x86_64)
+
+          object_has_arch() {
+            local object_file="$1"
+            local arch="$2"
+            [[ -f "$object_file" ]] && lipo -info "$object_file" 2>/dev/null | grep -qE "(are:|architecture:) .*\\b${arch}\\b"
+          }
+
+          embedded_objects_are_current() {
+            local object_file
+            for object_file in "$ZIP_DATA_O" "$ZIP_ACCESSOR_O"; do
+              [[ -f "$object_file" ]] || return 1
+              local arch
+              for arch in "${REQUIRED_EMBED_ARCHS[@]}"; do
+                object_has_arch "$object_file" "$arch" || return 1
+              done
+            done
+          }
+
+          HAS_ASSETS=false
+          if [ -d "Resources/assets" ] && [ -n "$(ls -A Resources/assets 2>/dev/null)" ]; then
+            HAS_ASSETS=true
+          fi
+
+          if [ "$HAS_ASSETS" != "true" ]; then
+            if embedded_objects_are_current; then
+              echo "Resources/assets 不存在或为空，保留已提交的内嵌 assets 对象"
+              exit 0
+            fi
+            echo "❌ Resources/assets 不存在或为空，且缺少可用的内嵌 assets 对象"
+            exit 1
+          fi
+
           TMP_ZIP="/tmp/waifux-embedded-assets-$$.zip"
           rm -f "$TMP_ZIP"
-          if [ -d "Resources/assets" ] && [ -n "$(ls -A Resources/assets 2>/dev/null)" ]; then
+          if [ "$HAS_ASSETS" = "true" ]; then
             (cd Resources && zip -r -q "$TMP_ZIP" assets)
           else
             echo -n > "$TMP_ZIP"
@@ -121,8 +156,8 @@ targets:
             DATA_OBJECTS+=("$DATA_OBJECT")
             ACCESSOR_OBJECTS+=("$ACCESSOR_OBJECT")
           done
-          lipo -create "${DATA_OBJECTS[@]}" -output Resources/zip_data.o
-          lipo -create "${ACCESSOR_OBJECTS[@]}" -output Resources/zip_accessor.o
+          lipo -create "${DATA_OBJECTS[@]}" -output "$ZIP_DATA_O"
+          lipo -create "${ACCESSOR_OBJECTS[@]}" -output "$ZIP_ACCESSOR_O"
           rm -f "${DATA_OBJECTS[@]}" "${ACCESSOR_OBJECTS[@]}"
           rm -f "$TMP_ZIP"
     postBuildScripts:
