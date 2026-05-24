@@ -132,6 +132,7 @@ final class StatusBarController: NSObject {
     private lazy var toggleWallpaperItem = NSMenuItem(title: t("statusbar.enableWallpaper"), action: #selector(toggleDynamicWallpaper), keyEquivalent: "")
     private lazy var playPauseItem = NSMenuItem(title: t("statusbar.pauseWallpaper"), action: #selector(togglePlayback), keyEquivalent: "")
     private lazy var muteItem = NSMenuItem(title: t("statusbar.muteWallpaper"), action: #selector(toggleMute), keyEquivalent: "")
+    private lazy var desktopIconsItem = NSMenuItem(title: t("statusbar.hideDesktopIcons"), action: #selector(toggleDesktopIcons), keyEquivalent: "")
     private lazy var quitItem = NSMenuItem(title: t("statusbar.quit"), action: #selector(quitApplication), keyEquivalent: "q")
 
     private let videoWallpaperManager = VideoWallpaperManager.shared
@@ -203,12 +204,14 @@ final class StatusBarController: NSObject {
         openLibraryItem.target = self
         releaseMemoryItem.target = self
         muteItem.target = self
+        desktopIconsItem.target = self
         quitItem.target = self
 
         menu.addItem(openWindowItem)
         menu.addItem(openLibraryItem)
         menu.addItem(releaseMemoryItem)
         menu.addItem(.separator())
+        menu.addItem(desktopIconsItem)
         // toggleWallpaperItem 和 playPauseItem 在 refreshMenuState 中动态构建
         menu.addItem(muteItem)
         menu.addItem(.separator())
@@ -332,6 +335,11 @@ final class StatusBarController: NSObject {
                 currentInsertIndex += 1
             }
         }
+
+        // 桌面图标开关
+        desktopIconsItem.title = DesktopIconManager.shared.areDesktopIconsHidden
+            ? t("statusbar.showDesktopIcons")
+            : t("statusbar.hideDesktopIcons")
 
         // 全局静音开关
         muteItem.isEnabled = hasNativeWallpaper
@@ -458,6 +466,11 @@ final class StatusBarController: NSObject {
 
     @objc private func toggleMute() {
         videoWallpaperManager.setMuted(!videoWallpaperManager.isMuted)
+    }
+
+    @objc private func toggleDesktopIcons() {
+        DesktopIconManager.shared.toggle()
+        refreshMenuState()
     }
 
     @objc private func quitApplication() {

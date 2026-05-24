@@ -47,6 +47,8 @@ struct AnimeExploreView: View {
     @State private var isTagSearchActive = false
     @State private var lastSyncedFirstAnimeID: String?
     @State private var sentinelDebounceTask: DispatchWorkItem?
+    /// 增量瀑布流分配器
+    @StateObject private var columnDistributor = ExploreIncrementalDistributor<AnimeSearchResult>()
 
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -333,12 +335,21 @@ struct AnimeExploreView: View {
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         let cardWidth = max(1, floor((contentWidth - totalSpacing) / CGFloat(columnCount)))
         let items = viewModel.animeItems
-        let columnItems = distributeAnimeToColumns(
-            items: items,
-            cardWidth: cardWidth,
-            columnCount: columnCount,
-            spacing: spacing
-        )
+
+        let columnItems: [[AnimeSearchResult]]
+        if items.isEmpty {
+            columnItems = Array(repeating: [], count: max(1, columnCount))
+        } else {
+            columnItems = columnDistributor.append(
+                items: items,
+                columnCount: columnCount,
+                cardWidth: cardWidth,
+                spacing: spacing,
+                height: { [cardWidth] (_: AnimeSearchResult) in
+                    cardWidth * 1.4 + 44
+                }
+            )
+        }
 
         return HStack(alignment: .top, spacing: spacing) {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
@@ -356,28 +367,6 @@ struct AnimeExploreView: View {
                 .frame(width: cardWidth)
             }
         }
-    }
-
-    /// 瀑布流：将所有动漫项按最短列连续分配到各列。
-    private func distributeAnimeToColumns(
-        items: [AnimeSearchResult],
-        cardWidth: CGFloat,
-        columnCount: Int,
-        spacing: CGFloat
-    ) -> [[AnimeSearchResult]] {
-        let safeColumnCount = max(1, columnCount)
-        var columns: [[AnimeSearchResult]] = Array(repeating: [], count: safeColumnCount)
-        var columnHeights: [CGFloat] = Array(repeating: 0, count: safeColumnCount)
-        let itemHeight = cardWidth * 1.4 + 44
-
-        for item in items {
-            let minHeight = columnHeights.min() ?? 0
-            let column = columnHeights.firstIndex(of: minHeight) ?? 0
-            columns[column].append(item)
-            columnHeights[column] += itemHeight + spacing
-        }
-
-        return columns
     }
 
     // MARK: - UI Components
@@ -439,7 +428,10 @@ struct AnimeExploreView: View {
             }, action: { _, distanceFromBottom in
                 guard isVisible, distanceFromBottom.isFinite else { return }
                 if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    triggerLoadMore()
+                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
+                    Task { @MainActor in
+                        triggerLoadMore()
+                    }
                 }
             })
             .scrollDisabled(!isVisible)
@@ -705,6 +697,7 @@ struct AnimeExploreView: View {
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
+        columnDistributor.invalidate()
     }
 
     private func syncAtmosphereIfNeeded() {

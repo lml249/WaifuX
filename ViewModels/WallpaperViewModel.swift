@@ -37,6 +37,9 @@ class WallpaperViewModel: ObservableObject {
     // MARK: - 防抖搜索
     private var debounceTask: Task<Void, Never>?
     private let debounceInterval: TimeInterval = 0.3 // 300ms 防抖
+
+    /// 本地壁纸缓存重建任务（带防抖）
+    private var rebuildLocalWallpaperCacheTask: Task<Void, Never>?
     private var currentRandomSeed: String?
 
 
@@ -206,7 +209,7 @@ class WallpaperViewModel: ObservableObject {
             }
         }
 
-        // 监听 Service 数据变化：重建缓存并递增 revision（@Published 会触发 ObservableObject 刷新）
+        // 监听 Service 数据变化：递增 revision 立即触发 UI 刷新，缓存重建延迟执行避免阻塞主线程
         Publishers.Merge3(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
             wallpaperLibrary.$downloadRecords.map { _ in () },
@@ -214,9 +217,16 @@ class WallpaperViewModel: ObservableObject {
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
-            self?.rebuildLocalWallpaperCache()
-            self?.libraryContentRevision &+= 1
-            // 不额外 `objectWillChange.send()`：`cachedAllLocalWallpapers` 与 `libraryContentRevision` 的 @Published 已会触发依赖视图更新
+            guard let self else { return }
+            // 先递增 revision，触发 UI 立即使用 Set 索引做 O(1) 查询
+            self.libraryContentRevision &+= 1
+            // 缓存重建通过 Task 延迟执行，不阻塞当前 RunLoop
+            self.rebuildLocalWallpaperCacheTask?.cancel()
+            self.rebuildLocalWallpaperCacheTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms 防抖
+                guard let self, !Task.isCancelled else { return }
+                self.rebuildLocalWallpaperCache()
+            }
         }
         .store(in: &cancellables)
 
@@ -313,7 +323,7 @@ class WallpaperViewModel: ObservableObject {
 
         var result: [UnifiedLocalWallpaper] = []
 
-        // 添加下载记录
+        // 添加下载记录（纯内存操作，快）
         for record in downloads {
             result.append(UnifiedLocalWallpaper(
                 id: record.wallpaper.id,
@@ -326,9 +336,18 @@ class WallpaperViewModel: ObservableObject {
         }
 
         // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
-        let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
-            .map { ($0 as NSString).standardizingPath as String }
-        for item in locals where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
+        // ⚡ 使用 downloadIDSet 快速排除，避免路径标准化和 fileExists 检查
+        let downloadedIDs = wallpaperLibrary.downloadIDSetForRebuild
+        for item in locals {
+            // 先通过 ID 快速排除（O(1) Set 查找）
+            guard !downloadedIDs.contains(item.id) else { continue }
+            // 再通过路径标准化精确排除
+            let itemPath = (item.fileURL.path as NSString).standardizingPath as String
+            let isAlreadyDownloaded = downloads.contains { record in
+                guard let recordPath = URL(string: record.localFilePath)?.path else { return false }
+                return (recordPath as NSString).standardizingPath as String == itemPath
+            }
+            guard !isAlreadyDownloaded else { continue }
             guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
             result.append(UnifiedLocalWallpaper(
                 id: item.id,

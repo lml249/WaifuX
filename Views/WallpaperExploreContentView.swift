@@ -59,6 +59,8 @@ struct WallpaperExploreContentView: View {
     @State private var wallpaperURLInput = ""
     @State private var isResolvingWallpaperURL = false
     @State private var wallpaperURLError: String?
+    /// 增量瀑布流分配器
+    @StateObject private var columnDistributor = ExploreIncrementalDistributor<Wallpaper>()
 
     /// 防抖：避免同一帧内多次 Preference 更新触发无限布局循环
     @State private var sentinelDebounceTask: DispatchWorkItem?
@@ -236,6 +238,7 @@ struct WallpaperExploreContentView: View {
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             .onChange(of: viewModel.wallpapers.count) { _, count in
+                if count == 0 { columnDistributor.invalidate() }
                 if count > 60 { showScrollToTop = true }
             }
             .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
@@ -244,7 +247,10 @@ struct WallpaperExploreContentView: View {
             }, action: { _, distanceFromBottom in
                 guard isVisible, distanceFromBottom.isFinite else { return }
                 if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    triggerLoadMore()
+                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
+                    Task { @MainActor in
+                        triggerLoadMore()
+                    }
                 }
             })
             .scrollDisabled(!isVisible)
@@ -277,6 +283,7 @@ struct WallpaperExploreContentView: View {
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             .onChange(of: viewModel.wallpapers.count) { _, count in
+                if count == 0 { columnDistributor.invalidate() }
                 if count > 60 { showScrollToTop = true }
             }
             .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
@@ -629,7 +636,22 @@ struct WallpaperExploreContentView: View {
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
         let items = visibleWallpapers
-        let columnItems = distributeWallpapersToColumns(items: items, config: config)
+
+        let columnItems: [[Wallpaper]]
+        if items.isEmpty {
+            columnItems = Array(repeating: [], count: max(1, config.columnCount))
+        } else {
+            columnItems = columnDistributor.append(
+                items: items,
+                columnCount: config.columnCount,
+                cardWidth: config.cardWidth,
+                spacing: config.spacing,
+                height: { [config] wallpaper in
+                    let aspectRatio = min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
+                    return config.cardWidth / aspectRatio + 46
+                }
+            )
+        }
 
         return HStack(alignment: .top, spacing: config.spacing) {
             ForEach(0..<config.columnCount, id: \.self) { columnIndex in
@@ -650,24 +672,6 @@ struct WallpaperExploreContentView: View {
                 .frame(width: config.cardWidth)
             }
         }
-    }
-
-    /// 瀑布流：将所有壁纸项按最短列连续分配到各列。
-    private func distributeWallpapersToColumns(items: [Wallpaper], config: WallpaperGridConfig) -> [[Wallpaper]] {
-        let safeColumnCount = max(1, config.columnCount)
-        var columns: [[Wallpaper]] = Array(repeating: [], count: safeColumnCount)
-        var columnHeights: [CGFloat] = Array(repeating: 0, count: safeColumnCount)
-
-        for wallpaper in items {
-            let aspectRatio = min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
-            let itemHeight = config.cardWidth / aspectRatio + 46
-            let minHeight = columnHeights.min() ?? 0
-            let column = columnHeights.firstIndex(of: minHeight) ?? 0
-            columns[column].append(wallpaper)
-            columnHeights[column] += itemHeight + config.spacing
-        }
-
-        return columns
     }
 
     // MARK: - UI Components
@@ -1023,6 +1027,7 @@ struct WallpaperExploreContentView: View {
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
+        columnDistributor.invalidate()
     }
 
     private func syncAtmosphereIfNeeded() {

@@ -105,3 +105,94 @@ final class ExploreColumnDistributionCache<Item>: ObservableObject {
         return columns
     }
 }
+
+// MARK: - 增量瀑布流分配器
+
+/// 保持 column 分配状态，追加新 items 时只分配新 item，不重算已有 item。
+/// 仅在列数/卡片宽度变化时触发全量重算，避免滚动加载时重复遍历全部 items。
+@MainActor
+final class ExploreIncrementalDistributor<Item: Identifiable>: ObservableObject {
+    private var columnItems: [[Item]] = []
+    private var columnHeights: [CGFloat] = []
+    private var itemIDs: Set<Item.ID> = []
+    private var lastColumnCount = 0
+    private var lastCardWidth: CGFloat = 0
+    private var lastSpacing: CGFloat = 0
+
+    /// 增量追加新 items，返回完整的列分配结果
+    func append(
+        items newItems: [Item],
+        columnCount: Int,
+        cardWidth: CGFloat,
+        spacing: CGFloat,
+        height: (Item) -> CGFloat
+    ) -> [[Item]] {
+        let validColumnCount = max(1, columnCount)
+        let validCardWidth = max(1, cardWidth)
+
+        // 如果列数或卡片宽度变化（窗口缩放），全量重算
+        if columnCount != lastColumnCount || abs(cardWidth - lastCardWidth) > 1 || abs(spacing - lastSpacing) > 0.5 {
+            let allItems = columnItems.flatMap { $0 } + newItems
+            reset(with: allItems, columnCount: validColumnCount, cardWidth: validCardWidth, spacing: spacing, height: height)
+            return columnItems
+        }
+
+        // 过滤出真正的新 items
+        let toAdd = newItems.filter { !itemIDs.contains($0.id) }
+        guard !toAdd.isEmpty else { return columnItems }
+
+        // 补齐列数（初次使用或列数增加时）
+        while columnItems.count < validColumnCount {
+            columnItems.append([])
+            columnHeights.append(0)
+        }
+
+        for item in toAdd {
+            let h = max(1, height(item))
+            let minH = columnHeights.min() ?? 0
+            let col = columnHeights.firstIndex(of: minH) ?? 0
+            columnItems[col].append(item)
+            columnHeights[col] += h + spacing
+            itemIDs.insert(item.id)
+        }
+
+        return columnItems
+    }
+
+    /// 全量重算所有 items
+    func reset(
+        with items: [Item],
+        columnCount: Int,
+        cardWidth: CGFloat,
+        spacing: CGFloat,
+        height: (Item) -> CGFloat
+    ) {
+        let validColumnCount = max(1, columnCount)
+        columnItems = Array(repeating: [], count: validColumnCount)
+        columnHeights = Array(repeating: 0, count: validColumnCount)
+        itemIDs.removeAll()
+
+        for item in items {
+            itemIDs.insert(item.id)
+            let h = max(1, height(item))
+            let minH = columnHeights.min() ?? 0
+            let col = columnHeights.firstIndex(of: minH) ?? 0
+            columnItems[col].append(item)
+            columnHeights[col] += h + spacing
+        }
+
+        lastColumnCount = validColumnCount
+        lastCardWidth = max(1, cardWidth)
+        lastSpacing = spacing
+    }
+
+    /// 清空分配状态（filter/搜索切换时调用）
+    func invalidate() {
+        columnItems = []
+        columnHeights = []
+        itemIDs = []
+        lastColumnCount = 0
+        lastCardWidth = 0
+        lastSpacing = 0
+    }
+}

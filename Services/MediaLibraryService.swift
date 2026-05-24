@@ -5,8 +5,12 @@ import Combine
 final class MediaLibraryService: ObservableObject {
     static let shared = MediaLibraryService()
 
-    @Published private(set) var favoriteRecords: [MediaFavoriteRecord] = []
-    @Published private(set) var downloadRecords: [MediaDownloadRecord] = []
+    @Published private(set) var favoriteRecords: [MediaFavoriteRecord] = [] {
+        didSet { rebuildFavoriteIndex() }
+    }
+    @Published private(set) var downloadRecords: [MediaDownloadRecord] = [] {
+        didSet { rebuildDownloadIndex() }
+    }
     @Published private(set) var recentItems: [MediaItem] = []
 
     private let favoriteRecordsKey = "media_favorite_records_v2"
@@ -20,6 +24,10 @@ final class MediaLibraryService: ObservableObject {
     private var persistDownloadsWork: DispatchWorkItem?
     private var persistRecentsWork: DispatchWorkItem?
 
+    /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
+    private var favoriteIDSet: Set<String> = []
+    private var downloadIDSet: Set<String> = []
+
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
     }
@@ -28,6 +36,17 @@ final class MediaLibraryService: ObservableObject {
     func restoreSavedData() {
         loadPersistedState()
     }
+
+    private func rebuildFavoriteIndex() {
+        favoriteIDSet = Set(favoriteRecords.filter(\.isActive).map(\.item.id))
+    }
+
+    private func rebuildDownloadIndex() {
+        downloadIDSet = Set(downloadRecords.filter(\.isActive).map(\.item.id))
+    }
+
+    /// 供 ViewModel 缓存重建时快速排除已下载项目的 ID 集合
+    var downloadIDSetForRebuild: Set<String> { downloadIDSet }
 
     var favoriteItems: [MediaItem] {
         favoriteRecords
@@ -65,9 +84,15 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func toggleFavorite(_ item: MediaItem) {
-        if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
-            favoriteRecords[index].item = item
-            favoriteRecords[index].metadata.markLocalMutation(deleted: favoriteRecords[index].isActive)
+        // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
+        if favoriteIDSet.contains(item.id) {
+            if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id && $0.isActive }) {
+                favoriteRecords[index].item = item
+                favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+            } else if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
+                favoriteRecords[index].item = item
+                favoriteRecords[index].metadata.markLocalMutation(deleted: false)
+            }
         } else {
             favoriteRecords.insert(MediaFavoriteRecord(item: item), at: 0)
         }
@@ -77,15 +102,22 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func isFavorite(_ item: MediaItem) -> Bool {
-        favoriteRecords.contains { $0.item.id == item.id && $0.isActive }
+        // ⚡ O(1) Set 查找，替代线性扫描
+        favoriteIDSet.contains(item.id)
+    }
+
+    func isFavorite(id: String) -> Bool {
+        favoriteIDSet.contains(id)
     }
 
     func favoriteRecord(for itemID: String) -> MediaFavoriteRecord? {
-        favoriteRecords.first { $0.item.id == itemID && $0.isActive }
+        guard favoriteIDSet.contains(itemID) else { return nil }
+        return favoriteRecords.first { $0.item.id == itemID && $0.isActive }
     }
 
     func downloadRecord(for itemID: String) -> MediaDownloadRecord? {
-        downloadRecords.first { $0.item.id == itemID && $0.isActive }
+        guard downloadIDSet.contains(itemID) else { return nil }
+        return downloadRecords.first { $0.item.id == itemID && $0.isActive }
     }
 
     func downloadRecord(forLocalFilePath path: String) -> MediaDownloadRecord? {
@@ -99,7 +131,9 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ item: MediaItem) -> Bool {
-        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+        // ⚡ 先通过 Set 快速判断
+        guard downloadIDSet.contains(item.id),
+              let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
             return false
         }
         // 验证文件实际存在
@@ -112,7 +146,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 已下载媒体在磁盘上的文件 URL（存在且可读时）
     func localFileURLIfAvailable(for item: MediaItem) -> URL? {
-        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+        guard downloadIDSet.contains(item.id),
+              let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
             return nil
         }
         let url = URL(fileURLWithPath: record.localFilePath)
@@ -122,7 +157,8 @@ final class MediaLibraryService: ObservableObject {
 
     /// 已下载媒体的视频文件 URL（优先烘焙产物，其次目录内视频文件）；用于封面抽帧
     func resolvedVideoFileURLIfAvailable(for item: MediaItem) -> URL? {
-        guard let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+        guard downloadIDSet.contains(item.id),
+              let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
             return nil
         }
         return record.resolvedVideoFileURL
@@ -626,8 +662,12 @@ final class MediaLibraryService: ObservableObject {
 final class WallpaperLibraryService: ObservableObject {
     static let shared = WallpaperLibraryService()
 
-    @Published private(set) var favoriteRecords: [WallpaperFavoriteRecord] = []
-    @Published private(set) var downloadRecords: [WallpaperDownloadRecord] = []
+    @Published private(set) var favoriteRecords: [WallpaperFavoriteRecord] = [] {
+        didSet { rebuildFavoriteIndex() }
+    }
+    @Published private(set) var downloadRecords: [WallpaperDownloadRecord] = [] {
+        didSet { rebuildDownloadIndex() }
+    }
 
     private let favoriteRecordsKey = "wallpaper_favorite_records_v2"
     private let downloadRecordsKey = "wallpaper_download_records_v2"
@@ -639,6 +679,10 @@ final class WallpaperLibraryService: ObservableObject {
     private var persistFavoritesWork: DispatchWorkItem?
     private var persistDownloadsWork: DispatchWorkItem?
 
+    /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
+    private var favoriteIDSet: Set<String> = []
+    private var downloadIDSet: Set<String> = []
+
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
     }
@@ -647,6 +691,17 @@ final class WallpaperLibraryService: ObservableObject {
     func restoreSavedData() {
         loadPersistedState()
     }
+
+    private func rebuildFavoriteIndex() {
+        favoriteIDSet = Set(favoriteRecords.filter(\.isActive).map(\.wallpaper.id))
+    }
+
+    private func rebuildDownloadIndex() {
+        downloadIDSet = Set(downloadRecords.filter(\.isActive).map(\.wallpaper.id))
+    }
+
+    /// 供 ViewModel 缓存重建时快速排除已下载项目的 ID 集合
+    var downloadIDSetForRebuild: Set<String> { downloadIDSet }
 
     var favoriteWallpapers: [Wallpaper] {
         favoriteRecords
@@ -679,9 +734,17 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func toggleFavorite(_ wallpaper: Wallpaper) {
-        if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
-            favoriteRecords[index].wallpaper = wallpaper
-            favoriteRecords[index].metadata.markLocalMutation(deleted: favoriteRecords[index].isActive)
+        // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
+        if favoriteIDSet.contains(wallpaper.id) {
+            // 需要 index 来修改记录，但至少 Set 过滤后只有活跃记录才可能匹配
+            if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) {
+                favoriteRecords[index].wallpaper = wallpaper
+                favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+            } else if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
+                // 已存在但不活跃（软删除），重新激活
+                favoriteRecords[index].wallpaper = wallpaper
+                favoriteRecords[index].metadata.markLocalMutation(deleted: false)
+            }
         } else {
             favoriteRecords.insert(WallpaperFavoriteRecord(wallpaper: wallpaper), at: 0)
         }
@@ -691,15 +754,22 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func isFavorite(_ wallpaper: Wallpaper) -> Bool {
-        favoriteRecords.contains { $0.wallpaper.id == wallpaper.id && $0.isActive }
+        // ⚡ O(1) Set 查找，替代线性扫描
+        favoriteIDSet.contains(wallpaper.id)
+    }
+
+    func isFavorite(id: String) -> Bool {
+        favoriteIDSet.contains(id)
     }
 
     func favoriteRecord(for wallpaperID: String) -> WallpaperFavoriteRecord? {
-        favoriteRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
+        guard favoriteIDSet.contains(wallpaperID) else { return nil }
+        return favoriteRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
     }
 
     func downloadRecord(for wallpaperID: String) -> WallpaperDownloadRecord? {
-        downloadRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
+        guard downloadIDSet.contains(wallpaperID) else { return nil }
+        return downloadRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
     }
 
     func downloadRecord(forLocalFilePath path: String) -> WallpaperDownloadRecord? {
@@ -713,7 +783,9 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
-        guard let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+        // ⚡ 先通过 Set 快速判断
+        guard downloadIDSet.contains(wallpaper.id),
+              let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
             return false
         }
         // 验证文件实际存在
@@ -732,7 +804,8 @@ final class WallpaperLibraryService: ObservableObject {
            FileManager.default.fileExists(atPath: u.path) {
             return u
         }
-        guard let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+        guard downloadIDSet.contains(wallpaper.id),
+              let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
             return nil
         }
         let url = URL(fileURLWithPath: record.localFilePath)

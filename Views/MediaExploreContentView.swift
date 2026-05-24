@@ -43,6 +43,10 @@ struct MediaExploreContentView: View {
 
     @State private var searchTask: Task<Void, Never>?
     @State private var loadMoreTask: Task<Void, Never>?
+    /// loadMore 世代计数器，防止过期 task 覆盖较新 task 的引用或 UI 状态
+    @State private var loadMoreGeneration: UInt = 0
+    /// 增量瀑布流分配器：新 items 追加时不重算已有 item
+    @StateObject private var columnDistributor = ExploreIncrementalDistributor<MediaItem>()
     @State private var pendingSearchText: String?
     /// 翻译后的实际搜索词（英文），与 searchText（原始中文）分离
     @State private var mediaSearchQuery: String = ""
@@ -163,6 +167,12 @@ struct MediaExploreContentView: View {
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in }
         .onChange(of: viewModel.items.count) { _, newCount in
+            if newCount == 0 {
+                columnDistributor.invalidate()
+            } else {
+                // 数据从 0→N（切换源后新数据到达）时同步大气层背景
+                syncAtmosphereIfNeeded()
+            }
             if newCount > 60 { showScrollToTop = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .workshopSourceChanged)) { _ in
@@ -213,7 +223,10 @@ struct MediaExploreContentView: View {
             }, action: { _, distanceFromBottom in
                 guard isVisible, distanceFromBottom.isFinite else { return }
                 if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    triggerLoadMore()
+                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
+                    Task { @MainActor in
+                        triggerLoadMore()
+                    }
                 }
             })
             .scrollDisabled(!isVisible)
@@ -988,12 +1001,23 @@ struct MediaExploreContentView: View {
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         let cardWidth = max(1, floor((contentWidth - totalSpacing) / CGFloat(columnCount)))
         let items = viewModel.items
-        let columnItems = distributeMediaToColumns(
-            items: items,
-            cardWidth: cardWidth,
-            columnCount: columnCount,
-            spacing: spacing
-        )
+
+        let columnItems: [[MediaItem]]
+        if items.isEmpty {
+            columnItems = Array(repeating: [], count: max(1, columnCount))
+        } else {
+            columnItems = columnDistributor.append(
+                items: items,
+                columnCount: columnCount,
+                cardWidth: cardWidth,
+                spacing: spacing,
+                height: { [cardWidth] item in
+                    let aspect = parsedMediaAspectRatio(item)
+                    let maxImageHeight = cardWidth * 1.8
+                    return min(cardWidth / aspect, maxImageHeight) + 44
+                }
+            )
+        }
 
         return HStack(alignment: .top, spacing: spacing) {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
@@ -1014,26 +1038,6 @@ struct MediaExploreContentView: View {
         }
     }
 
-    /// 瀑布流：将所有媒体项按最短列连续分配到各列。
-    /// 与分页块解耦，新追加的项始终流入当前最短列底部，不会出现在视口上方。
-    private func distributeMediaToColumns(items: [MediaItem], cardWidth: CGFloat, columnCount: Int, spacing: CGFloat) -> [[MediaItem]] {
-        let safeColumnCount = max(1, columnCount)
-        var columns: [[MediaItem]] = Array(repeating: [], count: safeColumnCount)
-        var columnHeights: [CGFloat] = Array(repeating: 0, count: safeColumnCount)
-
-        for item in items {
-            let aspect = parsedMediaAspectRatio(item)
-            let maxImageHeight = cardWidth * 1.8
-            let itemHeight = min(cardWidth / aspect, maxImageHeight) + 44
-            let minHeight = columnHeights.min() ?? 0
-            let column = columnHeights.firstIndex(of: minHeight) ?? 0
-            columns[column].append(item)
-            columnHeights[column] += itemHeight + spacing
-        }
-
-        return columns
-    }
-
     private func parsedMediaAspectRatio(_ item: MediaItem) -> CGFloat {
         let raw = (item.exactResolution ?? item.resolutionLabel)
             .replacingOccurrences(of: " ", with: "")
@@ -1049,25 +1053,10 @@ struct MediaExploreContentView: View {
 
     private func smartRetry() async {
         let query = viewModel.currentQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch workshopSourceManager.activeSource {
-        case .wallpaperEngine:
-            if !query.isEmpty {
-                await viewModel.searchWorkshop(query: query)
-            } else {
-                await viewModel.loadWorkshopFeed()
-            }
-        case .dongtai:
-            if !query.isEmpty {
-                await viewModel.searchDongTai(query: query)
-            } else {
-                await viewModel.loadDongTaiFeed()
-            }
-        default:
-            if !query.isEmpty {
-                await viewModel.search(query: query)
-            } else {
-                await viewModel.loadHomeFeed()
-            }
+        if !query.isEmpty {
+            await viewModel.searchFeed(query: query)
+        } else {
+            await viewModel.initialLoadIfNeeded()
         }
     }
 
@@ -1158,14 +1147,7 @@ struct MediaExploreContentView: View {
         loadMoreFailed = false
         viewModel.errorMessage = nil
 
-        switch workshopSourceManager.activeSource {
-        case .wallpaperEngine:
-            await viewModel.loadWorkshopFeed()
-        case .dongtai:
-            await viewModel.loadDongTaiFeed()
-        default:
-            await viewModel.loadHomeFeed()
-        }
+        await viewModel.initialLoadIfNeeded()
 
         syncAtmosphereIfNeeded()
         isInitialLoading = false
@@ -1341,8 +1323,8 @@ struct MediaExploreContentView: View {
     }
 
     private func handleSourceChange() {
-        // 数据源切换时重置并重新加载
-        resetAllFilters(reloadData: true)
+        // 仅重置 UI 筛选状态，不触发数据加载——加载由 ViewModel.$activeSource sink 统一负责
+        resetAllFilters(reloadData: false)
     }
 
     private func handleWorkshopURLSubmit() {
@@ -1389,16 +1371,14 @@ struct MediaExploreContentView: View {
         isLoadingMore = true
         loadMoreFailed = false
         loadMoreTask?.cancel()
-        loadMoreTask = Task {
-            switch workshopSourceManager.activeSource {
-            case .wallpaperEngine:
-                await viewModel.loadMoreWorkshop()
-            case .dongtai:
-                await viewModel.loadMoreDongTai()
-            default:
-                await viewModel.loadMore()
-            }
+        let generation = loadMoreGeneration
+        loadMoreGeneration &+= 1
+        loadMoreTask = Task { [generation] in
+            await viewModel.loadMoreFeed()
             await MainActor.run {
+                // 只有最新的 task 才能更新 UI：generation 被捕获后 loadMoreGeneration 已 +1，
+                // 若期间有新 task 创建则 loadMoreGeneration 会继续 +1，此时 guard 不成立跳过
+                guard loadMoreGeneration == generation + 1 else { return }
                 if viewModel.hasMorePages && viewModel.errorMessage != nil {
                     loadMoreFailed = true
                 }
@@ -1406,7 +1386,6 @@ struct MediaExploreContentView: View {
                     isLoadingMore = false
                 }
             }
-            loadMoreTask = nil
         }
     }
 
@@ -1465,14 +1444,7 @@ struct MediaExploreContentView: View {
                 searchTask = nil
             }
 
-            switch workshopSourceManager.activeSource {
-            case .wallpaperEngine:
-                await viewModel.resetAndLoadDefaultWorkshopFeed()
-            case .dongtai:
-                await viewModel.resetAndLoadDefaultDongTaiFeed()
-            default:
-                await viewModel.resetAndLoadDefaultHomeFeed()
-            }
+            await viewModel.resetAndLoadDefaultFeed()
 
             syncAtmosphereIfNeeded()
 
@@ -1486,6 +1458,7 @@ struct MediaExploreContentView: View {
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
+        columnDistributor.invalidate()
     }
 
     private func cancelTasks() {

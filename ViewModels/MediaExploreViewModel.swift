@@ -18,7 +18,8 @@ final class MediaExploreViewModel: ObservableObject {
     private let networkMonitor = NetworkMonitor.shared
 
     /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目触发 grid reload。
-    private static let maxCachedItems = 300
+    /// 设为 2000 使普通浏览不会触达，避免 suffix 裁剪导致瀑布流就地重排、内容跳到顶部。
+    private static let maxCachedItems = 2000
     /// 详情预抓队列上限，避免快速滚动时待处理 MediaItem 长时间堆积。
     private static let maxPendingDetailPrefetchItems = 48
 
@@ -52,6 +53,9 @@ final class MediaExploreViewModel: ObservableObject {
     private var preloadedPagePath: String?
     /// 预加载页面的下一页路径（预加载页面返回的 nextPagePath）。
     private var preloadedNextPath: String?
+
+    /// 本地媒体缓存重建任务（带防抖）
+    private var rebuildLocalMediaCacheTask: Task<Void, Never>?
 
     // MARK: - Workshop 分页状态
     private var workshopCurrentPage = 1
@@ -105,7 +109,7 @@ final class MediaExploreViewModel: ObservableObject {
             }
         }
 
-        // 监听 Service 数据变化：重建缓存并递增 revision
+        // 监听 Service 数据变化：递增 revision 立即触发 UI 刷新，缓存重建延迟执行避免阻塞主线程
         Publishers.Merge3(
             mediaLibrary.$favoriteRecords.map { _ in () },
             mediaLibrary.$downloadRecords.map { _ in () },
@@ -113,8 +117,16 @@ final class MediaExploreViewModel: ObservableObject {
         )
         .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in
-            self?.rebuildLocalMediaCache()
-            self?.libraryContentRevision &+= 1
+            guard let self else { return }
+            // 先递增 revision，触发 UI 立即使用 Set 索引做 O(1) 查询
+            self.libraryContentRevision &+= 1
+            // 缓存重建通过 Task 延迟执行，不阻塞当前 RunLoop
+            self.rebuildLocalMediaCacheTask?.cancel()
+            self.rebuildLocalMediaCacheTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms 防抖
+                guard let self, !Task.isCancelled else { return }
+                self.rebuildLocalMediaCache()
+            }
         }
         .store(in: &cancellables)
 
@@ -224,7 +236,7 @@ final class MediaExploreViewModel: ObservableObject {
 
         var result: [UnifiedLocalMedia] = []
 
-        // 添加下载记录
+        // 添加下载记录（纯内存操作，快）
         for record in downloads {
             result.append(UnifiedLocalMedia(
                 id: record.item.id,
@@ -237,9 +249,17 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
-        let downloadedPaths = Set(downloads.compactMap { URL(string: $0.localFilePath)?.path })
-            .map { ($0 as NSString).standardizingPath as String }
-        for item in locals where !downloadedPaths.contains((item.fileURL.path as NSString).standardizingPath as String) {
+        // ⚡ 先通过 ID Set 快速排除，避免路径标准化和 fileExists 检查
+        let downloadedIDs = mediaLibrary.downloadIDSetForRebuild
+        for item in locals {
+            guard !downloadedIDs.contains(item.id) else { continue }
+            // 再通过路径标准化精确排除
+            let itemPath = (item.fileURL.path as NSString).standardizingPath as String
+            let isAlreadyDownloaded = downloads.contains { record in
+                guard let recordPath = URL(string: record.localFilePath)?.path else { return false }
+                return (recordPath as NSString).standardizingPath as String == itemPath
+            }
+            guard !isAlreadyDownloaded else { continue }
             guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
             result.append(UnifiedLocalMedia(
                 id: item.id,
@@ -398,7 +418,6 @@ final class MediaExploreViewModel: ObservableObject {
             page.items.forEach { mediaLibrary.upsert($0) }
             items.append(contentsOf: appended)
             enqueueDetailPrefetch(for: appended, prioritizeVisible: false)
-            enforceExploreItemLimit()
 
             self.nextPagePath = page.nextPagePath
             hasMorePages = page.nextPagePath != nil
@@ -1310,6 +1329,36 @@ final class MediaExploreViewModel: ObservableObject {
         dongtaiCurrentPage = 1
     }
 
+    // MARK: - 统一调度（不感知具体源类型）
+
+    /// 重置并加载当前源的默认 Feed。新增数据源只需在 `switch` 中添加分支。
+    @MainActor
+    func resetAndLoadDefaultFeed() async {
+        switch workshopSourceManager.activeSource {
+        case .wallpaperEngine: await resetAndLoadDefaultWorkshopFeed()
+        case .dongtai:         await resetAndLoadDefaultDongTaiFeed()
+        default:               await resetAndLoadDefaultHomeFeed()
+        }
+    }
+
+    /// 加载更多当前源的数据。新增数据源只需在 `switch` 中添加分支。
+    func loadMoreFeed() async {
+        switch workshopSourceManager.activeSource {
+        case .wallpaperEngine: await loadMoreWorkshop()
+        case .dongtai:         await loadMoreDongTai()
+        default:               await loadMore()
+        }
+    }
+
+    /// 搜索当前源。新增数据源只需在 `switch` 中添加分支。
+    func searchFeed(query: String) async {
+        switch workshopSourceManager.activeSource {
+        case .wallpaperEngine: await searchWorkshop(query: query)
+        case .dongtai:         await searchDongTai(query: query)
+        default:               await search(query: query)
+        }
+    }
+
     // MARK: - Workshop 数据加载
 
     /// 检查当前是否使用 Workshop 数据源
@@ -1508,7 +1557,6 @@ final class MediaExploreViewModel: ObservableObject {
             let existingIDs = Set(items.map(\.id))
             let newItems = mediaItems.filter { !existingIDs.contains($0.id) }
             items.append(contentsOf: newItems)
-            enforceExploreItemLimit()
 
             workshopHasMore = response.hasMore
             hasMorePages = response.hasMore
@@ -1757,7 +1805,6 @@ final class MediaExploreViewModel: ObservableObject {
         let existingIDs = Set(items.map(\.id))
         let newItems = result.items.filter { !existingIDs.contains($0.id) }
         items.append(contentsOf: newItems)
-        enforceExploreItemLimit()
 
         dongtaiHasMore = result.hasMore
         hasMorePages = result.hasMore
