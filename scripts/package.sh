@@ -208,12 +208,31 @@ sign_exported_app() {
     echo "签名身份: $identity"
   fi
 
+  strip_unsupported_slices() {
+    local root="$1"
+    if [[ ! -d "$root" ]] || ! command -v lipo >/dev/null 2>&1; then
+      return 0
+    fi
+    while IFS= read -r slice_path; do
+      if file "$slice_path" | grep -q "Mach-O" && lipo -info "$slice_path" 2>/dev/null | grep -q "i386"; then
+        local mode
+        mode="$(stat -f "%Lp" "$slice_path" 2>/dev/null || echo "")"
+        echo "  移除 i386 slice: ${slice_path#"$app_path/Contents/Resources/"}"
+        lipo "$slice_path" -remove i386 -output "$slice_path.tmp"
+        mv "$slice_path.tmp" "$slice_path"
+        if [[ -n "$mode" ]]; then
+          chmod "$mode" "$slice_path" 2>/dev/null || true
+        fi
+      fi
+    done < <(find "$root" -type f -print 2>/dev/null)
+  }
+
   sign_nested_code() {
     local code_path="$1"
     local extension_entitlements="$PROJECT_DIR/WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
     case "$code_path" in
-      "$app_path"/Contents/Resources/Resources/steamcmd/*|"$app_path"/Contents/Resources/steamcmd/*)
-        echo "  跳过 Steam 供应商签名运行时: ${code_path#"$app_path/Contents/Resources/"}"
+      "$app_path"/Contents/Resources/Resources/steamcmd/steamclient.dylib|"$app_path"/Contents/Resources/steamcmd/steamclient.dylib)
+        echo "  跳过 Valve 签名 steamclient.dylib: ${code_path#"$app_path/Contents/Resources/"}"
         return 0
         ;;
     esac
@@ -231,6 +250,9 @@ sign_exported_app() {
     fi
   }
 
+  strip_unsupported_slices "$app_path/Contents/Resources/Resources/steamcmd"
+  strip_unsupported_slices "$app_path/Contents/Resources/steamcmd"
+
   while IFS= read -r code_path; do
     sign_nested_code "$code_path"
   done < <(
@@ -240,6 +262,13 @@ sign_exported_app() {
             echo "$candidate"
           fi
         done
+  )
+
+  while IFS= read -r bundle_path; do
+    sign_nested_code "$bundle_path"
+  done < <(
+    find "$app_path/Contents/Resources" -type d \( -name "*.app" -o -name "*.framework" \) -print 2>/dev/null \
+      | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-
   )
 
   if [[ -d "$app_path/Contents/Frameworks" ]]; then

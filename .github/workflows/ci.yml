@@ -123,11 +123,30 @@ jobs:
 
                   # 先签名 app 内部代码，最后再签 App 本体，避免 --deep 覆盖 renderer 的 JIT entitlement。
                   echo "Signing embedded binaries..."
+                  strip_unsupported_slices() {
+                    local root="$1"
+                    if [[ ! -d "$root" ]] || ! command -v lipo >/dev/null 2>&1; then
+                      return 0
+                    fi
+                    find "$root" -type f | while read -r f; do
+                      if file "$f" | grep -q "Mach-O" && lipo -info "$f" 2>/dev/null | grep -q "i386"; then
+                        local mode
+                        mode="$(stat -f "%Lp" "$f" 2>/dev/null || echo "")"
+                        echo "  Removing i386 slice: ${f#build/WaifuX.app/Contents/Resources/}"
+                        lipo "$f" -remove i386 -output "$f.tmp"
+                        mv "$f.tmp" "$f"
+                        if [[ -n "$mode" ]]; then
+                          chmod "$mode" "$f" 2>/dev/null || true
+                        fi
+                      fi
+                    done
+                  }
+
                   should_skip_embedded_code() {
                     local f="$1"
                     case "$f" in
-                      */Contents/Resources/Resources/steamcmd/*|*/Contents/Resources/steamcmd/*)
-                        echo "  Skipping vendor-signed Steam runtime: ${f#build/WaifuX.app/Contents/Resources/}"
+                      */Contents/Resources/Resources/steamcmd/steamclient.dylib|*/Contents/Resources/steamcmd/steamclient.dylib)
+                        echo "  Skipping Valve-signed steamclient.dylib: ${f#build/WaifuX.app/Contents/Resources/}"
                         return 0
                         ;;
                     esac
@@ -157,11 +176,19 @@ jobs:
                     fi
                   }
 
+                  strip_unsupported_slices build/WaifuX.app/Contents/Resources/Resources/steamcmd
+                  strip_unsupported_slices build/WaifuX.app/Contents/Resources/steamcmd
+
                   find build/WaifuX.app/Contents/Resources -type f | while read -r f; do
                     if file "$f" | grep -qE "Mach-O|ELF"; then
                       sign_embedded_code "$f"
                     fi
                   done
+                  find build/WaifuX.app/Contents/Resources -type d \( -name "*.app" -o -name "*.framework" \) -print 2>/dev/null \
+                    | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2- \
+                    | while read -r f; do
+                      sign_embedded_code "$f"
+                    done
                   if [[ -d build/WaifuX.app/Contents/Frameworks ]]; then
                     find build/WaifuX.app/Contents/Frameworks -maxdepth 1 -type d -name "*.framework" | while read -r f; do
                       sign_embedded_code "$f"
