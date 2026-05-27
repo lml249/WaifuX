@@ -145,6 +145,14 @@ jobs:
                     done
                   fi
 
+                  # 签名 PlugIns 中的 app extension
+                  if [[ -d build/WaifuX.app/Contents/PlugIns ]]; then
+                    find build/WaifuX.app/Contents/PlugIns -name "*.appex" | while read -r f; do
+                      echo "  Signing extension: $(basename $f)"
+                      sign_embedded_code "$f"
+                    done
+                  fi
+
                   # 最后签名整个 app bundle
                   echo "Signing app bundle..."
                   codesign --force --options=runtime --timestamp \

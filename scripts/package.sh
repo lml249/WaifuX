@@ -239,6 +239,13 @@ sign_exported_app() {
     done < <(find "$app_path/Contents/Frameworks" -maxdepth 1 -type d -name "*.framework" -print 2>/dev/null)
   fi
 
+  # 签名 PlugIns 中的 app extension
+  if [[ -d "$app_path/Contents/PlugIns" ]]; then
+    while IFS= read -r plugin_path; do
+      sign_nested_code "$plugin_path"
+    done < <(find "$app_path/Contents/PlugIns" -name "*.appex" -print 2>/dev/null)
+  fi
+
   if [[ -f "$entitlements" ]]; then
     codesign --force --timestamp=none --options runtime --entitlements "$entitlements" -s "$identity" "$app_path" 2>/dev/null || \
       codesign --force --options runtime --entitlements "$entitlements" -s "$identity" "$app_path" 2>/dev/null || true
