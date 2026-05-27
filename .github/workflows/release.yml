@@ -95,6 +95,11 @@ jobs:
             SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
             if [[ "$(basename "$f")" == "wallpaper-wgpu" && -f "WallpaperRenderer.entitlements" ]]; then
               SIGN_ARGS+=(--entitlements "WallpaperRenderer.entitlements")
+            elif [[ "$f" == *.appex ]]; then
+              local ext_entitlements="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
+              if [[ -f "$ext_entitlements" ]]; then
+                SIGN_ARGS+=(--entitlements "$ext_entitlements")
+              fi
             fi
             codesign "${SIGN_ARGS[@]}" "$f"
           }
@@ -198,6 +203,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload Release Asset
+        # workflow_dispatch 仅用于测试构建/签名，不发布 release
+        if: github.event_name != 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           files: build/WaifuX.dmg
@@ -215,3 +222,12 @@ jobs:
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # workflow_dispatch 测试构建时，上传 DMG 到 Actions Artifacts（不会发布给用户）
+      - name: Upload DMG as Artifact (test build)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: WaifuX-test-${{ github.sha }}
+          path: build/WaifuX.dmg
+          retention-days: 3

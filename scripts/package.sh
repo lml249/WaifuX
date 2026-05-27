@@ -210,9 +210,14 @@ sign_exported_app() {
 
   sign_nested_code() {
     local code_path="$1"
+    local extension_entitlements="$PROJECT_DIR/WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
     if [[ "$(basename "$code_path")" == "wallpaper-wgpu" && -f "$renderer_entitlements" ]]; then
       codesign --force --timestamp=none --options runtime --entitlements "$renderer_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force --options runtime --entitlements "$renderer_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
+        codesign --force -s "$identity" "$code_path" 2>/dev/null || true
+    elif [[ "$code_path" == *.appex && -f "$extension_entitlements" ]]; then
+      codesign --force --timestamp=none --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
+        codesign --force --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force -s "$identity" "$code_path" 2>/dev/null || true
     else
       codesign --force --timestamp=none --options runtime -s "$identity" "$code_path" 2>/dev/null || \

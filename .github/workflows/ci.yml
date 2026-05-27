@@ -3,6 +3,8 @@ name: CI
 # 本仓库（WaifuX main 线）默认集成分支为 main。
 # 若另有 fork/仓库以 feature/wallpaper-engine 为默认分支，应在那个仓库里单独维护 workflow，勿与这里混用。
 on:
+    # 手动触发：GitHub Actions → CI → Run workflow，选分支即可测试，无需改 VERSION
+    workflow_dispatch:
     # 每次推 main 都跑 CI（纯文档/Markdown 变更不触发，见 paths-ignore）；发版逻辑见下方 if
     push:
         branches: [main]
