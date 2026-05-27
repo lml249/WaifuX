@@ -16,7 +16,7 @@ class WallpaperSchedulerService: ObservableObject {
     /// Tracks already-used item IDs per screen in the current random round to avoid duplicates within a full cycle.
     private var usedItemIDs: [String: Set<String>] = [:]
 
-    private var timer: Timer?
+    private var dispatchTimer: DispatchSourceTimer?
     private var pendingCleanupWorkItem: DispatchWorkItem?
     private let userDefaultsKey = "wallpaper_scheduler_config"
     private let usedItemIDsKey = "wallpaper_scheduler_used_item_ids_v1"
@@ -127,8 +127,8 @@ class WallpaperSchedulerService: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.isScreenLocked = true
-            self.timer?.invalidate()
-            self.timer = nil
+            self.dispatchTimer?.cancel()
+            self.dispatchTimer = nil
             print("\(self.logTag) Screen locked, pausing scheduler")
         }
     }
@@ -351,8 +351,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        dispatchTimer?.cancel()
+        dispatchTimer = nil
         isRunning = false
         saveConfig()
         // 停止时保留持久化状态，以便重新启用时继续上轮随机进度
@@ -540,7 +540,8 @@ class WallpaperSchedulerService: ObservableObject {
     }
 
     private func scheduleNextChange() {
-        timer?.invalidate()
+        dispatchTimer?.cancel()
+        dispatchTimer = nil
 
         let interval = effectiveCheckInterval()
         // interval 为 0 表示所有启用的显示器都使用"播完即换"模式，不需要定时器
@@ -549,11 +550,13 @@ class WallpaperSchedulerService: ObservableObject {
             return
         }
 
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.changeWallpaperIfNeeded()
-            }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            self?.changeWallpaperIfNeeded()
         }
+        timer.activate()
+        dispatchTimer = timer
     }
 
     private func changeWallpaperIfNeeded() {

@@ -11,6 +11,7 @@ schemes:
     build:
       targets:
         WaifuX: all
+        WaifuXWallpaperExtension: all
     run:
       config: Debug
     archive:
@@ -30,6 +31,7 @@ packages:
 settings:
   base:
     CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: H6W325NJX2
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: YES
 
@@ -46,6 +48,7 @@ targets:
       - path: Utilities
       - path: Components
       - path: DesignSystem
+      - path: Metal
       - path: Assets.xcassets
       # 含 wallpaper-wgpu（新 Metal 渲染器）、wallpaperengine-cli（旧离线烘焙 renderer）、dxc、dylib 等；assets/ 用于构建时内嵌
       - path: Resources
@@ -67,11 +70,12 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.109
+        MARKETING_VERSION: 38.0.110
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: H6W325NJX2
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_FILE: App/Info.plist
@@ -83,6 +87,8 @@ targets:
       - package: SwiftSoup
       - package: Kanna
       - package: Kingfisher
+      - target: WaifuXWallpaperExtension
+        embed: true
     preBuildScripts:
       - name: Embed Assets
         basedOnDependencyAnalysis: false
@@ -284,3 +290,27 @@ targets:
       path: WaifuX.entitlements
       properties:
         com.apple.security.network.client: true
+        com.apple.security.application-groups:
+          - group.com.waifux.app
+
+  WaifuXWallpaperExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: WaifuXWallpaperExtension
+    settings:
+      base:
+        PRODUCT_NAME: WaifuXWallpaperExtension
+        PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.wallpaperextension
+        MARKETING_VERSION: 38.0.110
+        CURRENT_PROJECT_VERSION: 38
+        SWIFT_VERSION: "6.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: H6W325NJX2
+        ENABLE_HARDENED_RUNTIME: YES
+        INFOPLIST_FILE: WaifuXWallpaperExtension/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: WaifuXWallpaperExtension/WallpaperExtension-Bridging-Header.h
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks
+    entitlements:
+      path: WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements

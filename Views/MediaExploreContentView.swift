@@ -72,6 +72,9 @@ struct MediaExploreContentView: View {
     @State private var isResolvingWorkshopURL = false
     @State private var workshopURLError: String?
 
+    // Wallsflow 筛选
+    @State private var selectedWallsflowCategorySlug: String = "live-wallpapers"
+
     // Dynamic Wallpaper (DongTai) 筛选
     @State private var selectedDongTaiCategories: Set<DynamicWallpaperCategory> = []
     @State private var selectedDongTaiListType: DynamicWallpaperListType = .all
@@ -106,9 +109,9 @@ struct MediaExploreContentView: View {
                 ZStack {
                     contentArea(
                         gridContentWidth: gridContentWidth,
+                        fullWidth: geometry.size.width,
                         viewportHeight: geometry.size.height
                     )
-                        .padding(.horizontal, 28)
                         .frame(width: geometry.size.width, alignment: .leading)
                         .frame(maxHeight: .infinity, alignment: .top)
                         .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -181,7 +184,7 @@ struct MediaExploreContentView: View {
     }
 
     @ViewBuilder
-    private func contentArea(gridContentWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+    private func contentArea(gridContentWidth: CGFloat, fullWidth: CGFloat, viewportHeight: CGFloat) -> some View {
         if viewModel.items.isEmpty {
             legacyScrollContent(gridContentWidth: gridContentWidth) {
                 Group {
@@ -195,9 +198,9 @@ struct MediaExploreContentView: View {
             }
         } else {
             if #available(macOS 15.0, *) {
-                scrollViewModern(gridContentWidth: gridContentWidth)
+                scrollViewModern(gridContentWidth: gridContentWidth, fullWidth: fullWidth)
             } else {
-                scrollViewLegacy(gridContentWidth: gridContentWidth, viewportHeight: viewportHeight)
+                scrollViewLegacy(gridContentWidth: gridContentWidth, fullWidth: fullWidth, viewportHeight: viewportHeight)
             }
         }
     }
@@ -205,7 +208,7 @@ struct MediaExploreContentView: View {
     // MARK: - macOS 15+：使用 onScrollGeometryChange
 
     @available(macOS 15.0, *)
-    private func scrollViewModern(gridContentWidth: CGFloat) -> some View {
+    private func scrollViewModern(gridContentWidth: CGFloat, fullWidth: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -215,6 +218,8 @@ struct MediaExploreContentView: View {
                     headerStack
                     mediaGrid(contentWidth: gridContentWidth)
                 }
+                .padding(.horizontal, 28)
+                .frame(width: fullWidth, alignment: .leading)
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             }
             .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
@@ -240,7 +245,7 @@ struct MediaExploreContentView: View {
 
     // MARK: - macOS 14：使用 PreferenceKey
 
-    private func scrollViewLegacy(gridContentWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+    private func scrollViewLegacy(gridContentWidth: CGFloat, fullWidth: CGFloat, viewportHeight: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -251,6 +256,8 @@ struct MediaExploreContentView: View {
                     mediaGrid(contentWidth: gridContentWidth)
                     loadMoreSentinel
                 }
+                .padding(.horizontal, 28)
+                .frame(width: fullWidth, alignment: .leading)
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             }
             .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
@@ -277,6 +284,7 @@ struct MediaExploreContentView: View {
                 headerStack
                 body()
             }
+            .padding(.horizontal, 28)
             .padding(.bottom, 48)
         }
         .scrollDisabled(!isVisible)
@@ -499,6 +507,8 @@ struct MediaExploreContentView: View {
             workshopTypeSection
         case .dongtai:
             dongtaiCategorySection
+        case .wallsflow:
+            wallsflowCategorySection
         default:
             FlowLayout(spacing: 12) {
                 ForEach(MediaCategory.allCases) { category in
@@ -743,6 +753,98 @@ struct MediaExploreContentView: View {
             selectedWorkshopResolution = nil
         }
         Task { await applyWorkshopFilters() }
+    }
+
+    // MARK: - Wallsflow 分类
+
+    private var wallsflowCategorySection: some View {
+        FlowLayout(spacing: 12) {
+            // "全部"选项
+            CategoryChip(
+                icon: "square.grid.2x2",
+                title: t("filter.all"),
+                accentColors: ["9B5DE5", "F15BB5"],
+                isSelected: selectedWallsflowCategorySlug == "live-wallpapers"
+            ) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    selectedWallsflowCategorySlug = "live-wallpapers"
+                    Task { await applyWallsflowCategory(slug: "live-wallpapers") }
+                }
+            }
+            // Wallsflow 分类（排除 "live-wallpapers" 顶层分类，只显示子分类）
+            ForEach(WallsflowCategory.allCategories.filter { $0.slug != "live-wallpapers" }, id: \.slug) { category in
+                CategoryChip(
+                    icon: wallsflowCategoryIcon(for: category.slug),
+                    title: wallsflowCategoryDisplayName(for: category.slug),
+                    accentColors: wallsflowCategoryColors(for: category.slug),
+                    isSelected: selectedWallsflowCategorySlug == category.slug
+                ) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        selectedWallsflowCategorySlug = category.slug
+                        Task { await applyWallsflowCategory(slug: category.slug) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func wallsflowCategoryDisplayName(for slug: String) -> String {
+        let key = "wallsflow.category.\(slug)"
+        let localized = t(key)
+        // 如果本地化键不存在，t() 返回 key 本身，此时回退到英文名
+        if localized == key {
+            // fallback: 从 WallsflowCategory 取英文名并去掉 " Live Wallpapers" 后缀
+            if let category = WallsflowCategory.allCategories.first(where: { $0.slug == slug }) {
+                return category.name.replacingOccurrences(of: " Live Wallpapers", with: "")
+            }
+            return slug
+        }
+        return localized
+    }
+
+    private func wallsflowCategoryIcon(for slug: String) -> String {
+        switch slug {
+        case "anime": return "sparkles"
+        case "games": return "gamecontroller.fill"
+        case "cars": return "car.fill"
+        case "nature": return "leaf.fill"
+        case "space": return "moon.fill"
+        case "animals": return "pawprint.fill"
+        case "winter": return "snowflake"
+        case "minimalist": return "circle.fill"
+        case "pixel-art": return "square.grid.2x2"
+        case "movies": return "film.fill"
+        case "people": return "person.fill"
+        case "graphics": return "paintpalette.fill"
+        default: return "photo.fill"
+        }
+    }
+
+    private func wallsflowCategoryColors(for slug: String) -> [String] {
+        switch slug {
+        case "anime": return ["FF5E98", "FF9A5B"]
+        case "games": return ["FFBE0B", "FB5607"]
+        case "cars": return ["E71D36", "FF9F1C"]
+        case "nature": return ["00F5D4", "01BE96"]
+        case "space": return ["3A86FF", "00BBF9"]
+        case "animals": return ["A8E6CF", "1A936F"]
+        case "winter": return ["A8DADC", "457B9D"]
+        case "minimalist": return ["D4A373", "BC6C25"]
+        case "pixel-art": return ["FF006E", "8338EC"]
+        case "movies": return ["E71D36", "FF9F1C"]
+        case "people": return ["FF5E98", "FF9A5B"]
+        case "graphics": return ["9B5DE5", "F15BB5"]
+        default: return ["9B5DE5", "F15BB5"]
+        }
+    }
+
+    /// 应用 Wallsflow 分类筛选
+    private func applyWallsflowCategory(slug: String) async {
+        prepareForFeedReplacement()
+        viewModel.isLoading = false
+        viewModel.clearItems()
+        await viewModel.loadWallsflowCategory(slug: slug)
+        syncAtmosphereIfNeeded()
     }
 
     // MARK: - DongTai 分类
@@ -1178,6 +1280,8 @@ struct MediaExploreContentView: View {
                 await viewModel.loadWorkshopFeed()
             case .dongtai:
                 await viewModel.loadDongTaiFeed()
+            case .wallsflow:
+                await viewModel.loadWallsflowFeed()
             default:
                 if category == .all {
                     await viewModel.loadHomeFeed()
@@ -1192,7 +1296,7 @@ struct MediaExploreContentView: View {
         let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // BG 源：中文翻译处理（仅在无外部 query 时触发）
-        let isMotionBG = workshopSourceManager.activeSource != .wallpaperEngine && workshopSourceManager.activeSource != .dongtai
+        let isMotionBG = workshopSourceManager.activeSource != .wallpaperEngine && workshopSourceManager.activeSource != .dongtai && workshopSourceManager.activeSource != .wallsflow
         if query == nil && isMotionBG && !trimmed.isEmpty {
             let chineseDetected = translationBridge.isChinese(trimmed)
             let needsTranslation = chineseDetected
@@ -1238,6 +1342,8 @@ struct MediaExploreContentView: View {
                 await applyWorkshopFilters(query: query)
             case .dongtai:
                 await viewModel.searchDongTai(query: query)
+            case .wallsflow:
+                await viewModel.searchWallsflow(query: query)
             default:
                 await viewModel.search(query: query)
             }
@@ -1246,7 +1352,8 @@ struct MediaExploreContentView: View {
 
     private func handleTranslationCompleted() {
         guard workshopSourceManager.activeSource != .wallpaperEngine,
-              workshopSourceManager.activeSource != .dongtai else { return }
+              workshopSourceManager.activeSource != .dongtai,
+              workshopSourceManager.activeSource != .wallsflow else { return }
         guard let pending = pendingSearchText else { return }
         pendingSearchText = nil
         let query = translationBridge.effectiveQuery(for: pending)
@@ -1257,8 +1364,8 @@ struct MediaExploreContentView: View {
     private func handleFilterChange() {
         guard !isApplyingProgrammaticReset else { return }
 
-        // Workshop/DongTai 模式下不支持标签过滤
-        if workshopSourceManager.activeSource == .wallpaperEngine || workshopSourceManager.activeSource == .dongtai {
+        // Workshop/DongTai/Wallsflow 模式下不支持标签过滤
+        if workshopSourceManager.activeSource == .wallpaperEngine || workshopSourceManager.activeSource == .dongtai || workshopSourceManager.activeSource == .wallsflow {
             syncAtmosphereIfNeeded()
             return
         }
@@ -1412,6 +1519,7 @@ struct MediaExploreContentView: View {
         selectedDongTaiSort = .popular
         dongtaiFilterAudio = nil
         dongtaiFilterFourK = nil
+        selectedWallsflowCategorySlug = "live-wallpapers"
         selectedCategory = .all
         selectedSort = .newest
         lastSyncedFirstItemID = nil

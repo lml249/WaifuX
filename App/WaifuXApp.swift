@@ -314,6 +314,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.async {
                 DownloadPathManager.shared.migrateLegacyCustomFolderPreferenceIfNeeded()
                 WorkshopSourceManager.shared.refreshStoredSteamCredentials()
+                WorkshopSourceManager.shared.loadSteamProfileID()
                 WallpaperLibraryService.shared.restoreSavedData()
                 LibraryFolderStore.shared.restoreSavedData()
 
@@ -351,6 +352,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
                             // 初始化静态壁纸颗粒蒙层（独立于壁纸设置，开关实时生效）
                             StaticWallpaperGrainManager.shared.updateOverlay()
+
+                            // 初始化液态玻璃时钟 Overlay（桌面壁纸时钟，Metal 渲染）
+                            // 配置持久化由 LiquidGlassClockSettings 自动管理
+                            LiquidGlassClockOverlayManager.shared.refreshAll()
 
                             // 第6帧：其他状态
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

@@ -261,6 +261,11 @@ final class WallpaperEngineXBridge: ObservableObject {
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         }
 
+        // macOS 26+：清除旧锁屏视频（wallpaper-wgpu 渲染的壁纸不支持动态锁屏）
+        if #available(macOS 26.0, *) {
+            LockScreenWallpaperService.shared.clearLockScreenVideo()
+        }
+
         // 2. 终止旧进程
         await stopRenderProcessBeforeLaunch()
         // 如果上一张是 web 壁纸，旧 CLI 的 daemon 仍在跑；切到 scene/新 web 之前必须先停掉，

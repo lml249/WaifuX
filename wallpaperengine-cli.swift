@@ -508,6 +508,36 @@ private final class RendererBridge {
         return CGImageDestinationFinalize(destination)
     }
 
+    // MARK: - Built-in Baking API (delegates to dylib)
+
+    func startBake(outputPath: String, duration: Int32, fps: Int32, bitRate: Int32, width: Int32, height: Int32) -> Bool {
+        rendererLock.lock()
+        defer { rendererLock.unlock() }
+        guard let h = handle else { return false }
+        return lw_renderer_start_bake(h, outputPath, duration, fps, bitRate, width, height, nil, nil) != 0
+    }
+
+    var isBaking: Bool {
+        rendererLock.lock()
+        defer { rendererLock.unlock() }
+        guard let h = handle else { return false }
+        return lw_renderer_is_baking(h) != 0
+    }
+
+    var bakeProgress: Float {
+        rendererLock.lock()
+        defer { rendererLock.unlock() }
+        guard let h = handle else { return 0 }
+        return lw_renderer_get_bake_progress(h)
+    }
+
+    func cancelBake() {
+        rendererLock.lock()
+        defer { rendererLock.unlock() }
+        guard let h = handle else { return }
+        lw_renderer_cancel_bake(h)
+    }
+
     /// 获取动态文本 JSON（dlsym 弱引用，渲染器未实现时返回 nil）
     func getDynamicTextsJson() -> String? {
         rendererLock.lock()
@@ -2589,106 +2619,107 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
         RendererBridge.shared.hideWindow()
     }
 
-    let rw = sceneBakeOnMain { RendererBridge.shared.renderWidth }
-    let rh = sceneBakeOnMain { RendererBridge.shared.renderHeight }
-    guard rw > 0, rh > 0 else {
+    // 使用 dylib 内置烘焙引擎，它使用固定时间步长管理 g_Time，
+    // 不会受线程调度开销影响，动画速度精确匹配 video 帧率。
+    let started = sceneBakeOnMain {
+        RendererBridge.shared.startBake(
+            outputPath: cfg.outputURL.path,
+            duration: Int32(cfg.durationSeconds),
+            fps: cfg.fps,
+            bitRate: 0,    // auto
+            width: 0,       // use scene width
+            height: 0       // use scene height
+        )
+    }
+
+    guard started else {
         sceneBakeOnMain { RendererBridge.shared.destroy() }
         throw SceneOfflineBakeError.loadFailed
     }
 
-    for _ in 0 ..< 120 {
-        let ok: Bool = autoreleasepool {
-            sceneBakeOnMain { RendererBridge.shared.tickOnce() }
+    // 轮询烘焙状态，每帧调用 tick()
+    // 注意：dylib 内置烘焙使用固定时间步长，tick() 的调用时机不影响动画速度
+    while true {
+        var done = false
+        sceneBakeOnMain {
+            let ok = RendererBridge.shared.tickOnce()
+            if !ok || !RendererBridge.shared.isBaking {
+                done = true
+            }
         }
-        if !ok {
-            sceneBakeOnMain { RendererBridge.shared.destroy() }
-            throw SceneOfflineBakeError.loadFailed
-        }
+        if done { break }
+        usleep(1000) // 1ms polling interval
     }
 
-    let frameCount = max(1, Int(Double(cfg.fps) * cfg.durationSeconds))
-    let outSettings: [String: Any] = [
-        AVVideoCodecKey: AVVideoCodecType.h264,
-        AVVideoWidthKey: rw,
-        AVVideoHeightKey: rh,
-        AVVideoCompressionPropertiesKey: [
-            AVVideoAverageBitRateKey: rw * rh * 3,
-            AVVideoExpectedSourceFrameRateKey: cfg.fps,
-            AVVideoMaxKeyFrameIntervalKey: Int(cfg.fps) * 2
-        ] as [String: Any]
-    ]
-    let writer = try AVAssetWriter(outputURL: cfg.outputURL, fileType: .mp4)
-    let input = AVAssetWriterInput(mediaType: .video, outputSettings: outSettings)
-    input.expectsMediaDataInRealTime = false
-    let sourceAttrs: [String: Any] = [
-        kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-        kCVPixelBufferWidthKey as String: rw,
-        kCVPixelBufferHeightKey as String: rh
-    ]
-    let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: sourceAttrs)
-    guard writer.canAdd(input) else {
-        sceneBakeOnMain { RendererBridge.shared.destroy() }
-        throw SceneOfflineBakeError.writerFailed("cannot add video input")
-    }
-    writer.add(input)
-    guard writer.startWriting() else {
-        sceneBakeOnMain { RendererBridge.shared.destroy() }
-        throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "startWriting failed")
-    }
-    writer.startSession(atSourceTime: .zero)
-
-    for i in 0 ..< frameCount {
-        try autoreleasepool {
-            if !sceneBakeOnMain({ RendererBridge.shared.tickOnce() }) {
-                input.markAsFinished()
-                writer.cancelWriting()
-                sceneBakeOnMain { RendererBridge.shared.destroy() }
-                throw SceneOfflineBakeError.captureFailed
-            }
-            guard let cg = sceneBakeOnMain({ RendererBridge.shared.captureFrame() }) else {
-                input.markAsFinished()
-                writer.cancelWriting()
-                sceneBakeOnMain { RendererBridge.shared.destroy() }
-                throw SceneOfflineBakeError.captureFailed
-            }
-            let pb = try sceneBakePixelBuffer(from: cg)
-            let pts = CMTime(value: Int64(i), timescale: cfg.fps)
-            var wait = 0
-            while !input.isReadyForMoreMediaData, wait < 6000 {
-                usleep(500)
-                wait += 1
-            }
-            guard input.isReadyForMoreMediaData else {
-                input.markAsFinished()
-                writer.cancelWriting()
-                sceneBakeOnMain { RendererBridge.shared.destroy() }
-                throw SceneOfflineBakeError.writerFailed("writer not ready")
-            }
-            if !adaptor.append(pb, withPresentationTime: pts) {
-                input.markAsFinished()
-                writer.cancelWriting()
-                sceneBakeOnMain { RendererBridge.shared.destroy() }
-                throw SceneOfflineBakeError.writerFailed(writer.error?.localizedDescription ?? "append failed")
-            }
-        }
+    // ── 从 dylib 获取动态文本 JSON ────────────────────────────
+    // 在 destroy 之前调用，因为需要有效的 renderer handle。
+    let dynamicTextsJSON: String? = sceneBakeOnMain {
+        RendererBridge.shared.getDynamicTextsJson()
     }
 
-    input.markAsFinished()
-    let sem = DispatchSemaphore(value: 0)
-    var finishErr: Error?
-    writer.finishWriting {
-        if writer.status == .failed {
-            finishErr = writer.error
-        }
-        sem.signal()
-    }
-    sem.wait()
     sceneBakeOnMain { RendererBridge.shared.destroy() }
-    if let finishErr {
-        throw SceneOfflineBakeError.writerFailed(finishErr.localizedDescription)
+
+    guard FileManager.default.fileExists(atPath: cfg.outputURL.path) else {
+        throw SceneOfflineBakeError.writerFailed("bake produced no output file")
     }
-    guard writer.status == .completed else {
-        throw SceneOfflineBakeError.writerFailed("writer status \(writer.status.rawValue)")
+
+    // ── 后处理：裁掉开头 2 秒黑屏段 ─────────────────────────────
+    // dylib 内置烘焙引擎吐出的视频，前 2 秒固定为黑屏（GL 初始化 + warmup）。
+    // 直接裁掉，无需亮度检测。
+    sceneBakeTrimPrefix(url: cfg.outputURL, trimSeconds: 2.0)
+
+    // ── 保存 sidecar JSON ─────────────────────────────────────
+    if let jsonString = dynamicTextsJSON, !jsonString.isEmpty {
+        let sidecarURL = cfg.outputURL.deletingPathExtension().appendingPathExtension("json")
+        do {
+            try jsonString.write(to: sidecarURL, atomically: true, encoding: .utf8)
+            dlog("[bake] ✅ saved dynamic texts sidecar: \(sidecarURL.path)")
+        } catch {
+            dlog("[bake] ⚠️ failed to write sidecar JSON: \(error)")
+        }
+    } else {
+        dlog("[bake] no dynamic texts JSON from renderer (renderer may not support it or scene has no dynamic texts)")
+    }
+}
+
+/// 固定裁掉视频开头若干秒。
+private func sceneBakeTrimPrefix(url: URL, trimSeconds: Double) {
+    let asset = AVAsset(url: url)
+    let duration = asset.duration
+    let totalSec = CMTimeGetSeconds(duration)
+    guard totalSec > trimSeconds + 0.5 else {
+        dlog("[scene-bake-trim] video too short (\(String(format: "%.1f", totalSec))s), skip trim")
+        return
+    }
+
+    let trimStart = CMTimeMakeWithSeconds(trimSeconds, preferredTimescale: 600)
+    let tmpURL = url.deletingLastPathComponent()
+        .appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_trimmed.mp4")
+
+    guard let exporter = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+        dlog("[scene-bake-trim] failed to create export session")
+        return
+    }
+    exporter.outputURL = tmpURL
+    exporter.outputFileType = .mp4
+    exporter.timeRange = CMTimeRange(start: trimStart, end: duration)
+
+    let sem = DispatchSemaphore(value: 0)
+    exporter.exportAsynchronously { sem.signal() }
+    sem.wait()
+
+    guard exporter.status == .completed else {
+        dlog("[scene-bake-trim] export failed: \(exporter.error?.localizedDescription ?? "unknown")")
+        try? FileManager.default.removeItem(at: tmpURL)
+        return
+    }
+
+    try? FileManager.default.removeItem(at: url)
+    do {
+        try FileManager.default.moveItem(at: tmpURL, to: url)
+        dlog("[scene-bake-trim] ✅ trimmed \(String(format: "%.1f", trimSeconds))s black prefix")
+    } catch {
+        dlog("[scene-bake-trim] replace failed: \(error)")
     }
 }
 

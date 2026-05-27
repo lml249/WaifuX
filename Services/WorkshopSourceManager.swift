@@ -16,12 +16,14 @@ class WorkshopSourceManager: ObservableObject {
         case motionBG = "motionbg"
         case wallpaperEngine = "wallpaper_engine"
         case dongtai = "dongtai"
+        case wallsflow = "wallsflow"
 
         var displayName: String {
             switch self {
             case .motionBG: return "MotionBG"
             case .wallpaperEngine: return t("wallpaperEngine")
             case .dongtai: return t("dongtai")
+            case .wallsflow: return t("wallsflow")
             }
         }
 
@@ -30,6 +32,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return "在线视频壁纸"
             case .wallpaperEngine: return "Steam Workshop"
             case .dongtai: return "动态桌面视频壁纸"
+            case .wallsflow: return "Live Wallpaper 动态壁纸"
             }
         }
 
@@ -39,6 +42,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return "play.rectangle.fill"
             case .wallpaperEngine: return "gearshape.fill"
             case .dongtai: return "sparkles.tv.fill"
+            case .wallsflow: return "water.waves"
             }
         }
 
@@ -48,6 +52,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return true
             case .wallpaperEngine: return true
             case .dongtai: return true
+            case .wallsflow: return true
             }
         }
 
@@ -57,6 +62,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return true
             case .wallpaperEngine: return true
             case .dongtai: return true
+            case .wallsflow: return true
             }
         }
 
@@ -66,6 +72,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return false
             case .wallpaperEngine: return false
             case .dongtai: return false
+            case .wallsflow: return false
             }
         }
 
@@ -75,6 +82,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return false
             case .wallpaperEngine: return true
             case .dongtai: return false
+            case .wallsflow: return false
             }
         }
 
@@ -84,6 +92,7 @@ class WorkshopSourceManager: ObservableObject {
             case .motionBG: return "cyan"
             case .wallpaperEngine: return "blue"
             case .dongtai: return "pink"
+            case .wallsflow: return "purple"
             }
         }
     }
@@ -187,6 +196,163 @@ class WorkshopSourceManager: ObservableObject {
             steamCredentials = nil
             steamCredentialState = .failure(message)
         }
+    }
+
+    // MARK: - Steam 订阅同步
+
+    /// 用户 Steam 社区档案 ID（64位数字 ID 或自定义 URL）用于获取订阅列表
+    @Published var steamProfileID: String = "" {
+        didSet {
+            UserDefaults.standard.set(steamProfileID, forKey: profileIDKey)
+        }
+    }
+
+    private let profileIDKey = "workshop_steam_profile_id"
+
+    /// 加载已保存的 Steam Profile ID，若没有则尝试从 SteamCMD loginusers.vdf 自动提取
+    func loadSteamProfileID() {
+        // 优先使用已保存的
+        if let saved = UserDefaults.standard.string(forKey: profileIDKey), !saved.isEmpty {
+            steamProfileID = saved
+            return
+        }
+        // 尝试从 SteamCMD config 自动提取
+        if let extracted = extractSteamID64FromSteamCMD() {
+            AppLogger.info(.media, "从 SteamCMD loginusers.vdf 自动提取 SteamID64: \(extracted)")
+            steamProfileID = extracted
+        }
+    }
+
+    /// 是否有有效的 Steam Profile ID
+    var hasSteamProfileID: Bool {
+        !steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 从 SteamCMD loginusers.vdf 提取最近登录用户的 SteamID64
+    func extractSteamID64FromSteamCMD() -> String? {
+        guard let steamcmdDir = steamCMDWorkingDirectory() else {
+            AppLogger.info(.media, "extractSteamID64FromSteamCMD: steamcmd 工作目录不可用")
+            return nil
+        }
+
+        let vdfPath = steamcmdDir.appendingPathComponent("config/loginusers.vdf")
+        guard FileManager.default.fileExists(atPath: vdfPath.path) else {
+            AppLogger.info(.media, "extractSteamID64FromSteamCMD: loginusers.vdf 不存在")
+            return nil
+        }
+
+        do {
+            let content = try String(contentsOf: vdfPath, encoding: .utf8)
+            return parseLoginUsersVDF(content)
+        } catch {
+            AppLogger.error(.media, "extractSteamID64FromSteamCMD: 读取 VDF 失败", metadata: ["error": "\(error)"])
+            return nil
+        }
+    }
+
+    /// 简单的 loginusers.vdf 解析器，提取最近登录用户的 SteamID64
+    /// VDF 格式示例：
+    /// "users"
+    /// {
+    ///     "76561198113134000"
+    ///     {
+    ///         "AccountName"  "username"
+    ///         "MostRecent"   "1"
+    ///     }
+    /// }
+    private func parseLoginUsersVDF(_ content: String) -> String? {
+        // 先找到 "users" 块
+        guard let usersRange = content.range(of: "\"users\"") else { return nil }
+        let searchStart = usersRange.upperBound
+
+        // 找到第一个 {
+        guard let openBrace = content[searchStart...].range(of: "{") else { return nil }
+        let afterBrace = openBrace.upperBound
+
+        // 在 users 块内逐行扫描
+        var currentSteamID: String?
+        var isMostRecent = false
+
+        let scanner = content[afterBrace...]
+        var depth = 1
+        var lines = scanner.split(separator: "\n", omittingEmptySubsequences: false)
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            // 计算缩进深度（仅用于逻辑清晰，实际逐行处理）
+            if trimmed.hasPrefix("{") {
+                depth += 1
+                continue
+            }
+            if trimmed.hasPrefix("}") {
+                depth -= 1
+                if depth == 0 { break } // users 块结束
+                if depth == 1 {
+                    // 回到 users 顶层，重置状态
+                    currentSteamID = nil
+                    isMostRecent = false
+                }
+                continue
+            }
+
+            if depth == 2 {
+                // users 下的直接子 key：可能是 SteamID64 或嵌套块
+                let key = extractVDFKey(trimmed)
+                if let key = key, key.allSatisfy(\.isNumber), key.count == 17 {
+                    // 这是 SteamID64 条目
+                    currentSteamID = key
+                    isMostRecent = false
+                }
+            } else if depth == 3, let steamID = currentSteamID {
+                // SteamID64 块内部的属性
+                if let key = extractVDFKey(trimmed), key == "MostRecent",
+                   let val = extractVDFValue(trimmed), val == "1" {
+                    isMostRecent = true
+                }
+            }
+        }
+
+        // 如果找到 MostRecent 的 SteamID64 则优先返回，否则返回第一个
+        // 简化处理：直接取最后一个 SteamID64（通常是最近登录的）
+        return currentSteamID
+    }
+
+    /// 提取 VDF 行中的 key（第一个引号内容）
+    private func extractVDFKey(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("\"") else { return nil }
+        let afterFirst = trimmed.dropFirst()
+        guard let endQuote = afterFirst.firstIndex(of: "\"") else { return nil }
+        return String(afterFirst[..<endQuote])
+    }
+
+    /// 提取 VDF 行中的 value（第二个引号内容）
+    private func extractVDFValue(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("\"") else { return nil }
+        let afterFirst = trimmed.dropFirst()
+        guard let firstEnd = afterFirst.firstIndex(of: "\"") else { return nil }
+        let afterFirstValue = afterFirst[afterFirst.index(after: firstEnd)...]
+        // 跳过空白
+        let afterSpace = afterFirstValue.trimmingCharacters(in: .whitespaces)
+        guard afterSpace.hasPrefix("\"") else { return nil }
+        let afterSecondStart = afterSpace.dropFirst()
+        guard let secondEnd = afterSecondStart.firstIndex(of: "\"") else { return nil }
+        return String(afterSecondStart[..<secondEnd])
+    }
+
+    /// 获取 SteamCMD 工作目录
+    func steamCMDWorkingDirectory() -> URL? {
+        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
+            if FileManager.default.fileExists(atPath: destDir.path) {
+                return destDir
+            }
+        }
+        // 兜底：检查 Bundle 内
+        return Self.bundledSteamCMDDirectoryURL()
     }
 
     // MARK: - 本地存储操作

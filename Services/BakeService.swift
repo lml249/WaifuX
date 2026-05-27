@@ -124,6 +124,7 @@ final class BakeService: ObservableObject {
         isBaking = true
         isCancelled = false
         self.progress = 0
+        progress?(0)
         statusText = "准备中..."
 
         // 1. 解析 assets 路径
@@ -150,6 +151,9 @@ final class BakeService: ObservableObject {
             }
         }
         print("[BakeService] ✅ 屏幕录制权限已授予")
+        self.progress = 0.02
+        statusText = "正在启动渲染器..."
+        progress?(0.02)
 
         // 3. 启动 wallpaper-wgpu（--wallpaper --background 铺到桌面层，无需 AX/CGS 调整窗口）
         guard let cliURL = WallpaperEngineXBridge.resolvedCLIExecutableURL() else {
@@ -173,6 +177,8 @@ final class BakeService: ObservableObject {
             launchedPID = try await launchRendererWrapper(wrapper, arguments: args)
             renderPID = launchedPID
             statusText = "等待渲染窗口..."
+            self.progress = 0.05
+            progress?(0.05)
             print("[BakeService] ✅ wallpaper-wgpu wrapper 已启动 (pid=\(launchedPID))")
         } catch {
             print("[BakeService] ❌ 启动 wallpaper-wgpu 失败: \(error.localizedDescription)")
@@ -185,6 +191,9 @@ final class BakeService: ObservableObject {
         let windowID = windowInfo.windowID
 
         print("[BakeService] 找到桌面层渲染窗口 ID=\(windowID) bounds=\(windowInfo.width)x\(windowInfo.height)")
+        self.progress = 0.10
+        statusText = "等待画面稳定..."
+        progress?(0.10)
 
         // 5. 使用主显示器分辨率作为烘焙尺寸。桌面层窗口已覆盖整个显示器，无标题栏。
         guard let mainScreen = NSScreen.main ?? NSScreen.screens.first else {
@@ -206,7 +215,9 @@ final class BakeService: ObservableObject {
             captureHeight: preparedHeight
         )
 
+        self.progress = 0.15
         statusText = "正在烘焙..."
+        progress?(0.15)
 
         // 6. 开始捕获和编码
         let result = try await captureAndEncode(

@@ -7,12 +7,12 @@ private actor DownloadProgressTracker {
     private var lastReported: Double = 0
     private let total: Int64
     private let handler: @Sendable (Double) -> Void
-    
+
     init(total: Int64, handler: @escaping @Sendable (Double) -> Void) {
         self.total = total
         self.handler = handler
     }
-    
+
     func add(_ bytes: Int64) {
         received += bytes
         let progress = Double(received) / Double(total)
@@ -27,28 +27,28 @@ private actor DownloadProgressTracker {
 struct GitHubCommit: Codable {
     let sha: String
     let commit: CommitDetails
-    
+
     struct CommitDetails: Codable {
         let message: String
         let author: AuthorInfo
-        
+
         struct AuthorInfo: Codable {
             let name: String
             let date: String
         }
     }
-    
+
     /// 格式化的 commit message（第一行）
     var shortMessage: String {
         let lines = commit.message.components(separatedBy: .newlines)
         return lines.first ?? commit.message
     }
-    
+
     /// 完整的 commit message
     var fullMessage: String {
         commit.message
     }
-    
+
     /// 短 SHA（7位）
     var shortSHA: String {
         String(sha.prefix(7))
@@ -65,7 +65,7 @@ struct GitHubRelease: Codable {
     let prerelease: Bool
     let draft: Bool
     let targetCommitish: String
-    
+
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case name
@@ -76,12 +76,12 @@ struct GitHubRelease: Codable {
         case draft
         case targetCommitish = "target_commitish"
     }
-    
+
     /// 版本号（去掉 v 前缀）
     var version: String {
         tagName.replacingOccurrences(of: "v", with: "", options: .anchored)
     }
-    
+
     /// 短 SHA（7位）
     var shortSHA: String {
         String(targetCommitish.prefix(7))
@@ -115,7 +115,7 @@ final class UpdateChecker: ObservableObject {
     private let cachedReleaseKey = "update_checker_cached_release"
     private let cachedCommitKey = "update_checker_cached_commit"
     private let rateLimitUntilKey = "update_checker_rate_limit_until"
-    
+
     // 最小检查间隔（秒）- 5分钟
     private let minCheckInterval: TimeInterval = 300
     // 遇到 403 后的冷却时间（秒）- 15分钟
@@ -159,7 +159,7 @@ final class UpdateChecker: ObservableObject {
     func checkForUpdates(force: Bool = false) async -> UpdateCheckResult {
         isChecking = true
         defer { isChecking = false }
-        
+
         // 检查是否在冷却期内
         if !force, let rateLimitUntil = UserDefaults.standard.object(forKey: rateLimitUntilKey) as? Date,
            Date() < rateLimitUntil {
@@ -167,7 +167,7 @@ final class UpdateChecker: ObservableObject {
             let minutes = remaining / 60
             return .error("GitHub API 速率限制，请\(minutes)分钟后重试")
         }
-        
+
         // 检查是否过于频繁（非强制模式下）
         if !force, let lastCheck = lastCheckDate {
             let elapsed = Date().timeIntervalSince(lastCheck)
@@ -238,7 +238,7 @@ final class UpdateChecker: ObservableObject {
     /// 获取指定 SHA 的 commit 信息
     private func fetchCommit(sha: String) async -> GitHubCommit? {
         let commitURL = "https://api.github.com/repos/\(owner)/\(repo)/commits/\(sha)"
-        
+
         guard let url = URL(string: commitURL) else {
             return nil
         }
@@ -333,11 +333,11 @@ final class UpdateChecker: ObservableObject {
 @MainActor
 final class UpdateManager: ObservableObject {
     static let shared = UpdateManager()
-    
+
     // MARK: - 发布的状态
     @Published var state: UpdateState = .idle
     @Published var progress: Double = 0
-    
+
     enum UpdateState: Equatable {
         case idle
         case checking
@@ -346,27 +346,27 @@ final class UpdateManager: ObservableObject {
         case installing
         case completed
         case error(String)
-        
+
         var isIdle: Bool {
             if case .idle = self { return true }
             return false
         }
-        
+
         var isDownloading: Bool {
             if case .downloading = self { return true }
             return false
         }
-        
+
         var isDownloaded: Bool {
             if case .downloaded = self { return true }
             return false
         }
-        
+
         var isInstalling: Bool {
             if case .installing = self { return true }
             return false
         }
-        
+
         var progressValue: Double {
             switch self {
             case .downloading(let p): return p
@@ -375,41 +375,41 @@ final class UpdateManager: ObservableObject {
             }
         }
     }
-    
+
     // MARK: - 配置
     private let owner = "jipika"
     private let repo = "WaifuX"
-    
+
     private init() {}
-    
+
     // MARK: - 下载更新
-    
+
     func downloadUpdate(version: String) async {
-        guard !state.isDownloading else { 
+        guard !state.isDownloading else {
             print("[UpdateManager] Download already in progress")
-            return 
+            return
         }
-        
+
         // 强制重置状态，防止进度条跳变
         progress = 0
         state = .downloading(0)
-        
+
         // 尝试多个可能的下载链接格式
         let possibleURLs = [
             "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX-\(version).dmg",
             "https://github.com/\(owner)/\(repo)/releases/download/v\(version)/WaifuX.dmg",
             "https://github.com/\(owner)/\(repo)/releases/latest/download/WaifuX.dmg"
         ]
-        
+
         print("[UpdateManager] Starting download for version: \(version)")
-        
+
         for (index, urlString) in possibleURLs.enumerated() {
             print("[UpdateManager] Trying URL [\(index)]: \(urlString)")
-            
+
             guard let url = URL(string: urlString) else {
                 continue
             }
-            
+
             do {
                 try await downloadFromURL(url, version: version)
                 return // 下载成功
@@ -418,22 +418,22 @@ final class UpdateManager: ObservableObject {
                 continue // 尝试下一个链接
             }
         }
-        
+
         state = .error("所有下载链接都失败了")
     }
-    
+
     private func downloadFromURL(_ url: URL, version: String) async throws {
         print("[UpdateManager] Downloading from: \(url.absoluteString)")
-        
+
         // 创建最终下载路径
         let tempDir = FileManager.default.temporaryDirectory
         let tempFile = tempDir.appendingPathComponent("WaifuX_\(version)_update.dmg")
-        
+
         // 清理已存在的临时文件
         if FileManager.default.fileExists(atPath: tempFile.path) {
             try? FileManager.default.removeItem(at: tempFile)
         }
-        
+
         // 配置 URLSession：提高并发连接数以充分利用多线程下载
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 300
@@ -455,10 +455,10 @@ final class UpdateManager: ObservableObject {
             ]
         }
         let session = URLSession(configuration: config)
-        
+
         var request = URLRequest(url: url)
         request.setValue("WaifuX-App/\(UpdateChecker.shared.currentVersion)", forHTTPHeaderField: "User-Agent")
-        
+
         // 先尝试多线程并行下载，失败则回退到单线程
         let (downloadedFileURL, response): (URL, URLResponse)
         do {
@@ -485,17 +485,17 @@ final class UpdateManager: ObservableObject {
                 }
             }
         }
-        
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
-        
+
         print("[UpdateManager] HTTP Status: \(httpResponse.statusCode)")
-        
+
         guard httpResponse.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        
+
         // 移动到最终路径（如果路径不同）
         if downloadedFileURL != tempFile {
             // 如果目标已存在，先删除
@@ -504,60 +504,60 @@ final class UpdateManager: ObservableObject {
             }
             try FileManager.default.moveItem(at: downloadedFileURL, to: tempFile)
         }
-        
+
         await MainActor.run {
             progress = 1.0
             state = .downloaded(tempFile)
         }
-        
+
         print("[UpdateManager] Downloaded to: \(tempFile.path)")
     }
-    
+
     // MARK: - 安装更新
-    
+
     func installUpdate() {
         guard case .downloaded(let dmgPath) = state else {
             print("[UpdateManager] No downloaded file to install")
             return
         }
-        
+
         state = .installing
-        
+
         // 创建 AppleScript 安装脚本（参考 AltTab 方式）
         let script = createAppleScript(dmgPath: dmgPath.path)
-        
+
         var errorInfo: NSDictionary?
         guard let appleScript = NSAppleScript(source: script) else {
             state = .error("无法创建安装脚本")
             return
         }
-        
+
         // 执行安装脚本
         appleScript.executeAndReturnError(&errorInfo)
-        
+
         if let error = errorInfo {
             print("[UpdateManager] Install script error: \(error)")
             // 错误可能是正常的，因为脚本会杀掉当前进程
         }
-        
+
         // 延迟后退出
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApplication.shared.terminate(nil)
         }
     }
-    
+
     // MARK: - 辅助方法
-    
+
     func reset() {
         state = .idle
         progress = 0
     }
-    
+
     // MARK: - 私有方法
-    
+
     /// 小文件阈值：小于此值的文件直接走单线程，避免分片 overhead
     private static let parallelDownloadMinSize: Int64 = 20 * 1024 * 1024 // 20MB
-    
+
     /// 多线程分片并行下载，利用 HTTP Range 请求加速
     /// GitHub/S3 CDN 通常支持 Range，6-8 个并发可显著提升下载速度
     /// ⚠️ 小文件（< 20MB）直接 throw 回退到单线程，避免分片 overhead 反而更慢
@@ -570,94 +570,94 @@ final class UpdateManager: ObservableObject {
         var headRequest = request
         headRequest.httpMethod = "HEAD"
         let (_, headResponse) = try await session.data(for: headRequest)
-        
+
         guard let httpResponse = headResponse as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        
+
         let totalSize = headResponse.expectedContentLength
         guard totalSize > 0 else {
             throw URLError(.badServerResponse)
         }
-        
+
         let acceptRanges = httpResponse.value(forHTTPHeaderField: "Accept-Ranges")
         guard acceptRanges?.lowercased() == "bytes" else {
             throw URLError(.unsupportedURL)
         }
-        
+
         // ⚡ 关键优化：小文件直接回退单线程，避免分片 overhead
         guard totalSize >= Self.parallelDownloadMinSize else {
             print("[UpdateManager] File size \(String(format: "%.1f", Double(totalSize) / (1024 * 1024)))MB < 20MB, skipping parallel download")
             throw URLError(.unsupportedURL)
         }
-        
+
         // 2. 分片配置：最多 6 个并发，每个 chunk 至少 2MB
         // 提高 minChunkSize 避免小文件产生过多分片
         let minChunkSize: Int64 = 2 * 1024 * 1024
         let preferredChunkCount = 6
         let chunkCount = max(1, min(preferredChunkCount, Int(totalSize / minChunkSize)))
         let chunkSize = Int(totalSize) / chunkCount
-        
+
         let tempDir = FileManager.default.temporaryDirectory
         let finalFile = tempDir.appendingPathComponent("WaifuX_update_\(UUID().uuidString).dmg")
         FileManager.default.createFile(atPath: finalFile.path, contents: nil)
-        
+
         let progress = DownloadProgressTracker(total: totalSize, handler: progressHandler)
-        
+
         // 3. 并发下载每个 chunk
         // ⚡ 优化：小 chunk（< 10MB）直接下载到内存，避免临时文件 I/O
         let memoryChunkThreshold: Int64 = 10 * 1024 * 1024
-        
+
         struct ChunkInfo {
             let index: Int
             let data: Data?       // 内存中的数据（小 chunk）
             let file: URL?        // 临时文件（大 chunk）
             let startOffset: Int64
         }
-        
+
         let chunks = try await withThrowingTaskGroup(of: ChunkInfo.self) { group -> [ChunkInfo] in
             for i in 0..<chunkCount {
                 let start = Int64(i * chunkSize)
                 let end = (i == chunkCount - 1) ? (totalSize - 1) : (Int64((i + 1) * chunkSize - 1))
                 let chunkByteSize = end - start + 1
                 let useMemory = chunkByteSize < memoryChunkThreshold
-                
+
                 group.addTask {
                     var chunkRequest = request
                     chunkRequest.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
                     chunkRequest.timeoutInterval = 300
-                    
+
                     let (asyncBytes, chunkResponse) = try await session.bytes(for: chunkRequest)
                     guard let chunkHTTP = chunkResponse as? HTTPURLResponse,
                           (chunkHTTP.statusCode == 200 || chunkHTTP.statusCode == 206) else {
                         throw URLError(.badServerResponse)
                     }
-                    
+
                     if useMemory {
                         // ⚡ 小 chunk 直接下载到内存，避免临时文件 I/O
                         var chunkData = Data()
                         chunkData.reserveCapacity(Int(chunkByteSize))
-                        
+
                         let readBufferSize = 512 * 1024
                         var buffer = Data(capacity: readBufferSize)
                         var pendingProgress: Int64 = 0
                         let progressBatchSize: Int64 = 1024 * 1024
-                        
+
                         for try await byte in asyncBytes {
                             buffer.append(byte)
                             if buffer.count >= readBufferSize {
                                 chunkData.append(buffer)
                                 pendingProgress += Int64(buffer.count)
                                 buffer.removeAll(keepingCapacity: true)
-                                
+
                                 if pendingProgress >= progressBatchSize {
                                     await progress.add(pendingProgress)
                                     pendingProgress = 0
                                 }
                             }
                         }
-                        
+
                         if !buffer.isEmpty {
                             chunkData.append(buffer)
                             pendingProgress += Int64(buffer.count)
@@ -665,7 +665,7 @@ final class UpdateManager: ObservableObject {
                         if pendingProgress > 0 {
                             await progress.add(pendingProgress)
                         }
-                        
+
                         return ChunkInfo(index: i, data: chunkData, file: nil, startOffset: start)
                     } else {
                         // 大 chunk 使用临时文件，避免内存占用过高
@@ -673,27 +673,27 @@ final class UpdateManager: ObservableObject {
                         FileManager.default.createFile(atPath: chunkFile.path, contents: nil)
                         let chunkHandle = try FileHandle(forWritingTo: chunkFile)
                         defer { try? chunkHandle.close() }
-                        
+
                         let writeBufferSize = 1024 * 1024
                         let progressBatchSize: Int64 = 1024 * 1024
-                        
+
                         var buffer = Data(capacity: writeBufferSize)
                         var pendingProgress: Int64 = 0
-                        
+
                         for try await byte in asyncBytes {
                             buffer.append(byte)
                             if buffer.count >= writeBufferSize {
                                 chunkHandle.write(buffer)
                                 pendingProgress += Int64(buffer.count)
                                 buffer.removeAll(keepingCapacity: true)
-                                
+
                                 if pendingProgress >= progressBatchSize {
                                     await progress.add(pendingProgress)
                                     pendingProgress = 0
                                 }
                             }
                         }
-                        
+
                         if !buffer.isEmpty {
                             chunkHandle.write(buffer)
                             pendingProgress += Int64(buffer.count)
@@ -701,26 +701,26 @@ final class UpdateManager: ObservableObject {
                         if pendingProgress > 0 {
                             await progress.add(pendingProgress)
                         }
-                        
+
                         return ChunkInfo(index: i, data: nil, file: chunkFile, startOffset: start)
                     }
                 }
             }
-            
+
             var results: [ChunkInfo] = []
             for try await result in group {
                 results.append(result)
             }
             return results
         }
-        
+
         // 4. 串行合并所有 chunk 到最终文件（单线程，避免多写竞态）
         let finalHandle = try FileHandle(forWritingTo: finalFile)
         defer { try? finalHandle.close() }
-        
+
         for chunk in chunks.sorted(by: { $0.index < $1.index }) {
             finalHandle.seek(toFileOffset: UInt64(chunk.startOffset))
-            
+
             if let data = chunk.data {
                 // 内存中的数据直接写入
                 finalHandle.write(data)
@@ -728,22 +728,22 @@ final class UpdateManager: ObservableObject {
                 // 临时文件流式读取写入
                 let readHandle = try FileHandle(forReadingFrom: file)
                 defer { try? readHandle.close() }
-                
+
                 while true {
                     let data = readHandle.readData(ofLength: 512 * 1024)
                     if data.isEmpty { break }
                     finalHandle.write(data)
                 }
-                
+
                 // 清理 chunk 临时文件
                 try? FileManager.default.removeItem(at: file)
             }
         }
-        
+
         progressHandler(1.0)
         return (finalFile, headResponse)
     }
-    
+
     /// 使用 URLSession bytes API 精确跟踪下载进度
     /// 解决 downloadTask + KVO 在 GitHub 重定向时进度跳变的问题
     private func downloadWithProgress(
@@ -752,12 +752,12 @@ final class UpdateManager: ObservableObject {
         progressHandler: @escaping @Sendable (Double) -> Void
     ) async throws -> (URL, URLResponse) {
         let (asyncBytes, response) = try await session.bytes(for: request)
-        
+
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
-        
+
         // 获取文件总大小
         let expectedLength = response.expectedContentLength
         guard expectedLength > 0 else {
@@ -771,40 +771,40 @@ final class UpdateManager: ObservableObject {
             try data.write(to: tempFile)
             return (tempFile, response)
         }
-        
+
         // 流式下载 + 精确进度报告
         let tempDir = FileManager.default.temporaryDirectory
         let tempFile = tempDir.appendingPathComponent("WaifuX_update_\(UUID().uuidString).dmg")
-        
+
         // 确保临时文件不存在
         if FileManager.default.fileExists(atPath: tempFile.path) {
             try? FileManager.default.removeItem(at: tempFile)
         }
-        
+
         // 创建输出文件句柄
         FileManager.default.createFile(atPath: tempFile.path, contents: nil)
         let fileHandle = try FileHandle(forWritingTo: tempFile)
-        
+
         defer {
             try? fileHandle.close()
         }
-        
+
         var receivedBytes: Int64 = 0
         var lastReportedProgress: Double = 0
-        
+
         // 流式下载：增大缓冲区到 512KB，减少写入频率
         let bufferSize = 512 * 1024
         var buffer = Data(capacity: bufferSize)
-        
+
         for try await byte in asyncBytes {
             buffer.append(byte)
             receivedBytes += 1
-            
+
             if buffer.count >= bufferSize {
                 fileHandle.write(buffer)
                 buffer.removeAll(keepingCapacity: true)
             }
-            
+
             // 每 1% 更新一次进度，减少 UI 更新频率
             let currentProgress = Double(receivedBytes) / Double(expectedLength)
             if currentProgress - lastReportedProgress >= 0.01 || receivedBytes >= expectedLength {
@@ -812,22 +812,22 @@ final class UpdateManager: ObservableObject {
                 progressHandler(min(currentProgress, 1.0))
             }
         }
-        
+
         // 写入剩余数据
         if !buffer.isEmpty {
             fileHandle.write(buffer)
         }
-        
+
         // 最终进度
         progressHandler(1.0)
-        
+
         return (tempFile, response)
     }
-    
+
     private func createAppleScript(dmgPath: String) -> String {
         let appName = "WaifuX"
         _ = Bundle.main.bundleIdentifier ?? "com.waifux.app"
-        
+
         // 创建 bash 脚本文件并执行（参考 AltTab 实现）
         let scriptContent = """
 #!/bin/bash
@@ -867,7 +867,9 @@ if [ -d "$DEST_PATH" ]; then
     rm -rf "$DEST_PATH"
 fi
 
-cp -R "$APP_PATH" "$DEST_PATH"
+# 使用 ditto 替代 cp -R，保留创建时间、扩展属性、资源分支等所有元数据
+# 避免 Gatekeeper 因创建时间丢失而误判"软件损坏"
+ditto "$APP_PATH" "$DEST_PATH"
 
 # 卸载 DMG
 hdiutil detach "$MOUNT_POINT" -quiet
@@ -882,18 +884,18 @@ open "$DEST_PATH"
 # 清理下载文件
 rm -f "$DMG_PATH"
 """
-        
+
         // 写入临时脚本文件
         let tempDir = FileManager.default.temporaryDirectory
         let scriptPath = tempDir.appendingPathComponent("waifux_update_\(UUID().uuidString).sh")
-        
+
         do {
             try scriptContent.write(toFile: scriptPath.path, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
         } catch {
             print("[UpdateManager] Failed to create install script: \(error)")
         }
-        
+
         // 使用 AppleScript 执行脚本（请求管理员权限）
         return """
         do shell script "bash '\(scriptPath.path)'" with administrator privileges

@@ -21,6 +21,20 @@
                ReferencedContainer = "container:WaifuX.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "D90F333FC051272819E83A61"
+               BuildableName = "WaifuXWallpaperExtension.appex"
+               BlueprintName = "WaifuXWallpaperExtension"
+               ReferencedContainer = "container:WaifuX.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

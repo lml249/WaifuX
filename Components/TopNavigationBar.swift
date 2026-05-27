@@ -30,11 +30,12 @@ public enum MainTab: String, CaseIterable {
 struct TopNavigationBar: View {
     @Binding var selectedTab: MainTab
     let onOpenSettings: () -> Void
+    let onGuessYouLike: () -> Void
     let onClose: () -> Void
     let onMinimize: () -> Void
     let onMaximize: () -> Void
     let onZoom: () -> Void
-    
+
     private let controlHeight: CGFloat = 34
 
     var body: some View {
@@ -58,11 +59,18 @@ struct TopNavigationBar: View {
 
             Spacer()
 
-            // 右侧设置按钮 - 固定宽高，内容居中
-            TopBarCircleButton(icon: "gearshape", size: controlHeight) {
-                onOpenSettings()
+            // 右侧按钮组
+            HStack(spacing: 4) {
+                // 猜你喜欢按钮
+                GuessYouLikeNavButton(action: onGuessYouLike)
+                    .frame(height: controlHeight, alignment: .center)
+
+                // 设置按钮
+                TopBarCircleButton(icon: "gearshape", size: controlHeight) {
+                    onOpenSettings()
+                }
+                .frame(width: 48, height: controlHeight, alignment: .center)
             }
-            .frame(width: 48, height: controlHeight, alignment: .center)
         }
         .padding(.leading, 12)
         .padding(.trailing, 12)
@@ -157,6 +165,35 @@ private struct TopBarCircleButton: View {
         .buttonStyle(.plain)
         .contentShape(Circle())
         .frame(width: size + 16, height: size + 16)
+        .preferredColorScheme(.dark)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+// MARK: - 猜你喜欢导航按钮（与设置按钮相同液态玻璃风格）
+
+struct GuessYouLikeNavButton: View {
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("猜你喜欢")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(isHovered ? 0.96 : 0.82))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .detailGlassCapsuleChrome()
+        }
+        .buttonStyle(.plain)
         .preferredColorScheme(.dark)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.16)) {

@@ -31,9 +31,10 @@ final class MediaExploreViewModel: ObservableObject {
     private let downloadTaskService = DownloadTaskService.shared
     private let downloadPathManager = DownloadPathManager.shared
     private let localScanner = LocalWallpaperScanner.shared
-    private let workshopService = WorkshopService.shared
+    let workshopService = WorkshopService.shared
     private let workshopSourceManager = WorkshopSourceManager.shared
     private let dynamicWallpaperService = DynamicWallpaperService.shared
+    private let wallsflowService = WallsflowService.shared
 
     private var currentSource: MediaRouteSource = .home
     private var nextPagePath: String?
@@ -83,6 +84,12 @@ final class MediaExploreViewModel: ObservableObject {
     private var dongtaiFilterFourK: Bool? = nil
     /// 加载世代计数器，用于丢弃旧请求的结果
     private var dongtaiLoadGeneration: UInt = 0
+
+    // MARK: - Wallsflow 分页状态
+    private var wallsflowCurrentPage = 1
+    private var wallsflowHasMore = true
+    private var wallsflowSearchQuery = ""
+    private var wallsflowCurrentCategorySlug: String = "live-wallpapers"
 
     /// 与 WallpaperViewModel.libraryContentRevision 相同用途：保证列表上的收藏/下载状态随库更新而刷新。
     @Published private(set) var libraryContentRevision: UInt = 0
@@ -162,8 +169,24 @@ final class MediaExploreViewModel: ObservableObject {
             .sink { [weak self] source in
                 guard let self = self else { return }
                 // 清空旧数据，避免切换时新旧内容混在一起
+                // 1. 取消所有进行中的异步任务，防止旧任务完成后写回 items
                 self.sourceSwitchTask?.cancel()
+                self.sourceSwitchTask = nil
+                self.preloadTask?.cancel()
+                self.preloadTask = nil
+                self.networkRecoveryTask?.cancel()
+                self.networkRecoveryTask = nil
+                self.detailTasks.values.forEach { $0.cancel() }
+                self.detailTasks.removeAll()
                 self.cancelDetailPrefetchQueue()
+                // 2. 清空预加载缓存
+                self.preloadedItems = []
+                self.preloadedPagePath = nil
+                self.preloadedNextPath = nil
+                // 3. 重置 isLoading/isLoadingMore 防止旧任务的 isLoading 阻塞新源的加载
+                self.isLoading = false
+                self.isLoadingMore = false
+                // 4. 清空列表
                 self.items.removeAll()
                 switch source {
                 case .wallpaperEngine:
@@ -180,6 +203,13 @@ final class MediaExploreViewModel: ObservableObject {
                         await self.loadDongTaiFeed()
                         await self.refreshHomeItems()
                     }
+                case .wallsflow:
+                    // 切换到 Wallsflow 数据源
+                    self.sourceSwitchTask = Task { [weak self] in
+                        guard let self else { return }
+                        await self.loadWallsflowFeed()
+                        await self.refreshHomeItems()
+                    }
                 default:
                     // 切换回 MotionBG 数据源，重置状态
                     self.workshopCurrentPage = 1
@@ -188,6 +218,9 @@ final class MediaExploreViewModel: ObservableObject {
                     self.dongtaiCurrentPage = 1
                     self.dongtaiHasMore = true
                     self.dongtaiSearchQuery = ""
+                    self.wallsflowCurrentPage = 1
+                    self.wallsflowHasMore = true
+                    self.wallsflowSearchQuery = ""
                     self.sourceSwitchTask = Task { [weak self] in
                         guard let self else { return }
                         await self.loadHomeFeed()
@@ -312,6 +345,8 @@ final class MediaExploreViewModel: ObservableObject {
             await loadWorkshopFeed()
         case .dongtai:
             await loadDongTaiFeed()
+        case .wallsflow:
+            await loadWallsflowFeed()
         default:
             await load(source: .home)
         }
@@ -354,6 +389,8 @@ final class MediaExploreViewModel: ObservableObject {
             }
 
             print("[MediaExploreViewModel] received page with \(page.items.count) items")
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .motionBG else { return }
             currentSource = source
             currentTitle = page.sectionTitle
             page.items.forEach { mediaLibrary.upsert($0) }
@@ -413,6 +450,9 @@ final class MediaExploreViewModel: ObservableObject {
                 page = try await mediaService.fetchPage(source: currentSource, pagePath: nextPagePath)
             }
 
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .motionBG else { return }
+
             let existingIDs = Set(items.map(\.id))
             let appended = page.items.filter { !existingIDs.contains($0.id) }
             page.items.forEach { mediaLibrary.upsert($0) }
@@ -463,7 +503,8 @@ final class MediaExploreViewModel: ObservableObject {
         prioritizeVisible: Bool
     ) {
         guard workshopSourceManager.activeSource != .wallpaperEngine,
-              workshopSourceManager.activeSource != .dongtai else { return }
+              workshopSourceManager.activeSource != .dongtai,
+              workshopSourceManager.activeSource != .wallsflow else { return }
 
         let candidates = items.filter(shouldPrefetchDetail(for:))
 
@@ -632,6 +673,9 @@ final class MediaExploreViewModel: ObservableObject {
                 )
                 let result = dynamicWallpaperService.queryItems(params: params)
                 homeItems = result.items
+            case .wallsflow:
+                let page = try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: 1)
+                homeItems = Array(page.items.prefix(10))
             default:
                 let page = try await mediaService.fetchPage(source: .home)
                 page.items.forEach { mediaLibrary.upsert($0) }
@@ -674,6 +718,8 @@ final class MediaExploreViewModel: ObservableObject {
             let page = try await mediaService.fetchPage(source: source)
             currentSource = source
             currentTitle = page.sectionTitle.isEmpty ? title : page.sectionTitle
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .motionBG else { return }
             page.items.forEach { mediaLibrary.upsert($0) }
             items = page.items
             nextPagePath = page.nextPagePath
@@ -719,6 +765,8 @@ final class MediaExploreViewModel: ObservableObject {
             let page = try await mediaService.fetchPage(source: source)
             currentSource = source
             currentTitle = page.sectionTitle.isEmpty ? trimmedQuery : page.sectionTitle
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .motionBG else { return }
             page.items.forEach { mediaLibrary.upsert($0) }
             items = page.items
             nextPagePath = page.nextPagePath
@@ -1327,6 +1375,8 @@ final class MediaExploreViewModel: ObservableObject {
         workshopCurrentPage = 1
         dongtaiHasMore = true
         dongtaiCurrentPage = 1
+        wallsflowHasMore = true
+        wallsflowCurrentPage = 1
     }
 
     // MARK: - 统一调度（不感知具体源类型）
@@ -1337,6 +1387,7 @@ final class MediaExploreViewModel: ObservableObject {
         switch workshopSourceManager.activeSource {
         case .wallpaperEngine: await resetAndLoadDefaultWorkshopFeed()
         case .dongtai:         await resetAndLoadDefaultDongTaiFeed()
+        case .wallsflow:       await resetAndLoadDefaultWallsflowFeed()
         default:               await resetAndLoadDefaultHomeFeed()
         }
     }
@@ -1346,6 +1397,7 @@ final class MediaExploreViewModel: ObservableObject {
         switch workshopSourceManager.activeSource {
         case .wallpaperEngine: await loadMoreWorkshop()
         case .dongtai:         await loadMoreDongTai()
+        case .wallsflow:       await loadMoreWallsflow()
         default:               await loadMore()
         }
     }
@@ -1355,6 +1407,7 @@ final class MediaExploreViewModel: ObservableObject {
         switch workshopSourceManager.activeSource {
         case .wallpaperEngine: await searchWorkshop(query: query)
         case .dongtai:         await searchDongTai(query: query)
+        case .wallsflow:       await searchWallsflow(query: query)
         default:               await search(query: query)
         }
     }
@@ -1506,6 +1559,8 @@ final class MediaExploreViewModel: ObservableObject {
         do {
             let response = try await workshopService.search(params: params)
             let mediaItems = workshopService.convertToMediaItems(response.items)
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .wallpaperEngine else { return }
             items = mediaItems
             workshopHasMore = response.hasMore
             hasMorePages = response.hasMore
@@ -1553,6 +1608,9 @@ final class MediaExploreViewModel: ObservableObject {
         do {
             let response = try await workshopService.search(params: params)
             let mediaItems = workshopService.convertToMediaItems(response.items)
+
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .wallpaperEngine else { return }
 
             let existingIDs = Set(items.map(\.id))
             let newItems = mediaItems.filter { !existingIDs.contains($0.id) }
@@ -1770,6 +1828,8 @@ final class MediaExploreViewModel: ObservableObject {
 
         // 丢弃旧世代的结果（被取消/过期的请求）
         guard dongtaiLoadGeneration == generation else { return }
+        // 源一致性检查：如果切换了源，丢弃这个过期结果
+        guard workshopSourceManager.activeSource == .dongtai else { return }
 
         items = result.items
         dongtaiHasMore = result.hasMore
@@ -1802,6 +1862,9 @@ final class MediaExploreViewModel: ObservableObject {
 
         let result = dynamicWallpaperService.queryItems(params: params)
 
+        // 源一致性检查：如果切换了源，丢弃这个过期结果
+        guard workshopSourceManager.activeSource == .dongtai else { return }
+
         let existingIDs = Set(items.map(\.id))
         let newItems = result.items.filter { !existingIDs.contains($0.id) }
         items.append(contentsOf: newItems)
@@ -1809,6 +1872,133 @@ final class MediaExploreViewModel: ObservableObject {
         dongtaiHasMore = result.hasMore
         hasMorePages = result.hasMore
         print("[MediaExploreViewModel] loadMoreDongTai completed: +\(newItems.count) items, total: \(items.count)")
+    }
+
+    // MARK: - Wallsflow 数据加载
+
+    /// 检查当前是否使用 Wallsflow 数据源
+    var isUsingWallsflow: Bool {
+        workshopSourceManager.activeSource == .wallsflow
+    }
+
+    /// 加载 Wallsflow 首页/分类内容
+    func loadWallsflowFeed() async {
+        await loadWallsflowFeedInternal(
+            query: wallsflowSearchQuery,
+            categorySlug: wallsflowCurrentCategorySlug
+        )
+    }
+
+    /// 重置 Wallsflow 浏览状态并强制加载默认首页
+    @MainActor
+    func resetAndLoadDefaultWallsflowFeed() async {
+        wallsflowSearchQuery = ""
+        currentQuery = ""
+        wallsflowCurrentCategorySlug = "live-wallpapers"
+        wallsflowCurrentPage = 1
+        wallsflowHasMore = true
+        hasMorePages = true
+        isLoading = false
+        isLoadingMore = false
+        errorMessage = nil
+        await loadWallsflowFeedInternal(query: "", categorySlug: "live-wallpapers")
+    }
+
+    /// Wallsflow 搜索
+    func searchWallsflow(query: String) async {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        wallsflowSearchQuery = trimmedQuery
+        currentQuery = trimmedQuery
+        wallsflowCurrentCategorySlug = "live-wallpapers"
+
+        await loadWallsflowFeedInternal(query: trimmedQuery, categorySlug: nil)
+    }
+
+    /// 按分类浏览 Wallsflow
+    func loadWallsflowCategory(slug: String) async {
+        wallsflowCurrentCategorySlug = slug
+        await loadWallsflowFeedInternal(query: "", categorySlug: slug)
+    }
+
+    /// 内部方法：加载 Wallsflow 数据
+    private func loadWallsflowFeedInternal(query: String?, categorySlug: String?) async {
+        guard !isLoading else { return }
+
+        isLoading = true
+        errorMessage = nil
+        items = []
+
+        defer { isLoading = false }
+
+        // 重置分页状态
+        wallsflowCurrentPage = 1
+        wallsflowHasMore = true
+
+        do {
+            let page: WallsflowListPage
+
+            if let query = query, !query.isEmpty {
+                // 搜索模式
+                page = try await wallsflowService.search(query: query, page: 1)
+                currentTitle = "搜索: \(query)"
+            } else if let slug = categorySlug {
+                // 分类模式
+                page = try await wallsflowService.fetchCategory(slug: slug, page: 1)
+                let categoryName = WallsflowCategory.allCategories.first(where: { $0.slug == slug })?.name ?? slug
+                currentTitle = categoryName
+            } else {
+                // 默认首页
+                page = try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: 1)
+                currentTitle = "Wallsflow"
+            }
+
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .wallsflow else { return }
+            items = page.items
+            wallsflowHasMore = page.nextPagePath != nil
+            hasMorePages = page.nextPagePath != nil
+            print("[MediaExploreViewModel] loadWallsflowFeedInternal completed: \(items.count) items")
+        } catch {
+            errorMessage = error.localizedDescription
+            print("[MediaExploreViewModel] loadWallsflowFeedInternal failed: \(error)")
+        }
+    }
+
+    /// Wallsflow 加载更多
+    func loadMoreWallsflow() async {
+        guard !isLoading, !isLoadingMore, wallsflowHasMore else { return }
+
+        isLoadingMore = true
+        errorMessage = nil
+
+        defer { isLoadingMore = false }
+
+        wallsflowCurrentPage += 1
+
+        do {
+            let page: WallsflowListPage
+
+            if !wallsflowSearchQuery.isEmpty {
+                page = try await wallsflowService.search(query: wallsflowSearchQuery, page: wallsflowCurrentPage)
+            } else {
+                page = try await wallsflowService.fetchCategory(slug: wallsflowCurrentCategorySlug, page: wallsflowCurrentPage)
+            }
+
+            // 源一致性检查：如果切换了源，丢弃这个过期结果
+            guard workshopSourceManager.activeSource == .wallsflow else { return }
+
+            let existingIDs = Set(items.map(\.id))
+            let newItems = page.items.filter { !existingIDs.contains($0.id) }
+            items.append(contentsOf: newItems)
+
+            wallsflowHasMore = page.nextPagePath != nil
+            hasMorePages = page.nextPagePath != nil
+            print("[MediaExploreViewModel] loadMoreWallsflow completed: +\(newItems.count) items, total: \(items.count)")
+        } catch {
+            errorMessage = error.localizedDescription
+            wallsflowCurrentPage -= 1
+            print("[MediaExploreViewModel] loadMoreWallsflow failed: \(error)")
+        }
     }
 
     // MARK: - 按作者获取 Workshop 物品
@@ -1920,6 +2110,77 @@ final class MediaExploreViewModel: ObservableObject {
         let item = try await dynamicWallpaperService.resolveItemByOSSURL(urlString)
         print("[MediaExploreViewModel] resolveDongTaiItemByURL success: \(item.id) - \(item.title)")
         return item
+    }
+
+    // MARK: - 同步 Steam 订阅
+
+    /// 同步已下载列表的 Workshop ID 集合
+    private var downloadedWorkshopIDs: Set<String> {
+        Set(mediaLibrary.downloadRecords.compactMap { record -> String? in
+            guard record.id.hasPrefix("workshop_") else { return nil }
+            return String(record.id.dropFirst("workshop_".count))
+        })
+    }
+
+    /// 获取已订阅但未下载的 Workshop 物品列表（用于 UI 选择）
+    /// - Parameter steamID: Steam 64位数字 ID
+    /// - Returns: 未下载的订阅物品列表
+    func fetchSubscribedItems(steamID: String) async throws -> [WorkshopWallpaper] {
+        let subscribed = try await workshopService.fetchAllSubscriptions(steamID: steamID)
+        let alreadyDownloaded = downloadedWorkshopIDs
+        return subscribed.filter { !alreadyDownloaded.contains($0.id) }
+    }
+
+    /// 下载指定的 Workshop 物品列表
+    /// - Parameter mediaItems: 要下载的媒体项
+    func downloadWorkshopItems(_ mediaItems: [MediaItem]) async throws -> Int {
+        var successCount = 0
+        for item in mediaItems {
+            guard !Task.isCancelled else { break }
+            do {
+                try await downloadWorkshopWallpaper(item)
+                successCount += 1
+            } catch {
+                AppLogger.error(.media, "batch download failed", metadata: ["id": item.id, "error": "\(error)"])
+            }
+        }
+        return successCount
+    }
+
+    /// 同步用户已订阅的 Workshop 壁纸（获取列表后排队下载）
+    /// - Returns: (新增下载数, 总订阅数)
+    func syncSubscribedWorkshopItems() async throws -> (newDownloads: Int, totalSubscribed: Int) {
+        let steamID = workshopSourceManager.steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !steamID.isEmpty else {
+            throw WorkshopError.invalidCredentials
+        }
+
+        // 1. 获取所有已订阅壁纸
+        let subscribed = try await workshopService.fetchAllSubscriptions(steamID: steamID)
+        let totalSubscribed = subscribed.count
+        AppLogger.info(.media, "syncSubscribedWorkshopItems: found \(totalSubscribed) subscribed items")
+
+        // 2. 过滤出未下载的
+        let alreadyDownloaded = downloadedWorkshopIDs
+        let toDownload = subscribed.filter { !alreadyDownloaded.contains($0.id) }
+        AppLogger.info(.media, "syncSubscribedWorkshopItems: \(toDownload.count) new, \(alreadyDownloaded.count) already downloaded")
+
+        // 3. 转换为 MediaItem 并排队下载
+        let mediaItems = workshopService.convertToMediaItems(toDownload)
+        var newCount = 0
+        for item in mediaItems {
+            guard !Task.isCancelled else { break }
+            do {
+                try await downloadWorkshopWallpaper(item)
+                newCount += 1
+            } catch {
+                AppLogger.error(.media, "syncSubscribedWorkshopItems download failed", metadata: ["id": item.id, "error": "\(error)"])
+                // 继续下载下一个，不中断整体流程
+            }
+        }
+
+        AppLogger.info(.media, "syncSubscribedWorkshopItems completed: \(newCount) new downloads")
+        return (newCount, totalSubscribed)
     }
 }
 

@@ -5,7 +5,6 @@ import Combine
 // MARK: - Arc 风格背景模式
 
 enum ArcThemeMode: String, CaseIterable, Identifiable {
-    case auto = "auto"
     case light = "light"
     case dark = "dark"
 
@@ -13,7 +12,6 @@ enum ArcThemeMode: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .auto: return "sparkles"
         case .light: return "sun.max.fill"
         case .dark: return "moon.fill"
         }
@@ -21,7 +19,6 @@ enum ArcThemeMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .auto: return "自动"
         case .light: return "浅色"
         case .dark: return "深色"
         }
@@ -35,7 +32,7 @@ final class ArcBackgroundSettings: ObservableObject {
     static let shared = ArcBackgroundSettings()
 
     /// 主题模式
-    @Published var themeMode: ArcThemeMode = .auto
+    @Published var themeMode: ArcThemeMode = .dark
     /// 主色调（影响光晕和强调色）
     @Published var accentColor: Color = Color(hex: "8B5CF6")
     /// 磨砂强度 0.0~1.0
@@ -182,8 +179,6 @@ final class ArcBackgroundSettings: ObservableObject {
             isLightMode = true
         case .dark:
             isLightMode = false
-        case .auto:
-            isLightMode = isSystemLightMode
         }
     }
 
@@ -234,16 +229,6 @@ final class ArcBackgroundSettings: ObservableObject {
 }
 
 // MARK: - 辅助
-
-@MainActor
-private var isSystemLightMode: Bool {
-    let appearance = NSApp.effectiveAppearance
-    var isLight = false
-    appearance.performAsCurrentDrawingAppearance {
-        isLight = appearance.name != .darkAqua
-    }
-    return isLight
-}
 
 private extension Double {
     func clamped(to range: ClosedRange<Double>) -> Double {

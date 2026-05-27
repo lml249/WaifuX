@@ -35,6 +35,7 @@ struct MediaDetailSheet: View {
     @State private var pendingSteamGuardCode = ""
     @State private var isBakingScene = false
     @State private var showSceneBakeRendererDialog = false
+    @State private var sceneBakeDialogAnimating = false
     @State private var sceneBakeShouldClearCachedArtifact = false
     @State private var activeScenePreviewRenderer: SceneBakeRenderer?
     /// 烘焙进度 0.0 ~ 1.0
@@ -318,7 +319,7 @@ struct MediaDetailSheet: View {
         }
         .onExitCommand {
             if showSceneBakeRendererDialog {
-                showSceneBakeRendererDialog = false
+                dismissSceneBakeRendererDialog()
             }
         }
         .alert("Steam 登录已过期", isPresented: $showSessionExpiredAlert) {
@@ -781,7 +782,7 @@ struct MediaDetailSheet: View {
                     Color.black.opacity(0.58)
                         .ignoresSafeArea()
                         .onTapGesture {
-                            showSceneBakeRendererDialog = false
+                            dismissSceneBakeRendererDialog()
                         }
 
                     VStack(alignment: .leading, spacing: 18) {
@@ -809,7 +810,7 @@ struct MediaDetailSheet: View {
                             Spacer()
 
                             Button {
-                                showSceneBakeRendererDialog = false
+                                dismissSceneBakeRendererDialog()
                             } label: {
                                 DetailSheetCircleIconLabel(
                                     systemName: "xmark",
@@ -839,8 +840,16 @@ struct MediaDetailSheet: View {
                             .stroke(.white.opacity(0.18), lineWidth: 1)
                     )
                     .shadow(color: .black.opacity(0.38), radius: 28, x: 0, y: 20)
+                    .scaleEffect(sceneBakeDialogAnimating ? 1.0 : 0.88)
+                    .opacity(sceneBakeDialogAnimating ? 1.0 : 0.0)
                 }
                 .zIndex(1200)
+                .transition(.opacity)
+                .onAppear {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        sceneBakeDialogAnimating = true
+                    }
+                }
             }
         }
     }
@@ -850,8 +859,12 @@ struct MediaDetailSheet: View {
         let isPreviewing = activeScenePreviewRenderer == renderer
         return HStack(spacing: 12) {
             Button {
-                showSceneBakeRendererDialog = false
-                runSceneOfflineBake(renderer: renderer, clearCachedArtifact: sceneBakeShouldClearCachedArtifact)
+                let chosenRenderer = renderer
+                let chosenClear = sceneBakeShouldClearCachedArtifact
+                dismissSceneBakeRendererDialog()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    runSceneOfflineBake(renderer: chosenRenderer, clearCachedArtifact: chosenClear)
+                }
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: renderer == .wallpaperWgpu ? "sparkles.tv" : "terminal")
@@ -918,7 +931,17 @@ struct MediaDetailSheet: View {
     private func presentSceneBakeRendererDialog(clearCachedArtifact: Bool) {
         guard currentDownloadRecord != nil else { return }
         sceneBakeShouldClearCachedArtifact = clearCachedArtifact
+        sceneBakeDialogAnimating = false
         showSceneBakeRendererDialog = true
+    }
+
+    private func dismissSceneBakeRendererDialog() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            sceneBakeDialogAnimating = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            showSceneBakeRendererDialog = false
+        }
     }
 
     private func previewSceneRenderer(_ renderer: SceneBakeRenderer) {
@@ -1611,7 +1634,7 @@ struct MediaDetailSheet: View {
                 return nil
             case 53: // ESC：优先关闭当前弹窗，再关闭预览，最后返回详情栈
                 if self.showSceneBakeRendererDialog {
-                    self.showSceneBakeRendererDialog = false
+                    self.dismissSceneBakeRendererDialog()
                 } else if self.showAuthorSheet {
                     self.dismissAuthorSheet()
                 } else if PreviewWindowManager.shared.isPresented {
@@ -2858,6 +2881,11 @@ struct MediaDetailSheet: View {
         // 停止视频层和 CLI，避免冲突
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+
+        // macOS 26+：清除锁屏视频
+        if #available(macOS 26.0, *) {
+            LockScreenWallpaperService.shared.clearLockScreenVideo()
+        }
 
         let screens = NSScreen.screens
         if screens.count > 1 {

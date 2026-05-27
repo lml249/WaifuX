@@ -1104,6 +1104,12 @@ class WallpaperViewModel: ObservableObject {
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
 
+        // macOS 26+：设置静态壁纸时清除锁屏扩展状态（无论扩展是否激活）
+        if #available(macOS 26.0, *) {
+            LockScreenWallpaperService.shared.clearLockScreenVideo()
+            VideoWallpaperManager.shared.clearExtensionState()
+        }
+
         let workspace = NSWorkspace.shared
         let screens = NSScreen.screens
 
@@ -1136,6 +1142,10 @@ class WallpaperViewModel: ObservableObject {
             }
             // 只停目标屏幕的动态壁纸，避免影响其他屏幕
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
+            // macOS 26+：清除锁屏视频
+            if #available(macOS 26.0, *) {
+                LockScreenWallpaperService.shared.clearLockScreenVideo()
+            }
             let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
                 .allowClipping: true

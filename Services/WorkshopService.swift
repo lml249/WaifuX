@@ -224,6 +224,85 @@ class WorkshopService: ObservableObject {
         }
     }
 
+    // MARK: - 获取已订阅的 Workshop 物品
+
+    /// 从 Steam 订阅页面抓取用户已订阅的壁纸列表
+    /// - Parameters:
+    ///   - steamID: Steam 64位数字 ID
+    ///   - page: 页码（从 1 开始）
+    /// - Returns: 壁纸列表
+    func fetchSubscriptions(steamID: String, page: Int = 1) async throws -> [WorkshopWallpaper] {
+        let profilePath = steamProfilePath(for: steamID)
+        var components = URLComponents(string: "https://steamcommunity.com\(profilePath)/myworkshopfiles/")
+        components?.queryItems = [
+            URLQueryItem(name: "appid", value: wallpaperEngineAppID),
+            URLQueryItem(name: "browsefilter", value: "mysubscriptions"),
+            URLQueryItem(name: "browsesort", value: "mysubscriptions"),
+            URLQueryItem(name: "view", value: "imagewall"),
+            URLQueryItem(name: "p", value: String(page)),
+            URLQueryItem(name: "numperpage", value: String(authorPageSize))
+        ]
+        guard let url = components?.url else {
+            throw WorkshopError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+
+        let data = try await NetworkService.shared.fetchData(request: request)
+        guard let html = String(data: data, encoding: .utf8) else {
+            throw WorkshopError.apiError("无法解析 HTML 响应")
+        }
+
+        // 先尝试从 SSR JSON 提取
+        var wallpapers = extractFromJSON(html)
+        if !wallpapers.isEmpty {
+            AppLogger.info(.media, "fetchSubscriptions used JSON/SSR extraction: \(wallpapers.count) items")
+            do {
+                wallpapers = try await enrichWithAPIDetails(wallpapers)
+            } catch {
+                AppLogger.error(.media, "fetchSubscriptions API enrichment failed", metadata: ["steamID": steamID, "error": "\(error)"])
+            }
+            return wallpapers
+        }
+
+        // 降级：从 HTML DOM 解析
+        AppLogger.info(.media, "fetchSubscriptions falling back to HTML DOM parsing")
+        let doc = try SwiftSoup.parse(html)
+        let items = try doc.select(".workshopItem, .workshopItemWrapper, [id*='sharedfiles_']")
+        var parsed = try items.compactMap { try parseWorkshopItem($0) }
+        if parsed.isEmpty {
+            parsed = try parseModernWorkshopHTML(doc)
+        }
+        do {
+            parsed = try await enrichWithAPIDetails(parsed)
+        } catch {
+            AppLogger.error(.media, "fetchSubscriptions HTML API enrichment failed", metadata: ["steamID": steamID, "error": "\(error)"])
+        }
+        return parsed
+    }
+
+    /// 获取用户所有已订阅的壁纸（自动翻页）
+    /// - Parameter steamID: Steam 64位数字 ID
+    /// - Returns: 所有已订阅壁纸
+    func fetchAllSubscriptions(steamID: String) async throws -> [WorkshopWallpaper] {
+        var allItems: [WorkshopWallpaper] = []
+        var page = 1
+        var hasMore = true
+
+        while hasMore {
+            let items = try await fetchSubscriptions(steamID: steamID, page: page)
+            allItems.append(contentsOf: items)
+            hasMore = items.count >= authorPageSize
+            page += 1
+            // 避免无限循环，最多 50 页（1500 条）
+            if page > 50 { break }
+        }
+
+        AppLogger.info(.media, "fetchAllSubscriptions total: \(allItems.count) items across \(page - 1) pages")
+        return allItems
+    }
+
     // MARK: - Search
 
     func search(params: WorkshopSearchParams) async throws -> WorkshopSearchResponse {

@@ -230,6 +230,7 @@ struct ContentView: View {
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var animeViewModel = AnimeViewModel()
     @StateObject private var navigationState = MainContentNavigationState()
+    @StateObject private var guessYouLikeVM = GuessYouLikeViewModel()
     @ObservedObject private var localization = LocalizationService.shared
     @ObservedObject private var sourceManager = WallpaperSourceManager.shared
     @State private var detailPath: [MainDetailRoute] = []
@@ -300,6 +301,9 @@ struct ContentView: View {
                 await mediaViewModel.initialLoadIfNeeded()
             }
 
+            // 预加载猜你喜欢数据（后台静默加载，确保点击弹窗时数据已就绪）
+            guessYouLikeVM.preload()
+
             // 延迟2秒后检查更新（自动检查，非强制，避免频繁触发）
             try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
             let checker = UpdateChecker.shared
@@ -357,6 +361,20 @@ struct ContentView: View {
             // 显示器选择弹窗覆盖层
             DisplaySelectorOverlay()
                 .zIndex(700)
+
+            // 猜你喜欢覆盖层
+            if guessYouLikeVM.isShowing {
+                GuessYouLikeOverlay(
+                    viewModel: guessYouLikeVM,
+                    onDetail: { [self] item in
+                        handleGuessYouLikeDetail(item)
+                    },
+                    onDownload: { [self] item in
+                        handleGuessYouLikeDownload(item)
+                    }
+                )
+                .zIndex(800)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(true)
@@ -386,6 +404,7 @@ struct ContentView: View {
                 TopNavigationBar(
                     selectedTab: navigationState.binding(for: \.selectedTab),
                     onOpenSettings: { openSettingsWindow() },
+                    onGuessYouLike: { guessYouLikeVM.show() },
                     onClose: { hideMainWindow() },
                     onMinimize: { minimizeWindow() },
                     onMaximize: { maximizeWindow() },
@@ -467,6 +486,131 @@ struct ContentView: View {
         }
         if detailPath.isEmpty {
             clearSelectedDetailBindings()
+        }
+    }
+
+    // MARK: - 猜你喜欢回调
+
+    /// 将 GuessYouLikeItem 映射到 Wallpaper（用于详情与下载）
+    private func resolveWallpaper(from item: GuessYouLikeItem) -> Wallpaper {
+        let imageURL = item.imageURL
+        return Wallpaper(
+            id: item.id,
+            url: item.destination,
+            shortUrl: nil,
+            views: 0,
+            favorites: 0,
+            downloads: nil,
+            source: nil,
+            purity: "sfw",
+            category: "general",
+            dimensionX: 0,
+            dimensionY: 0,
+            resolution: item.subtitle,
+            ratio: "",
+            fileSize: nil,
+            fileType: nil,
+            createdAt: nil,
+            colors: [],
+            path: imageURL,
+            thumbs: Wallpaper.Thumbs(large: imageURL, original: imageURL, small: imageURL),
+            tags: nil,
+            uploader: nil
+        )
+    }
+
+    /// 将 GuessYouLikeItem 映射到 MediaItem（用于详情）
+    private func resolveMediaItem(from item: GuessYouLikeItem) -> MediaItem {
+        MediaItem(
+            slug: item.id,
+            title: item.title,
+            pageURL: URL(string: item.destination)
+                ?? URL(string: "https://example.com")!,
+            thumbnailURL: URL(string: item.imageURL)
+                ?? URL(string: "https://example.com")!,
+            resolutionLabel: item.subtitle,
+            collectionTitle: item.sourceName,
+            summary: nil,
+            previewVideoURL: nil,
+            posterURL: URL(string: item.imageURL),
+            tags: [],
+            exactResolution: nil,
+            durationSeconds: nil,
+            downloadOptions: [],
+            sourceName: item.sourceName,
+            isAnimatedImage: nil
+        )
+    }
+
+    private func handleGuessYouLikeDetail(_ item: GuessYouLikeItem) {
+        guessYouLikeVM.dismiss()
+        switch item.contentType {
+        case .wallpaper:
+            let wp = resolveWallpaper(from: item)
+            // 通过 NavigationStack 打开详情
+            navigationState.selectedWallpaper = wp
+        case .video, .anime:
+            let media = resolveMediaItem(from: item)
+            navigationState.selectedMedia = media
+        }
+    }
+
+    private func handleGuessYouLikeDownload(_ item: GuessYouLikeItem) {
+        guessYouLikeVM.dismiss()
+        switch item.contentType {
+        case .wallpaper:
+            let wp = resolveWallpaper(from: item)
+            Task {
+                do {
+                    try await viewModel.downloadWallpaper(wp)
+                } catch {
+                    AppLogger.error(.download, "猜你喜欢下载壁纸失败",
+                        metadata: ["id": wp.id, "error": error.localizedDescription])
+                }
+            }
+        case .video, .anime:
+            let media = resolveMediaItem(from: item)
+            Task {
+                do {
+                    // Wallpaper Engine 走专用下载路径
+                    if item.sourceName == "Wallpaper Engine" {
+                        let workshopItem = MediaItem(
+                            slug: "workshop_\(item.id)",
+                            title: item.title,
+                            pageURL: URL(string: item.destination)
+                                ?? URL(string: "https://example.com")!,
+                            thumbnailURL: URL(string: item.imageURL)
+                                ?? URL(string: "https://example.com")!,
+                            resolutionLabel: item.subtitle,
+                            collectionTitle: item.sourceName,
+                            sourceName: item.sourceName
+                        )
+                        try await mediaViewModel.downloadWorkshopWallpaper(workshopItem)
+                        return
+                    }
+
+                    // 1. 加载详情获取 downloadOptions（与详情页 downloadMedia 逻辑一致）
+                    let resolved = try await mediaViewModel.loadDetail(for: media)
+                    // 2. 自动选择最高画质（与详情页一致）
+                    guard let best = resolved.downloadOptions.max(by: {
+                        if $0.qualityRank == $1.qualityRank {
+                            return $0.fileSizeMegabytes < $1.fileSizeMegabytes
+                        }
+                        return $0.qualityRank < $1.qualityRank
+                    }) else {
+                        throw NetworkError.invalidResponse
+                    }
+                    // 3. 走标准下载流程，自动触发 DownloadProgressToastHost
+                    try await mediaViewModel.downloadMedia(resolved, option: best)
+                } catch {
+                    AppLogger.error(.download, "猜你喜欢下载媒体失败",
+                        metadata: ["id": media.id, "error": error.localizedDescription])
+                    // 自动下载失败时 fallback 到详情页，让用户手动下载
+                    await MainActor.run {
+                        navigationState.selectedMedia = media
+                    }
+                }
+            }
         }
     }
 

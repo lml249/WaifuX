@@ -272,13 +272,37 @@ final class StatusBarController: NSObject {
 
         // 构建各屏幕独立的暂停/关闭/音量菜单项
         let activeScreens = videoWallpaperManager.activeScreens
-        let isMultiScreenNative = activeScreens.count > 1
+
+        // macOS 26+：扩展控制模式下，activeScreens 为空但壁纸仍活跃
+        // 使用所有屏幕 + per-display prefs 来构建控件
+        let isExtensionMode: Bool
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            isExtensionMode = true
+        } else {
+            isExtensionMode = false
+        }
+
+        let screensToShow: [NSScreen]
+        if isExtensionMode {
+            screensToShow = NSScreen.screens
+        } else {
+            screensToShow = activeScreens
+        }
+
+        let isMultiScreenNative = screensToShow.count > 1
 
         if isMultiScreenNative {
-            // 多显示器：每屏独立控制组 → [暂停] [关闭壁纸] [音量滑块] 为一组，按显示器顺序排列
-            for screen in activeScreens {
+            for screen in screensToShow {
                 let screenName = screen.localizedName
-                let isScreenPaused = videoWallpaperManager.isPaused(on: screen)
+
+                // 获取暂停状态：扩展模式用 prefs，本地模式用 player
+                let isScreenPaused: Bool
+                if isExtensionMode, #available(macOS 26.0, *),
+                   let displayID = Self.cgDisplayID(for: screen) {
+                    isScreenPaused = LockScreenWallpaperService.shared.isDisplayPaused(displayID)
+                } else {
+                    isScreenPaused = videoWallpaperManager.isPaused(on: screen)
+                }
 
                 let pauseItem = NSMenuItem(
                     title: isScreenPaused
@@ -300,13 +324,11 @@ final class StatusBarController: NSObject {
                 disableItem.representedObject = screen
                 wallpaperControlItems.append(disableItem)
 
-                // 该显示器的音量滑块紧随其后（同一显示器内）
-                if hasNativeWallpaper {
+                if !isExtensionMode {
                     wallpaperControlItems.append(buildVolumeMenuItem(for: screen))
                 }
             }
         } else {
-            // 单显示器：保持原有简洁菜单
             toggleWallpaperItem.title = hasWallpaper ? t("statusbar.disableWallpaper") : t("statusbar.enableWallpaper")
             toggleWallpaperItem.target = self
             wallpaperControlItems.append(toggleWallpaperItem)
@@ -318,8 +340,7 @@ final class StatusBarController: NSObject {
             playPauseItem.target = self
             wallpaperControlItems.append(playPauseItem)
 
-            // 单屏音量滑块也跟在控制项后面，而不是放到 mute 下面
-            if hasNativeWallpaper, let screen = activeScreens.first ?? NSScreen.screens.first {
+            if !isExtensionMode, hasNativeWallpaper, let screen = activeScreens.first ?? NSScreen.screens.first {
                 wallpaperControlItems.append(buildVolumeMenuItem(for: screen))
             }
         }
@@ -377,6 +398,15 @@ final class StatusBarController: NSObject {
             return
         }
 
+        // macOS 26+：扩展控制模式下通过共享 prefs 控制 per-display 暂停
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            if let displayID = Self.cgDisplayID(for: screen) {
+                let isPaused = LockScreenWallpaperService.shared.isDisplayPaused(displayID)
+                LockScreenWallpaperService.shared.setDisplayPaused(!isPaused, forDisplayID: displayID)
+            }
+            return
+        }
+
         if videoWallpaperManager.isPaused(on: screen) {
             videoWallpaperManager.resumeWallpaper(for: screen)
             DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
@@ -397,6 +427,12 @@ final class StatusBarController: NSObject {
             return
         }
 
+        // macOS 26+：扩展控制模式下停止单屏视频
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            videoWallpaperManager.stopWallpaper(for: screen)
+            return
+        }
+
         if videoWallpaperManager.hasActiveWallpaper(on: screen) {
             videoWallpaperManager.stopWallpaper(for: screen)
         }
@@ -411,6 +447,13 @@ final class StatusBarController: NSObject {
             } else {
                 weBridge.pauseWallpaper()
             }
+            return
+        }
+
+        // macOS 26+：扩展控制模式下全局暂停/恢复
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            LockScreenWallpaperService.shared.setPaused(!videoWallpaperManager.isPaused)
+            videoWallpaperManager.toggleExtensionGlobalPause()
             return
         }
 
@@ -449,6 +492,12 @@ final class StatusBarController: NSObject {
             return
         }
 
+        // macOS 26+：扩展控制模式下停止所有壁纸
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            videoWallpaperManager.stopWallpaper()
+            return
+        }
+
         if videoWallpaperManager.isVideoWallpaperActive {
             // 关闭动态壁纸
             videoWallpaperManager.stopWallpaper()
@@ -465,6 +514,19 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func toggleMute() {
+        // macOS 26+：扩展模式下静音对所有显示器生效（扩展不播放音频，但记录状态）
+        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+            let newMuted = !videoWallpaperManager.isMuted
+            videoWallpaperManager.setMuted(newMuted)
+            // 同步到所有活跃显示器的 prefs
+            for screen in NSScreen.screens {
+                if let displayID = Self.cgDisplayID(for: screen) {
+                    LockScreenWallpaperService.shared.setDisplayMuted(newMuted, forDisplayID: displayID)
+                }
+            }
+            return
+        }
+
         videoWallpaperManager.setMuted(!videoWallpaperManager.isMuted)
     }
 
@@ -475,6 +537,14 @@ final class StatusBarController: NSObject {
 
     @objc private func quitApplication() {
         quitHandler?()
+    }
+
+    /// 从 NSScreen 获取 CGDirectDisplayID（用于 per-display prefs 的 key）
+    private static func cgDisplayID(for screen: NSScreen) -> UInt32? {
+        guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+        return screenNumber.uint32Value
     }
 }
 

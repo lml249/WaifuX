@@ -35,6 +35,17 @@ LW_API void lw_renderer_destroy(void* renderer);
 /// 若渲染器未实现此功能，返回 NULL。
 LW_API char* lw_renderer_get_dynamic_texts_json(void* renderer);
 
+// --- Baking API ---
+typedef void (*lw_bake_progress_cb)(float progress, void* userData);
+
+LW_API int lw_renderer_start_bake(void* renderer, const char* outputPath,
+                                   int duration, int fps, int bitRate,
+                                   int width, int height,
+                                   lw_bake_progress_cb callback, void* userData);
+LW_API void lw_renderer_cancel_bake(void* renderer);
+LW_API int lw_renderer_is_baking(void* renderer);
+LW_API float lw_renderer_get_bake_progress(void* renderer);
+
 #ifdef __cplusplus
 }
 #endif

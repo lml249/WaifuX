@@ -10,6 +10,7 @@ struct MyLibraryContentView: View {
     @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
     @ObservedObject private var folderStore = LibraryFolderStore.shared
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
+    @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
@@ -55,6 +56,15 @@ struct MyLibraryContentView: View {
     // 新建文件夹
     @State private var showNewFolderSheet = false
     @State private var newFolderName = ""
+
+    // 同步 Steam 订阅
+    @State private var isSyncingSubscriptions = false
+    @State private var showSyncProfileSheet = false
+    @State private var showSyncSelectionSheet = false
+    @State private var syncSubscribedItems: [WorkshopWallpaper] = []
+    @State private var syncSelectedIDs = Set<String>()
+    @State private var syncIsLoadingList = false
+    @State private var syncErrorMessage: String?
 
     enum WallpaperRatioFilter: String, CaseIterable {
         case all = "all"
@@ -229,6 +239,12 @@ struct MyLibraryContentView: View {
                     showNewFolderSheet = false
                 }
             )
+        }
+        .sheet(isPresented: $showSyncProfileSheet) {
+            syncProfileSheet
+        }
+        .sheet(isPresented: $showSyncSelectionSheet) {
+            syncSelectionSheet
         }
     }
 
@@ -548,6 +564,8 @@ struct MyLibraryContentView: View {
                 color: LiquidGlassColors.secondaryViolet,
                 importAction: { Task { await importMedia() } },
                 workshopImportAction: importWorkshop,
+                syncSubscriptionAction: nil,
+                isSyncing: isSyncingSubscriptions,
                 folderURL: DownloadPathManager.shared.mediaFolderURL
             )
 
@@ -898,11 +916,325 @@ struct MyLibraryContentView: View {
     }
 
     // MARK: - Section Header
+    // MARK: - 同步订阅 - Profile ID 输入 Sheet
+
+    @State private var syncProfileInput: String = ""
+
+    private var syncProfileSheet: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 32))
+                .foregroundStyle(LiquidGlassColors.secondaryViolet)
+
+            Text("同步 Steam 订阅")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.white)
+
+            Text("请输入你的 Steam 社区档案 ID（64位数字ID 或 自定义URL）\n例如：76561198113134000 或 customurl")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.7))
+                .multilineTextAlignment(.center)
+                .lineSpacing(4)
+
+            TextField("Steam Profile ID", text: $syncProfileInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 14))
+                .padding(.horizontal, 20)
+                .onAppear {
+                    syncProfileInput = workshopSourceManager.steamProfileID
+                }
+
+            HStack(spacing: 12) {
+                Button("取消") {
+                    showSyncProfileSheet = false
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
+                Button("保存并继续") {
+                    let trimmed = syncProfileInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    workshopSourceManager.steamProfileID = trimmed
+                    showSyncProfileSheet = false
+                    Task { await fetchSubscriptionList() }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(LiquidGlassColors.secondaryViolet.opacity(0.5))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(LiquidGlassColors.secondaryViolet.opacity(0.3), lineWidth: 1)
+                )
+                .disabled(syncProfileInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(30)
+        .frame(width: 400)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(hex: "1C1C1E"))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+        )
+    }
+
+    // MARK: - 同步订阅 - 选择列表 Sheet
+
+    private var syncSelectionSheet: some View {
+        VStack(spacing: 0) {
+            // 标题区
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("选择要同步的订阅")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("已过滤掉已下载的项目，共 \(syncSubscribedItems.count) 个待同步")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                Spacer()
+                Button("全选") {
+                    let allIDs = Set(syncSubscribedItems.map(\.id))
+                    if syncSelectedIDs == allIDs {
+                        syncSelectedIDs = []
+                    } else {
+                        syncSelectedIDs = allIDs
+                    }
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(LiquidGlassColors.secondaryViolet)
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 24)
+            .padding(.bottom, 12)
+
+            Divider()
+                .background(Color.white.opacity(0.1))
+
+            if syncIsLoadingList {
+                Spacer()
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在获取订阅列表...")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                Spacer()
+            } else if syncSubscribedItems.isEmpty {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.green.opacity(0.7))
+                    Text("所有订阅已同步完成")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(syncSubscribedItems) { item in
+                            syncSelectionRow(item: item)
+                            Divider()
+                                .background(Color.white.opacity(0.05))
+                                .padding(.leading, 60)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.1))
+
+            // 底部确认区
+            HStack {
+                Text("已选择 \(syncSelectedIDs.count) 项")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+
+                Spacer()
+
+                Button("取消") {
+                    showSyncSelectionSheet = false
+                    syncSubscribedItems = []
+                    syncSelectedIDs = []
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+
+                Button {
+                    let selectedItems = syncSubscribedItems.filter { syncSelectedIDs.contains($0.id) }
+                    showSyncSelectionSheet = false
+                    syncSubscribedItems = []
+                    syncSelectedIDs = []
+                    Task { await downloadSelectedSubscriptions(selectedItems) }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isSyncingSubscriptions {
+                            ProgressView()
+                                .controlSize(.small)
+                                .scaleEffect(0.7)
+                        }
+                        Text("确认下载 (\(syncSelectedIDs.count))")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(syncSelectedIDs.isEmpty
+                                  ? Color.white.opacity(0.05)
+                                  : LiquidGlassColors.secondaryViolet.opacity(0.5))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(syncSelectedIDs.isEmpty
+                                    ? Color.white.opacity(0.05)
+                                    : LiquidGlassColors.secondaryViolet.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .disabled(syncSelectedIDs.isEmpty || isSyncingSubscriptions)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 520, height: 480)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(hex: "1C1C1E"))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+        )
+    }
+
+    private func syncSelectionRow(item: WorkshopWallpaper) -> some View {
+        Button {
+            if syncSelectedIDs.contains(item.id) {
+                syncSelectedIDs.remove(item.id)
+            } else {
+                syncSelectedIDs.insert(item.id)
+            }
+        } label: {
+            HStack(spacing: 12) {
+                // 复选框
+                Image(systemName: syncSelectedIDs.contains(item.id) ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 18))
+                    .foregroundStyle(syncSelectedIDs.contains(item.id)
+                                     ? LiquidGlassColors.secondaryViolet
+                                     : .white.opacity(0.3))
+
+                // 预览图
+                AsyncImage(url: item.previewURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .failure(_):
+                        Color.gray.opacity(0.3)
+                    case .empty:
+                        Color.gray.opacity(0.2)
+                    @unknown default:
+                        Color.gray.opacity(0.2)
+                    }
+                }
+                .frame(width: 48, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(item.type.rawValue.capitalized)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(LiquidGlassColors.secondaryViolet.opacity(0.7))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(LiquidGlassColors.secondaryViolet.opacity(0.15))
+                            .cornerRadius(3)
+                        if let subs = item.subscriptions {
+                            Text("\(formatStat(subs)) 订阅")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                    }
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .background(
+            Color.white.opacity(syncSelectedIDs.contains(item.id) ? 0.04 : 0)
+        )
+    }
+
+    private func formatStat(_ count: Int) -> String {
+        if count >= 10000 {
+            return String(format: "%.1fw", Double(count) / 10000)
+        } else if count >= 1000 {
+            return String(format: "%.1fk", Double(count) / 1000)
+        }
+        return "\(count)"
+    }
+
     private func sectionHeader(
         title: String,
         color: Color,
         importAction: (() -> Void)?,
         workshopImportAction: (() -> Void)? = nil,
+        syncSubscriptionAction: (() -> Void)? = nil,
+        isSyncing: Bool = false,
         folderURL: URL?
     ) -> some View {
         HStack(spacing: 16) {
@@ -1082,6 +1414,38 @@ struct MyLibraryContentView: View {
                     .buttonStyle(.plain)
                     .pointingHandCursor()
                 }
+
+                // 同步 Steam 订阅（暂时隐藏，等待 Steam 社区认证方案）
+                // if let syncSubscriptionAction {
+                //     Button(action: syncSubscriptionAction) {
+                //         HStack(spacing: 4) {
+                //             if isSyncing {
+                //                 ProgressView()
+                //                     .controlSize(.small)
+                //                     .scaleEffect(0.7)
+                //             } else {
+                //                 Image(systemName: "arrow.triangle.2.circlepath")
+                //                     .font(.system(size: 12))
+                //             }
+                //             Text(isSyncing ? "同步中..." : "同步订阅")
+                //                 .font(.system(size: 13, weight: .semibold))
+                //         }
+                //         .foregroundStyle(.white.opacity(0.9))
+                //         .padding(.horizontal, 12)
+                //         .padding(.vertical, 6)
+                //         .background(
+                //             RoundedRectangle(cornerRadius: 8, style: .continuous)
+                //                 .fill(isSyncing ? color.opacity(0.25) : Color.white.opacity(0.08))
+                //         )
+                //         .overlay(
+                //             RoundedRectangle(cornerRadius: 8, style: .continuous)
+                //                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                //         )
+                //     }
+                //     .buttonStyle(.plain)
+                //     .pointingHandCursor()
+                //     .disabled(isSyncing)
+                // }
 
                 // 打开文件夹
                 if let folderURL {
@@ -1684,6 +2048,89 @@ struct MyLibraryContentView: View {
             alert.addButton(withTitle: "OK")
             alert.runModal()
         }
+    }
+
+    // MARK: - 同步 Steam 订阅
+
+    // MARK: - 同步 Steam 订阅
+
+    /// 获取用户订阅列表（已过滤已下载），展示选择 Sheet
+    private func fetchSubscriptionList() async {
+        syncIsLoadingList = true
+        syncSelectedIDs = []
+
+        defer { syncIsLoadingList = false }
+
+        let steamID = workshopSourceManager.steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !steamID.isEmpty else {
+            showSyncProfileSheet = true
+            return
+        }
+
+        do {
+            let allItems = try await mediaViewModel.fetchSubscribedItems(steamID: steamID)
+            syncSubscribedItems = allItems
+            // 默认全选
+            syncSelectedIDs = Set(allItems.map(\.id))
+            showSyncSelectionSheet = true
+        } catch {
+            syncErrorMessage = error.localizedDescription
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "获取订阅列表失败"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
+    /// 下载用户勾选的订阅项
+    private func downloadSelectedSubscriptions(_ items: [WorkshopWallpaper]) async {
+        guard !items.isEmpty else { return }
+        isSyncingSubscriptions = true
+
+        let mediaItems = mediaViewModel.workshopService.convertToMediaItems(items)
+        var successCount = 0
+        var failCount = 0
+
+        for item in mediaItems {
+            guard !Task.isCancelled else { break }
+            do {
+                try await mediaViewModel.downloadWorkshopWallpaper(item)
+                successCount += 1
+            } catch {
+                AppLogger.error(.media, "sync download failed", metadata: ["id": item.id, "error": "\(error)"])
+                failCount += 1
+            }
+        }
+
+        isSyncingSubscriptions = false
+        mediaViewModel.objectWillChange.send()
+
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "同步订阅"
+            if failCount > 0 {
+                alert.informativeText = "下载完成！\n成功：\(successCount) 个\n失败：\(failCount) 个"
+                alert.alertStyle = .warning
+            } else {
+                alert.informativeText = "所有勾选的订阅已开始下载！\n共 \(successCount) 个"
+                alert.alertStyle = .informational
+            }
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
+
+    /// 同步按钮入口：先检查 Profile ID，然后获取订阅列表
+    private func syncSubscriptions() {
+        guard workshopSourceManager.hasSteamProfileID else {
+            showSyncProfileSheet = true
+            return
+        }
+        Task { await fetchSubscriptionList() }
     }
 
     private func makeImportedWallpaper(from fileURL: URL) -> Wallpaper {
