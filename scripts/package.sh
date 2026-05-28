@@ -250,7 +250,7 @@ sign_exported_app() {
           CODE_SIGN_IDENTITY="$identity" \
           CODE_SIGN_ENTITLEMENTS="$extension_entitlements" \
           ENABLE_HARDENED_RUNTIME=YES \
-          CODE_SIGN_STYLE=Manual \
+          CODE_SIGN_STYLE=Automatic \
           OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
           clean build 2>&1 | tail -5
         local built_appex

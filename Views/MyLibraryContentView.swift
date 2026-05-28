@@ -574,7 +574,7 @@ struct MyLibraryContentView: View {
                 color: LiquidGlassColors.secondaryViolet,
                 importAction: { Task { await importMedia() } },
                 workshopImportAction: importWorkshop,
-                syncSubscriptionAction: nil,
+                syncSubscriptionAction: { syncSubscriptions() },
                 isSyncing: isSyncingSubscriptions,
                 folderURL: DownloadPathManager.shared.mediaFolderURL
             )
@@ -1425,37 +1425,37 @@ struct MyLibraryContentView: View {
                     .pointingHandCursor()
                 }
 
-                // 同步 Steam 订阅（暂时隐藏，等待 Steam 社区认证方案）
-                // if let syncSubscriptionAction {
-                //     Button(action: syncSubscriptionAction) {
-                //         HStack(spacing: 4) {
-                //             if isSyncing {
-                //                 ProgressView()
-                //                     .controlSize(.small)
-                //                     .scaleEffect(0.7)
-                //             } else {
-                //                 Image(systemName: "arrow.triangle.2.circlepath")
-                //                     .font(.system(size: 12))
-                //             }
-                //             Text(isSyncing ? "同步中..." : "同步订阅")
-                //                 .font(.system(size: 13, weight: .semibold))
-                //         }
-                //         .foregroundStyle(.white.opacity(0.9))
-                //         .padding(.horizontal, 12)
-                //         .padding(.vertical, 6)
-                //         .background(
-                //             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                //                 .fill(isSyncing ? color.opacity(0.25) : Color.white.opacity(0.08))
-                //         )
-                //         .overlay(
-                //             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                //                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                //         )
-                //     }
-                //     .buttonStyle(.plain)
-                //     .pointingHandCursor()
-                //     .disabled(isSyncing)
-                // }
+                // 同步 Steam 订阅
+                if let syncSubscriptionAction {
+                    Button(action: syncSubscriptionAction) {
+                        HStack(spacing: 4) {
+                            if isSyncing {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.7)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 12))
+                            }
+                            Text(isSyncing ? "同步中..." : "同步订阅")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(isSyncing ? color.opacity(0.25) : Color.white.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .disabled(isSyncing)
+                }
 
                 // 打开文件夹
                 if let folderURL {
