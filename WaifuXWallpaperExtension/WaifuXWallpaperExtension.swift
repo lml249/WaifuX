@@ -230,7 +230,8 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         CFNotificationCenterAddObserver(
             center,
             observer,
-            { _, _, _, _, _ in
+            { _, observer, _, _, _ in
+                guard observer != nil else { return }
                 WallpaperState.shared.clearCaches()
                 extLog("[Extension] Library changed — cleared caches")
             },
@@ -255,112 +256,15 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         try? FileManager.default.createDirectory(at: cmdDir, withIntermediateDirectories: true)
 
         // 每 1 秒轮询命令目录（开销极小，避免沙箱下 DispatchSource + open() 不可用）
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.processCommands(in: cmdDir)
+        // processCommands 是顶层函数，不捕获 self，避免 Sendable 警告
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            processCommands(in: cmdDir)
         }
 
         extLog("[Commands] 命令目录轮询已启动: \(cmdDir.path)")
 
         // 立即处理可能积压的命令
         processCommands(in: cmdDir)
-    }
-
-    /// 扫描并处理 Commands 目录中的所有命令文件
-    private func processCommands(in cmdDir: URL) {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: cmdDir, includingPropertiesForKeys: [.contentModificationDateKey]
-        ) else { return }
-
-        // 按修改时间排序，逐个处理
-        let sorted = files
-            .filter { $0.pathExtension == "json" }
-            .sorted { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                     < (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
-
-        var parsedCommands: [(url: URL, action: String, command: [String: Any])] = []
-        for fileURL in sorted {
-            guard let data = try? Data(contentsOf: fileURL),
-                  let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let action = cmd["action"] as? String else {
-                try? FileManager.default.removeItem(at: fileURL)
-                continue
-            }
-
-            parsedCommands.append((fileURL, action, cmd))
-        }
-
-        guard !parsedCommands.isEmpty else { return }
-
-        // setVideo is last-write-wins. Replaying stale video switches on startup can
-        // trigger a storm of settings refreshes and renderer acquisitions.
-        let setVideoCommands = parsedCommands.filter { $0.action == "setVideo" }
-        if setVideoCommands.count > 1 {
-            extLog("[Commands] 合并 \(setVideoCommands.count) 条积压 setVideo，仅处理最新一条")
-        }
-
-        let latestSetVideoURL = setVideoCommands.last?.url
-        let commandsToProcess = parsedCommands.filter { item in
-            item.action != "setVideo" || item.url == latestSetVideoURL
-        }
-
-        for item in commandsToProcess {
-            let action = item.action
-            extLog("[Commands] 处理命令: \(action)")
-
-            switch action {
-            case "setVideo":
-                handleSetVideoCommand(item.command)
-            default:
-                extLog("[Commands] 未知命令: \(action)")
-            }
-        }
-
-        // 处理后删除本轮扫描到的命令，包括被合并跳过的过期 setVideo。
-        for item in parsedCommands {
-            try? FileManager.default.removeItem(at: item.url)
-        }
-    }
-
-    /// 处理设置壁纸命令
-    private func handleSetVideoCommand(_ cmd: [String: Any]) {
-        guard let videoID = cmd["videoID"] as? String else {
-            extLog("[Commands] setVideo 缺少 videoID")
-            return
-        }
-
-        extLog("[Commands] 切换到视频: \(videoID)")
-
-        // 更新扩展状态（只更新 currentVideoID，不停止已有渲染器）
-        // 系统负责每个显示器单独的 acquire/释放生命周期
-        WallpaperState.shared.currentVideoID = videoID
-        WallpaperState.shared.cachedVideoURL = nil
-        WallpaperState.shared.clearCaches()
-
-        let displayID = (cmd["displayID"] as? NSNumber)?.uint32Value ?? cmd["displayID"] as? UInt32
-        if let videoURL = findVideoURL(videoID: videoID) {
-            let switched = WallpaperState.shared.switchActiveRenderers(to: videoURL, displayID: displayID)
-            if switched > 0 {
-                extLog("[Commands] 已直接切换 \(switched) 个活跃 renderer 到视频: \(videoID)")
-            } else {
-                extLog("[Commands] 当前没有活跃 renderer，等待 WallpaperAgent acquire: \(videoID)")
-            }
-        } else {
-            extLog("[Commands] ⚠️ 未找到命令指定的视频文件: \(videoID)")
-        }
-
-        // 通知 App 侧状态变化
-        WallpaperPrefs.shared.setActive(true)
-
-        // 发送 Darwin 通知，触发 XPCHandler.handlePrefsChanged() → updateSettingsViewModels
-        // 这样系统会立即收到刷新信号，知晓新视频可用
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterPostNotification(
-            center,
-            CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
-            nil, nil, true
-        )
-
-        extLog("[Commands] 视频切换完成: \(videoID)")
     }
 
     static func recomputeAndApplyPolicy() {
@@ -385,6 +289,106 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             renderer.applyPolicy(policy)
         }
     }
+}
+
+// MARK: - Command Processing (top-level to avoid Sendable capture of WaifuXWallpaperExtension.self)
+
+/// 扫描并处理 Commands 目录中的所有命令文件
+private func processCommands(in cmdDir: URL) {
+    guard let files = try? FileManager.default.contentsOfDirectory(
+        at: cmdDir, includingPropertiesForKeys: [.contentModificationDateKey]
+    ) else { return }
+
+    // 按修改时间排序，逐个处理
+    let sorted = files
+        .filter { $0.pathExtension == "json" }
+        .sorted { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                 < (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
+
+    var parsedCommands: [(url: URL, action: String, command: [String: Any])] = []
+    for fileURL in sorted {
+        guard let data = try? Data(contentsOf: fileURL),
+              let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let action = cmd["action"] as? String else {
+            try? FileManager.default.removeItem(at: fileURL)
+            continue
+        }
+
+        parsedCommands.append((fileURL, action, cmd))
+    }
+
+    guard !parsedCommands.isEmpty else { return }
+
+    // setVideo is last-write-wins. Replaying stale video switches on startup can
+    // trigger a storm of settings refreshes and renderer acquisitions.
+    let setVideoCommands = parsedCommands.filter { $0.action == "setVideo" }
+    if setVideoCommands.count > 1 {
+        extLog("[Commands] 合并 \(setVideoCommands.count) 条积压 setVideo，仅处理最新一条")
+    }
+
+    let latestSetVideoURL = setVideoCommands.last?.url
+    let commandsToProcess = parsedCommands.filter { item in
+        item.action != "setVideo" || item.url == latestSetVideoURL
+    }
+
+    for item in commandsToProcess {
+        let action = item.action
+        extLog("[Commands] 处理命令: \(action)")
+
+        switch action {
+        case "setVideo":
+            handleSetVideoCommand(item.command)
+        default:
+            extLog("[Commands] 未知命令: \(action)")
+        }
+    }
+
+    // 处理后删除本轮扫描到的命令，包括被合并跳过的过期 setVideo。
+    for item in parsedCommands {
+        try? FileManager.default.removeItem(at: item.url)
+    }
+}
+
+/// 处理设置壁纸命令
+private func handleSetVideoCommand(_ cmd: [String: Any]) {
+    guard let videoID = cmd["videoID"] as? String else {
+        extLog("[Commands] setVideo 缺少 videoID")
+        return
+    }
+
+    extLog("[Commands] 切换到视频: \(videoID)")
+
+    // 更新扩展状态（只更新 currentVideoID，不停止已有渲染器）
+    // 系统负责每个显示器单独的 acquire/释放生命周期
+    WallpaperState.shared.currentVideoID = videoID
+    WallpaperState.shared.cachedVideoURL = nil
+    WallpaperState.shared.clearCaches()
+
+    let displayID = (cmd["displayID"] as? NSNumber)?.uint32Value ?? cmd["displayID"] as? UInt32
+    if let videoURL = findVideoURL(videoID: videoID) {
+        let switched = WallpaperState.shared.switchActiveRenderers(to: videoURL, displayID: displayID)
+        if switched > 0 {
+            extLog("[Commands] 已直接切换 \(switched) 个活跃 renderer 到视频: \(videoID)")
+        } else {
+            extLog("[Commands] 当前没有活跃 renderer，等待 WallpaperAgent acquire: \(videoID)")
+        }
+    } else {
+        extLog("[Commands] ⚠️ 未找到命令指定的视频文件: \(videoID)")
+    }
+
+    // 通知 App 侧状态变化
+    WallpaperPrefs.shared.setActive(true)
+
+    // 发送 Darwin 通知，触发 XPCHandler.handlePrefsChanged() → updateSettingsViewModels
+    // 这样系统会立即收到刷新信号，知晓新视频可用
+    let center = CFNotificationCenterGetDarwinNotifyCenter()
+    CFNotificationCenterPostNotification(
+        center,
+        CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
+        nil, nil, true
+    )
+
+    extLog("[Commands] 视频切换完成: \(videoID)")
 }
 
 // MARK: - Logging

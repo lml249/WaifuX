@@ -371,12 +371,11 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
             // 通知系统刷新壁纸设置。系统收到后会重新调用 provideSettingsViewModels，
             // 从而看到最新部署的视频。
-            unsafeProxy.updateSettingsViewModels(viewModels) { error in
-                if let error {
-                    extLog("[XPCHandler] ❌ updateSettingsViewModels 失败: \(error)")
-                } else {
-                    extLog("[XPCHandler] ✅ 已通知系统刷新壁纸设置")
-                }
+            do {
+                try await unsafeProxy.updateSettingsViewModels(viewModels)
+                extLog("[XPCHandler] ✅ 已通知系统刷新壁纸设置")
+            } catch {
+                extLog("[XPCHandler] ❌ updateSettingsViewModels 失败: \(error)")
             }
         }
     }

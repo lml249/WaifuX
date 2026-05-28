@@ -1,7 +1,7 @@
 //  Feeds video sample buffers to AVSampleBufferDisplayLayer
 //  AVPlayerLayer doesn't work in remote CAContexts, so we render manually.
 
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 
 final class VideoRenderer: @unchecked Sendable {
@@ -11,6 +11,7 @@ final class VideoRenderer: @unchecked Sendable {
     private let stillFrameLayer: CALayer
     private var asset: AVURLAsset
     private var videoTrack: AVAssetTrack
+    private var cachedMinFrameDuration: CMTime?
     private let queue = DispatchQueue(label: "video-renderer", qos: .userInitiated)
     private var isRunning = true
     private(set) var isPaused = false
@@ -36,12 +37,15 @@ final class VideoRenderer: @unchecked Sendable {
         guard let track = tracks.first else {
             throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: "No video track"])
         }
+        let minFrameDuration = try? await track.load(.minFrameDuration)
         let displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspectFill
         displayLayer.frame = rootLayer.bounds
         displayLayer.contentsScale = rootLayer.contentsScale
         rootLayer.addSublayer(displayLayer)
-        return VideoRenderer(rootLayer: rootLayer, displayLayer: displayLayer, asset: asset, videoTrack: track)
+        let renderer = VideoRenderer(rootLayer: rootLayer, displayLayer: displayLayer, asset: asset, videoTrack: track)
+        renderer.cachedMinFrameDuration = minFrameDuration
+        return renderer
     }
 
     private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack) {
@@ -124,13 +128,16 @@ final class VideoRenderer: @unchecked Sendable {
     func replaceVideo(with videoURL: URL) {
         let newAsset = AVURLAsset(url: videoURL)
         Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
             do {
                 let tracks = try await newAsset.loadTracks(withMediaType: .video)
                 guard let track = tracks.first else {
                     extLog("[VideoRenderer] ❌ 新视频没有视频轨道: \(videoURL.lastPathComponent)")
                     return
                 }
-                self?.replaceAsset(newAsset, track: track)
+                let minFrameDuration = try? await track.load(.minFrameDuration)
+                // 将 track 和 duration 存入属性，避免在回调中捕获非 Sendable 类型
+                self.replaceAsset(newAsset, track: track, minFrameDuration: minFrameDuration)
             } catch {
                 extLog("[VideoRenderer] ❌ 新视频加载失败: \(videoURL.lastPathComponent), \(error.localizedDescription)")
             }
@@ -155,7 +162,7 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Ramp
 
     private static let rampDuration: TimeInterval = 2.0
-    private static let rampStepInterval: TimeInterval = 1.0 / 120.0
+    private static let rampStepInterval: TimeInterval = 1.0 / 60.0
 
     private static func easeInOut(_ t: Double) -> Double {
         t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3) / 2.0
@@ -242,8 +249,12 @@ final class VideoRenderer: @unchecked Sendable {
 
     private func stopMediaRequestsForRetry(after interval: TimeInterval) {
         guard isRunning else { return }
+        // 不要立即把 isRequestingMediaData 置 false：
+        // requestMediaDataWhenReady 的回调在 isReadyForMoreMediaData 为 true 时会
+        // 立即再次触发；如果此时 isRequestingMediaData 已为 false，startMediaRequests
+        // 就能重新注册回调，形成无间隔的 CPU 紧循环。让 scheduleRetry 在定时器触发
+        // 时才重置标志，确保重试间隔真正生效。
         renderer.stopRequestingMediaData()
-        isRequestingMediaData = false
         scheduleRetry(after: interval)
     }
 
@@ -254,6 +265,7 @@ final class VideoRenderer: @unchecked Sendable {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.retryTimer = nil
+            self.isRequestingMediaData = false
             self.startMediaRequests()
         }
         retryTimer = timer
@@ -317,7 +329,7 @@ final class VideoRenderer: @unchecked Sendable {
         }
     }
 
-    private func replaceAsset(_ newAsset: AVURLAsset, track: AVAssetTrack) {
+    private func replaceAsset(_ newAsset: AVURLAsset, track: AVAssetTrack, minFrameDuration: CMTime? = nil) {
         queue.async { [weak self] in
             guard let self, self.isRunning else { return }
             self.renderer.stopRequestingMediaData()
@@ -331,6 +343,7 @@ final class VideoRenderer: @unchecked Sendable {
             self.nextOutput = nil
             self.asset = newAsset
             self.videoTrack = track
+            if let minFrameDuration { self.cachedMinFrameDuration = minFrameDuration }
             self.ptsOffset = .zero
             self.lastEnqueuedEnd = .zero
             self.emptyReadCount = 0
@@ -376,11 +389,7 @@ final class VideoRenderer: @unchecked Sendable {
             extLog("[VideoRenderer] ❌ AVAssetReader 创建失败: \(asset.url.lastPathComponent)")
             return
         }
-        guard let track = asset.tracks(withMediaType: .video).first else {
-            extLog("[VideoRenderer] ❌ 未找到视频轨道: \(asset.url.lastPathComponent)")
-            reader.cancelReading()
-            return
-        }
+        let track = self.videoTrack
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
         output.alwaysCopiesSampleData = false
         reader.add(output)
@@ -424,8 +433,8 @@ final class VideoRenderer: @unchecked Sendable {
         if duration.isValid && duration.isNumeric && CMTimeCompare(duration, .zero) > 0 {
             return duration
         }
-        let frameDuration = videoTrack.minFrameDuration
-        if frameDuration.isValid && frameDuration.isNumeric && CMTimeCompare(frameDuration, .zero) > 0 {
+        if let frameDuration = cachedMinFrameDuration,
+           frameDuration.isValid, frameDuration.isNumeric, CMTimeCompare(frameDuration, .zero) > 0 {
             return frameDuration
         }
         return CMTime(value: 1, timescale: 30)
