@@ -135,9 +135,15 @@ jobs:
               fi
             fi
             codesign "${SIGN_ARGS[@]}" "$f"
-            if [[ "$f" == *.appex ]] && ! codesign -d --entitlements :- "$f" 2>/dev/null | grep -q "com.apple.security.application-groups"; then
-              echo "  ❌ Extension missing application-groups entitlement: $f"
-              exit 1
+            if [[ "$f" == *.appex ]]; then
+              local ent_check
+              ent_check=$(codesign -d --entitlements - "$f" 2>/dev/null || true)
+              if ! echo "$ent_check" | grep -q "com.apple.security.application-groups"; then
+                echo "  ❌ Extension missing application-groups entitlement: $f"
+                echo "  Debug entitlements:"
+                echo "$ent_check" | head -20
+                exit 1
+              fi
             fi
           }
 

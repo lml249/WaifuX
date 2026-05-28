@@ -277,6 +277,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             .sorted { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                      < (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
 
+        var parsedCommands: [(url: URL, action: String, command: [String: Any])] = []
         for fileURL in sorted {
             guard let data = try? Data(contentsOf: fileURL),
                   let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -285,17 +286,38 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                 continue
             }
 
+            parsedCommands.append((fileURL, action, cmd))
+        }
+
+        guard !parsedCommands.isEmpty else { return }
+
+        // setVideo is last-write-wins. Replaying stale video switches on startup can
+        // trigger a storm of settings refreshes and renderer acquisitions.
+        let setVideoCommands = parsedCommands.filter { $0.action == "setVideo" }
+        if setVideoCommands.count > 1 {
+            extLog("[Commands] 合并 \(setVideoCommands.count) 条积压 setVideo，仅处理最新一条")
+        }
+
+        let latestSetVideoURL = setVideoCommands.last?.url
+        let commandsToProcess = parsedCommands.filter { item in
+            item.action != "setVideo" || item.url == latestSetVideoURL
+        }
+
+        for item in commandsToProcess {
+            let action = item.action
             extLog("[Commands] 处理命令: \(action)")
 
             switch action {
             case "setVideo":
-                handleSetVideoCommand(cmd)
+                handleSetVideoCommand(item.command)
             default:
                 extLog("[Commands] 未知命令: \(action)")
             }
+        }
 
-            // 处理完后删除命令文件
-            try? FileManager.default.removeItem(at: fileURL)
+        // 处理后删除本轮扫描到的命令，包括被合并跳过的过期 setVideo。
+        for item in parsedCommands {
+            try? FileManager.default.removeItem(at: item.url)
         }
     }
 
@@ -313,6 +335,18 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         WallpaperState.shared.currentVideoID = videoID
         WallpaperState.shared.cachedVideoURL = nil
         WallpaperState.shared.clearCaches()
+
+        let displayID = (cmd["displayID"] as? NSNumber)?.uint32Value ?? cmd["displayID"] as? UInt32
+        if let videoURL = findVideoURL(videoID: videoID) {
+            let switched = WallpaperState.shared.switchActiveRenderers(to: videoURL, displayID: displayID)
+            if switched > 0 {
+                extLog("[Commands] 已直接切换 \(switched) 个活跃 renderer 到视频: \(videoID)")
+            } else {
+                extLog("[Commands] 当前没有活跃 renderer，等待 WallpaperAgent acquire: \(videoID)")
+            }
+        } else {
+            extLog("[Commands] ⚠️ 未找到命令指定的视频文件: \(videoID)")
+        }
 
         // 通知 App 侧状态变化
         WallpaperPrefs.shared.setActive(true)

@@ -83,6 +83,21 @@ final class WallpaperState: Sendable {
         }
     }
 
+    func switchActiveRenderers(to videoURL: URL, displayID: UInt32? = nil) -> Int {
+        let renderers = lock.withLock {
+            $0.activeContexts.values.compactMap { context -> VideoRenderer? in
+                if let displayID, context.displayID != displayID {
+                    return nil
+                }
+                return context.renderer
+            }
+        }
+        for renderer in renderers {
+            renderer.replaceVideo(with: videoURL)
+        }
+        return renderers.count
+    }
+
     func uniqueDisplayIDs() -> Set<UInt32> {
         lock.withLock { Set($0.activeContexts.values.compactMap(\.displayID)) }
     }

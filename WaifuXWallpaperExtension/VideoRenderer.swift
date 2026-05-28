@@ -23,9 +23,12 @@ final class VideoRenderer: @unchecked Sendable {
 
     private var ptsOffset: CMTime = .zero
     private var lastEnqueuedEnd: CMTime = .zero
+    private var emptyReadCount = 0
 
     private var rampTimer: (any DispatchSourceTimer)?
     private var deepPauseTimer: (any DispatchSourceTimer)?
+    private var retryTimer: (any DispatchSourceTimer)?
+    private var isRequestingMediaData = false
 
     static func create(rootLayer: CALayer, videoURL: URL) async throws -> VideoRenderer {
         let asset = AVURLAsset(url: videoURL)
@@ -70,7 +73,7 @@ final class VideoRenderer: @unchecked Sendable {
             self.recreatePlayback()
             guard self.currentReader != nil else { return }
             CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
-            self.feedLoop()
+            self.startMediaRequests()
         }
     }
 
@@ -85,9 +88,12 @@ final class VideoRenderer: @unchecked Sendable {
             self.nextReader?.cancelReading()
             self.cancelRamp()
             self.cancelDeepPauseTimer()
+            self.cancelRetryTimer()
+            self.isRequestingMediaData = false
             // 重置循环时间戳偏移，避免下次 start() 时累积错误
             self.ptsOffset = .zero
             self.lastEnqueuedEnd = .zero
+            self.emptyReadCount = 0
         }
     }
 
@@ -108,9 +114,26 @@ final class VideoRenderer: @unchecked Sendable {
                 guard let self, self.isRunning else { return }
                 self.recreatePlayback()
                 CMTimebaseSetRate(self.timebase, rate: 1.0)
+                self.startMediaRequests()
             }
         } else {
             CMTimebaseSetRate(timebase, rate: 1.0)
+        }
+    }
+
+    func replaceVideo(with videoURL: URL) {
+        let newAsset = AVURLAsset(url: videoURL)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let tracks = try await newAsset.loadTracks(withMediaType: .video)
+                guard let track = tracks.first else {
+                    extLog("[VideoRenderer] ❌ 新视频没有视频轨道: \(videoURL.lastPathComponent)")
+                    return
+                }
+                self?.replaceAsset(newAsset, track: track)
+            } catch {
+                extLog("[VideoRenderer] ❌ 新视频加载失败: \(videoURL.lastPathComponent), \(error.localizedDescription)")
+            }
         }
     }
 
@@ -209,39 +232,70 @@ final class VideoRenderer: @unchecked Sendable {
 
     // MARK: - Feed Loop
 
-    private func feedLoop() {
+    private func startMediaRequests() {
+        guard isRunning, !isRequestingMediaData else { return }
+        isRequestingMediaData = true
+        renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
+            self?.feedReadySamples()
+        }
+    }
+
+    private func stopMediaRequestsForRetry(after interval: TimeInterval) {
+        guard isRunning else { return }
+        renderer.stopRequestingMediaData()
+        isRequestingMediaData = false
+        scheduleRetry(after: interval)
+    }
+
+    private func scheduleRetry(after interval: TimeInterval) {
+        cancelRetryTimer()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + interval)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.retryTimer = nil
+            self.startMediaRequests()
+        }
+        retryTimer = timer
+        timer.resume()
+    }
+
+    private func cancelRetryTimer() {
+        retryTimer?.cancel()
+        retryTimer = nil
+    }
+
+    private func feedReadySamples() {
         guard isRunning else { return }
 
         while isRunning, let output = currentOutput, renderer.isReadyForMoreMediaData {
             if let sample = output.copyNextSampleBuffer() {
+                emptyReadCount = 0
                 let adjusted = adjustedSampleBuffer(sample)
                 renderer.enqueue(adjusted)
-                let dur = CMSampleBufferGetDuration(adjusted)
-                let end = CMTimeAdd(CMSampleBufferGetPresentationTimeStamp(adjusted), dur)
+                let pts = CMSampleBufferGetPresentationTimeStamp(adjusted)
+                let dur = effectiveDuration(for: adjusted)
+                let end = dur.isValid && dur.isNumeric ? CMTimeAdd(pts, dur) : pts
                 if CMTimeCompare(end, lastEnqueuedEnd) > 0 {
                     lastEnqueuedEnd = end
                 }
             } else {
                 let readerStatus = currentReader?.status ?? .unknown
-                if readerStatus == .completed || readerStatus == .reading {
-                    // Loop boundary: gapless loop — no flush, no timebase reset.
-                    // Advance ptsOffset so the next loop's sample PTS continues
-                    // from where the previous loop ended.
-                    if lastEnqueuedEnd.isValid && CMTimeCompare(lastEnqueuedEnd, ptsOffset) > 0 {
-                        ptsOffset = lastEnqueuedEnd
-                    }
-                    lastEnqueuedEnd = .zero
-
-                    // Swap to next reader (preloaded) or recreate synchronously
-                    currentReader = nextReader
-                    currentOutput = nextOutput
-                    nextReader = nil
-                    nextOutput = nil
-                    if currentOutput == nil {
-                        recreatePlayback()
-                    }
+                if readerStatus == .completed {
+                    advanceToNextLoop()
                     // Continue loop — next iteration picks up new currentOutput
                     continue
+                } else if readerStatus == .reading {
+                    // AVAssetReader can briefly report "reading" while no sample is
+                    // currently available. Treating that as EOF recreates readers in a
+                    // tight loop and can peg the extension process.
+                    emptyReadCount += 1
+                    if emptyReadCount >= 3, hasEnqueuedFramesInCurrentLoop {
+                        advanceToNextLoop()
+                        continue
+                    }
+                    stopMediaRequestsForRetry(after: 1.0 / 30.0)
+                    return
                 } else {
                     // Reader failed or was cancelled — attempt recovery
                     // 某些视频格式（HEVC/H.265、含 B 帧、变帧率等）可能导致
@@ -258,10 +312,59 @@ final class VideoRenderer: @unchecked Sendable {
             }
         }
 
-        if isRunning {
-            queue.asyncAfter(deadline: .now() + 0.005) { [weak self] in
-                self?.feedLoop()
+        if isRunning, currentOutput == nil {
+            stopMediaRequestsForRetry(after: 1.0)
+        }
+    }
+
+    private func replaceAsset(_ newAsset: AVURLAsset, track: AVAssetTrack) {
+        queue.async { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.renderer.stopRequestingMediaData()
+            self.renderer.flush(removingDisplayedImage: true) {}
+            self.cancelRetryTimer()
+            self.currentReader?.cancelReading()
+            self.nextReader?.cancelReading()
+            self.currentReader = nil
+            self.currentOutput = nil
+            self.nextReader = nil
+            self.nextOutput = nil
+            self.asset = newAsset
+            self.videoTrack = track
+            self.ptsOffset = .zero
+            self.lastEnqueuedEnd = .zero
+            self.emptyReadCount = 0
+            self.isRequestingMediaData = false
+            CMTimebaseSetTime(self.timebase, time: .zero)
+            CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
+            self.recreatePlayback()
+            if self.currentReader != nil {
+                self.startMediaRequests()
+                extLog("[VideoRenderer] ✅ 已切换视频: \(newAsset.url.lastPathComponent)")
             }
+        }
+    }
+
+    private var hasEnqueuedFramesInCurrentLoop: Bool {
+        lastEnqueuedEnd.isValid && CMTimeCompare(lastEnqueuedEnd, ptsOffset) > 0
+    }
+
+    private func advanceToNextLoop() {
+        emptyReadCount = 0
+        // Loop boundary: gapless loop — no flush, no timebase reset.
+        // Advance ptsOffset so the next loop's sample PTS continues
+        // from where the previous loop ended.
+        if hasEnqueuedFramesInCurrentLoop {
+            ptsOffset = lastEnqueuedEnd
+        }
+        lastEnqueuedEnd = .zero
+
+        currentReader = nextReader
+        currentOutput = nextOutput
+        nextReader = nil
+        nextOutput = nil
+        if currentOutput == nil {
+            recreatePlayback()
         }
     }
 
@@ -299,12 +402,13 @@ final class VideoRenderer: @unchecked Sendable {
             ptsOffset = .zero
         }
         lastEnqueuedEnd = .zero
+        emptyReadCount = 0
     }
 
     private func adjustedSampleBuffer(_ sample: CMSampleBuffer) -> CMSampleBuffer {
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         let dts = CMSampleBufferGetDecodeTimeStamp(sample)
-        let dur = CMSampleBufferGetDuration(sample)
+        let dur = effectiveDuration(for: sample)
         var timingInfo = CMSampleTimingInfo(
             duration: dur,
             presentationTimeStamp: pts.isValid ? CMTimeAdd(pts, ptsOffset) : pts,
@@ -313,6 +417,18 @@ final class VideoRenderer: @unchecked Sendable {
         var adjusted: CMSampleBuffer?
         CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sample, sampleTimingEntryCount: 1, sampleTimingArray: &timingInfo, sampleBufferOut: &adjusted)
         return adjusted ?? sample
+    }
+
+    private func effectiveDuration(for sample: CMSampleBuffer) -> CMTime {
+        let duration = CMSampleBufferGetDuration(sample)
+        if duration.isValid && duration.isNumeric && CMTimeCompare(duration, .zero) > 0 {
+            return duration
+        }
+        let frameDuration = videoTrack.minFrameDuration
+        if frameDuration.isValid && frameDuration.isNumeric && CMTimeCompare(frameDuration, .zero) > 0 {
+            return frameDuration
+        }
+        return CMTime(value: 1, timescale: 30)
     }
 
     // MARK: - Still Frame

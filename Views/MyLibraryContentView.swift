@@ -246,6 +246,16 @@ struct MyLibraryContentView: View {
         .sheet(isPresented: $showSyncSelectionSheet) {
             syncSelectionSheet
         }
+        .sheet(isPresented: $showSteamLoginSheet) {
+            SteamLoginSheet(isPresented: $showSteamLoginSheet)
+                .environmentObject(workshopSourceManager)
+                .onDisappear {
+                    // 登录成功后自动开始同步
+                    if workshopSourceManager.hasSteamProfileID {
+                        Task { await fetchSubscriptionList() }
+                    }
+                }
+        }
     }
 
     // MARK: - 加载动漫收藏
@@ -2125,9 +2135,12 @@ struct MyLibraryContentView: View {
     }
 
     /// 同步按钮入口：先检查 Profile ID，然后获取订阅列表
+    @State private var showSteamLoginSheet = false
+
     private func syncSubscriptions() {
         guard workshopSourceManager.hasSteamProfileID else {
-            showSyncProfileSheet = true
+            // 显示 Web 登录页面而不是输入 SteamID
+            showSteamLoginSheet = true
             return
         }
         Task { await fetchSubscriptionList() }

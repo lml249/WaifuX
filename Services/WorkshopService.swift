@@ -282,6 +282,56 @@ class WorkshopService: ObservableObject {
         return parsed
     }
 
+    // MARK: - Web 登录相关
+
+    /// 检查当前是否已通过 Web 登录
+    /// - Parameter steamID: Steam 64位数字 ID
+    /// - Returns: 登录状态
+    func checkWebLoginStatus(steamID: String) async -> Bool {
+        let profilePath = steamProfilePath(for: steamID)
+        let urlString = "https://steamcommunity.com\(profilePath)/myworkshopfiles/?appid=431960&browsefilter=mysubscriptions"
+
+        guard let url = URL(string: urlString) else { return false }
+
+        var request = URLRequest(url: url)
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let data = try await NetworkService.shared.fetchData(request: request)
+            guard let html = String(data: data, encoding: .utf8) else { return false }
+
+            // 检查页面是否包含登录表单（未登录状态）
+            let doc = try SwiftSoup.parse(html)
+            let loginForm = try doc.select("form[action*='login']").first()
+            let loginLink = try doc.select("a[href*='login']").first()
+
+            // 如果有登录表单或登录链接，说明未登录
+            if loginForm != nil || loginLink != nil {
+                AppLogger.info(.media, "checkWebLoginStatus: 未登录", metadata: ["steamID": steamID])
+                return false
+            }
+
+            // 检查页面是否包含订阅内容
+            let workshopItems = try doc.select(".workshopItem, .workshopItemWrapper, [id*='sharedfiles_']")
+            if !workshopItems.isEmpty() {
+                AppLogger.info(.media, "checkWebLoginStatus: 已登录且有订阅内容", metadata: ["steamID": steamID, "items": "\(workshopItems.size())"])
+                return true
+            }
+
+            // 检查页面是否包含用户信息（即使没有订阅）
+            let userInfo = try doc.select(".playerAvatar, .persona .actual_persona_name").first()
+            if userInfo != nil {
+                AppLogger.info(.media, "checkWebLoginStatus: 已登录但可能没有订阅", metadata: ["steamID": steamID])
+                return true
+            }
+
+            return false
+        } catch {
+            AppLogger.error(.media, "checkWebLoginStatus failed", metadata: ["steamID": steamID, "error": "\(error)"])
+            return false
+        }
+    }
+
     /// 获取用户所有已订阅的壁纸（自动翻页）
     /// - Parameter steamID: Steam 64位数字 ID
     /// - Returns: 所有已订阅壁纸

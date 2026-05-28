@@ -1366,6 +1366,9 @@ private struct WorkshopSettingsTab: View {
                 // SteamCMD 登录
                 steamCMDLoginSection
 
+                // Web 登录（同步订阅用）
+                steamWebLoginSection
+
                 // 清理下载缓存
                 cleanupSection
 
@@ -1564,6 +1567,171 @@ private struct WorkshopSettingsTab: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
+        }
+    }
+
+    // MARK: - Steam Web 登录（同步订阅用）
+    @State private var showSteamLoginSheet = false
+    @State private var isCheckingLoginStatus = false
+    @State private var webLoginStatus: WebLoginStatus = .unknown
+
+    private enum WebLoginStatus: Equatable {
+        case unknown
+        case checking
+        case loggedIn(steamID: String)
+        case notLoggedIn
+        case error(String)
+    }
+
+    private var steamWebLoginSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "globe")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.blue)
+                Text("Steam 网页登录")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                if case .loggedIn = webLoginStatus {
+                    Label("已登录", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("通过网页登录 Steam 账号，用于同步您的创意工坊订阅内容。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    if isCheckingLoginStatus {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("正在检查登录状态...")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if case .loggedIn(let steamID) = webLoginStatus {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Steam ID: \(steamID)")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                Text("已登录，可以同步订阅内容")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button("退出登录") {
+                                webLoginStatus = .notLoggedIn
+                                sourceManager.steamProfileID = ""
+                            }
+                            .controlSize(.small)
+                        }
+                    } else if case .error(let message) = webLoginStatus {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("登录状态检查失败")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.red)
+                            Text(message)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("未登录")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text("点击下方按钮登录 Steam 账号")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Button(action: {
+                        showSteamLoginSheet = true
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "person.circle.fill")
+                                .font(.system(size: 14))
+                            Text("网页登录")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(LiquidGlassColors.secondaryViolet)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        checkWebLoginStatus()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12))
+                            Text("刷新状态")
+                                .font(.system(size: 12))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.white.opacity(0.05))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isCheckingLoginStatus)
+                }
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(8)
+        }
+        .sheet(isPresented: $showSteamLoginSheet) {
+            SteamLoginSheet(isPresented: $showSteamLoginSheet)
+                .environmentObject(sourceManager)
+                .onDisappear {
+                    // 登录后刷新状态
+                    checkWebLoginStatus()
+                }
+        }
+    }
+
+    private func checkWebLoginStatus() {
+        let steamID = sourceManager.steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !steamID.isEmpty else {
+            webLoginStatus = .notLoggedIn
+            return
+        }
+
+        isCheckingLoginStatus = true
+        webLoginStatus = .checking
+
+        Task {
+            let isLoggedIn = await workshopService.checkWebLoginStatus(steamID: steamID)
+            await MainActor.run {
+                isCheckingLoginStatus = false
+                if isLoggedIn {
+                    webLoginStatus = .loggedIn(steamID: steamID)
+                } else {
+                    webLoginStatus = .notLoggedIn
+                }
+            }
         }
     }
 

@@ -243,8 +243,12 @@ sign_exported_app() {
     elif [[ "$code_path" == *.appex && -f "$extension_entitlements" ]]; then
       codesign --force --timestamp=none --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path" || \
         codesign --force --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path"
-      if ! codesign -d --entitlements :- "$code_path" 2>/dev/null | grep -q "com.apple.security.application-groups"; then
+      local ent_check
+      ent_check=$(codesign -d --entitlements - "$code_path" 2>/dev/null || true)
+      if ! echo "$ent_check" | grep -q "com.apple.security.application-groups"; then
         echo "❌ App Extension 签名缺少 application-groups entitlement: $code_path" >&2
+        echo "Debug entitlements:" >&2
+        echo "$ent_check" | head -20 >&2
         return 1
       fi
     else
