@@ -8,6 +8,8 @@ struct SteamLoginWebView: NSViewRepresentable {
     @Binding var isLoggedIn: Bool
     @Binding var steamID: String
     @Binding var isLoading: Bool
+    /// 用户点击"前往订阅页面"时递增此值，Coordinator 据此触发导航
+    @Binding var navigateToSubscriptionCount: Int
     var onLoginSuccess: ((String) -> Void)?
 
     func makeNSView(context: Context) -> WKWebView {
@@ -18,28 +20,62 @@ struct SteamLoginWebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
 
+        // 保存 WebView 引用以便后续提取 Cookie 和手动导航
+        context.coordinator.webView = webView
+
         // 加载 Steam 登录页面
-        let loginURL = URL(string: "https://steamcommunity.com/myworkshopfiles/?appid=431960&browsefilter=mysubscriptions")!
+        let loginURL = URL(string: "https://steamcommunity.com/login/home/?goto=")!
         webView.load(URLRequest(url: loginURL))
 
         return webView
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        // 更新逻辑（如需要）
+        // 检测用户点击了"前往订阅页面"（计数器递增）
+        context.coordinator.checkNavigateTrigger(navigateToSubscriptionCount, webView: nsView)
     }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
 
+    /// 导航状态机：不自动跳转，完全由用户点击控制
+    private enum NavigationState {
+        /// 初始状态，登录页加载中
+        case initial
+        /// 已有 SteamID（从 OpenID 或页面检测到），用户可点击"前往订阅页面"
+        case hasSteamID(String)
+        /// 已在 /profiles/{id}/myworkshopfiles/ 格式的订阅页（最终状态）
+        case onProfileSubscriptionPage(String)
+    }
+
     class Coordinator: NSObject, WKNavigationDelegate {
         var parent: SteamLoginWebView
-        private var hasDetectedLogin = false
+        weak var webView: WKWebView?
+        private var state: NavigationState = .initial
+        private var lastNavigateTriggerCount = 0
+
+        /// 中转订阅页 URL（Steam 会重定向到 profiles/{id}/ 格式）
+        private let redirectURL = "https://steamcommunity.com/myworkshopfiles/?appid=431960&sort=score&browsefilter=mysubscriptions"
+
+        /// 完整的 profile 格式订阅页 URL
+        private func profileSubscriptionURL(steamID: String) -> URL? {
+            let urlString = "https://steamcommunity.com/profiles/\(steamID)/myworkshopfiles/?appid=431960&sort=score&browsefilter=mysubscriptions&view=imagewall&p=1&numperpage=30"
+            return URL(string: urlString)
+        }
 
         init(_ parent: SteamLoginWebView) {
             self.parent = parent
         }
+
+        // MARK: - 由 updateNSView 调用，检测用户点击"前往订阅页面"
+        func checkNavigateTrigger(_ count: Int, webView: WKWebView) {
+            guard count > lastNavigateTriggerCount else { return }
+            lastNavigateTriggerCount = count
+            navigateToSubscription(webView: webView)
+        }
+
+        // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async {
@@ -52,69 +88,139 @@ struct SteamLoginWebView: NSViewRepresentable {
                 self.parent.isLoading = false
             }
 
-            // 检查当前 URL 是否包含订阅页面
-            if let url = webView.url {
-                let urlString = url.absoluteString
+            guard let url = webView.url else { return }
+            let urlString = url.absoluteString
 
-                // 检测是否在订阅页面（已登录状态）
+            switch state {
+
+            // ── 初始状态：只检测，不自动跳转 ──
+            case .initial:
+                // 情况 A：已经在 profile 格式的订阅页（有 Cookie 直接进来了）
+                if let sid = extractSteamIDFromProfileURL(urlString),
+                   urlString.contains("browsefilter=mysubscriptions") {
+                    reachProfilePage(steamID: sid)
+                    return
+                }
+                // 情况 B：在订阅页但没有 profile 前缀
                 if urlString.contains("myworkshopfiles") && urlString.contains("browsefilter=mysubscriptions") {
-                    // 尝试从页面提取 SteamID
-                    webView.evaluateJavaScript("document.body.innerHTML") { result, error in
-                        if let html = result as? String {
-                            self.extractSteamIDFromPage(html, webView: webView)
-                        }
-                    }
+                    tryExtractSteamIDFromPage(webView: webView)
+                    return
                 }
-
-                // 检测 OpenID 回调
+                // 情况 C：OpenID 回调（登录成功）
                 if urlString.contains("openid.claimed_id") || urlString.contains("openid.identity") {
-                    // 登录成功，提取 SteamID
-                    self.extractSteamIDFromOpenID(url: url, webView: webView)
+                    extractSteamIDFromOpenID(url: url, webView: webView)
+                    return
+                }
+                // 情况 D：如果不在登录页（登录成功 / 已有 Cookie），标记 hasSteamID
+                if !isLoginPage(urlString), urlString.contains("steamcommunity.com") {
+                    // 尝试从页面提取 SteamID
+                    tryExtractSteamIDFromPage(webView: webView)
+                    // 如果提取不到也没关系，用户点击"前往订阅页面"后再拿
+                    setLoggedInWithoutID()
+                    return
+                }
+                // 情况 E：还在登录页 → 什么都不做
+
+            // ── 已有 SteamID，等待用户点击"前往订阅页面" ──
+            case .hasSteamID:
+                // 不自动跳转，只是检查是否直接到了订阅页
+                if let sid = extractSteamIDFromProfileURL(urlString),
+                   urlString.contains("browsefilter=mysubscriptions") {
+                    reachProfilePage(steamID: sid)
+                }
+
+            // ── 已在最终订阅页，无需任何操作 ──
+            case .onProfileSubscriptionPage:
+                break
+            }
+        }
+
+        // MARK: - 手动导航（用户触发）
+
+        /// 用户点击"前往订阅页面"→ 加载中转 URL（Steam 自动重定向到 profiles/{id}/）
+        func navigateToSubscription(webView: WKWebView) {
+            // 如果已经有 SteamID，直接导航到 profile 格式 URL
+            if case let .hasSteamID(sid) = state {
+                if let url = profileSubscriptionURL(steamID: sid) {
+                    state = .initial  // 重置状态，等待订阅页加载后重新检测
+                    webView.load(URLRequest(url: url))
+                    return
+                }
+            }
+            // 否则走中转 URL（Steam 自动重定向到 profiles/{id}/）
+            guard let url = URL(string: redirectURL) else { return }
+            state = .initial
+            webView.load(URLRequest(url: url))
+        }
+
+        // MARK: - 状态转换辅助
+
+        private func reachProfilePage(steamID: String) {
+            state = .onProfileSubscriptionPage(steamID)
+            DispatchQueue.main.async {
+                self.parent.steamID = steamID
+                self.parent.isLoggedIn = true
+                // 到达订阅页后调用登录成功回调（触发保存 SteamID）
+                self.parent.onLoginSuccess?(steamID)
+            }
+        }
+
+        /// 标记已登录但尚未拿到 SteamID（用户可点击"前往订阅页面"）
+        private func setLoggedInWithoutID() {
+            state = .hasSteamID("")
+            DispatchQueue.main.async {
+                self.parent.isLoggedIn = true
+            }
+        }
+
+        /// 用 SteamID 标记已登录
+        private func setLoggedInWithID(_ steamID: String) {
+            state = .hasSteamID(steamID)
+            DispatchQueue.main.async {
+                self.parent.steamID = steamID
+                self.parent.isLoggedIn = true
+            }
+        }
+
+        // MARK: - URL 工具
+
+        private func isLoginPage(_ urlString: String) -> Bool {
+            urlString.contains("login/home") || urlString.contains("openid/login")
+        }
+
+        private func extractSteamIDFromProfileURL(_ urlString: String) -> String? {
+            let pattern = "/profiles/(\\d{17})/"
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: urlString, range: NSRange(urlString.startIndex..., in: urlString)) else {
+                return nil
+            }
+            return String(urlString[Range(match.range(at: 1), in: urlString)!])
+        }
+
+        // MARK: - SteamID 提取
+
+        private func tryExtractSteamIDFromPage(webView: WKWebView) {
+            webView.evaluateJavaScript("document.body.innerHTML") { result, error in
+                guard let html = result as? String else { return }
+                if let id = self.extractSteamIDFromPageHTML(html) {
+                    self.setLoggedInWithID(id)
                 }
             }
         }
 
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            DispatchQueue.main.async {
-                self.parent.isLoading = false
-            }
-            print("[SteamLogin] Navigation failed: \(error.localizedDescription)")
-        }
-
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            DispatchQueue.main.async {
-                self.parent.isLoading = false
-            }
-            print("[SteamLogin] Provisional navigation failed: \(error.localizedDescription)")
-        }
-
-        // MARK: - SteamID Extraction
-
-        private func extractSteamIDFromPage(_ html: String, webView: WKWebView) {
-            // 从 HTML 中提取 SteamID
-            // 常见模式：steamid="76561198000000000" 或 profile/steamid
+        private func extractSteamIDFromPageHTML(_ html: String) -> String? {
             let patterns = [
                 "steamid=\"(\\d{17})\"",
                 "\"steamid\":\"(\\d{17})\"",
                 "profile/(\\d{17})",
                 "\"steamid64\":\"(\\d{17})\""
             ]
-
             for pattern in patterns {
-                if let regex = try? NSRegularExpression(pattern: pattern),
-                   let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) {
-                    let steamID = String(html[Range(match.range(at: 1), in: html)!])
-                    DispatchQueue.main.async {
-                        self.parent.steamID = steamID
-                        self.parent.isLoggedIn = true
-                        self.parent.onLoginSuccess?(steamID)
-                    }
-                    return
-                }
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) else { continue }
+                return String(html[Range(match.range(at: 1), in: html)!])
             }
-
-            // 如果无法提取，尝试从 Cookie 获取
-            extractSteamIDFromCookies(webView: webView)
+            return nil
         }
 
         private func extractSteamIDFromOpenID(url: URL, webView: WKWebView) {
@@ -123,70 +229,65 @@ struct SteamLoginWebView: NSViewRepresentable {
                 for item in queryItems {
                     if item.name == "openid.identity" || item.name == "openid.claimed_id" {
                         if let value = item.value {
-                            // OpenID identity 格式：https://steamcommunity.com/openid/id/76561198000000000
                             let components = value.components(separatedBy: "/")
                             if let steamID = components.last, steamID.count == 17, steamID.allSatisfy(\.isNumber) {
-                                DispatchQueue.main.async {
-                                    self.parent.steamID = steamID
-                                    self.parent.isLoggedIn = true
-                                    self.parent.onLoginSuccess?(steamID)
-                                }
+                                self.setLoggedInWithID(steamID)
                                 return
                             }
                         }
                     }
                 }
             }
+        }
 
-            // 如果 OpenID 解析失败，尝试从页面提取
-            webView.evaluateJavaScript("document.body.innerHTML") { result, error in
-                if let html = result as? String {
-                    self.extractSteamIDFromPage(html, webView: webView)
-                }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
             }
         }
 
-        private func extractSteamIDFromCookies(webView: WKWebView) {
-            // 从 WKWebsiteDataStore 获取 Cookie
-            webView.configuration.websiteDataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-                for record in records {
-                    if record.displayName.contains("steamcommunity") {
-                        // 找到 Steam Cookie，但无法直接读取内容
-                        // 需要通过 JavaScript 获取
-                        webView.evaluateJavaScript("document.cookie") { result, error in
-                            if let cookieString = result as? String {
-                                // 解析 Cookie 中的 steamLoginSecure
-                                let cookies = cookieString.components(separatedBy: "; ")
-                                for cookie in cookies {
-                                    if cookie.hasPrefix("steamLoginSecure=") {
-                                        // 找到登录 Cookie，但需要 SteamID
-                                        // 从页面再次提取
-                                        webView.evaluateJavaScript("document.body.innerHTML") { htmlResult, _ in
-                                            if let html = htmlResult as? String {
-                                                self.extractSteamIDFromPage(html, webView: webView)
-                                            }
-                                        }
-                                        return
-                                    }
-                                }
-                            }
-                        }
-                        return
-                    }
-                }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
             }
+        }
+    }
+}
+
+// MARK: - Cookie Transfer
+
+/// 将 WKWebView 默认数据存储中的 Steam 登录 Cookie 同步到共享 HTTPCookieStorage，
+/// 确保后续 URLSession 请求（NetworkService）携带有效的登录会话
+private func transferSteamCookiesToSharedStorage() async {
+    await withCheckedContinuation { continuation in
+        let cookieStore = WKWebsiteDataStore.default().httpCookieStore
+        cookieStore.getAllCookies { cookies in
+            let sharedStorage = HTTPCookieStorage.shared
+            var transferredCount = 0
+            for cookie in cookies {
+                guard cookie.domain.contains("steamcommunity.com") ||
+                      cookie.domain.contains("steampowered.com") ||
+                      cookie.domain.contains("steamcdn.com") else { continue }
+                sharedStorage.setCookie(cookie)
+                transferredCount += 1
+            }
+            AppLogger.info(.media, "Transferred \(transferredCount) Steam cookies to shared storage")
+            continuation.resume()
         }
     }
 }
 
 // MARK: - Steam Login Sheet
 /// 包装 SteamLoginWebView 的 Sheet 视图
+/// 流程：登录页 → 登录成功 → 跳转订阅页面 → 用户点击确认 → 关闭 Sheet → 父视图抓取数据
 struct SteamLoginSheet: View {
     @Binding var isPresented: Bool
     @State private var isLoggedIn = false
     @State private var steamID = ""
     @State private var isLoading = false
-    @State private var showingSyncSheet = false
+    @State private var navigateToSubscriptionCount = 0
+    /// WebView 是否已到达订阅页面（onLoginSuccess 被调用）
+    @State private var isOnSubscriptionPage = false
 
     @EnvironmentObject var workshopSourceManager: WorkshopSourceManager
 
@@ -218,12 +319,15 @@ struct SteamLoginSheet: View {
                 SteamLoginWebView(
                     isLoggedIn: $isLoggedIn,
                     steamID: $steamID,
-                    isLoading: $isLoading
-                ) { id in
-                    // 登录成功回调
-                    workshopSourceManager.steamProfileID = id
-                    workshopSourceManager.refreshStoredSteamCredentials()
-                }
+                    isLoading: $isLoading,
+                    navigateToSubscriptionCount: $navigateToSubscriptionCount,
+                    onLoginSuccess: { id in
+                        // 到达订阅页面后保存 SteamID
+                        workshopSourceManager.steamProfileID = id
+                        workshopSourceManager.refreshStoredSteamCredentials()
+                        isOnSubscriptionPage = true
+                    }
+                )
 
                 if isLoading {
                     VStack {
@@ -244,30 +348,22 @@ struct SteamLoginSheet: View {
 
             // 底部状态栏
             HStack {
-                if isLoggedIn {
+                if isOnSubscriptionPage {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
-                        Text("已登录")
+                        Text("已到达订阅页面")
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.7))
                     }
-
-                    Spacer()
-
-                    Button("同步订阅") {
-                        isPresented = false
-                        showingSyncSheet = true
+                } else if isLoggedIn {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("已登录，请前往订阅页面")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(LiquidGlassColors.secondaryViolet)
-                    )
                 } else {
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle")
@@ -276,19 +372,52 @@ struct SteamLoginSheet: View {
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.7))
                     }
+                }
 
-                    Spacer()
+                Spacer()
+
+                if isOnSubscriptionPage {
+                    // 第二步：确认开始同步
+                    Button("确认开始同步") {
+                        Task {
+                            await transferSteamCookiesToSharedStorage()
+                            if !steamID.isEmpty {
+                                workshopSourceManager.steamProfileID = steamID
+                                workshopSourceManager.refreshStoredSteamCredentials()
+                            }
+                            isPresented = false
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor)
+                    )
+                } else if isLoggedIn {
+                    // 第一步：前往订阅页面
+                    Button("前往订阅页面") {
+                        navigateToSubscriptionCount += 1
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.accentColor)
+                    )
                 }
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
         }
-        .frame(width: 600, height: 500)
+        .frame(width: 800, height: 650)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $showingSyncSheet) {
-            // 触发同步订阅
-            // 这里需要通知父组件开始同步
-        }
     }
 }
 

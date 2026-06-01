@@ -4,16 +4,16 @@ import SwiftUI
 struct CustomProgressView: View {
     var tint: Color = .white
     var scale: CGFloat = 1.0
-    
+
     @State private var rotation: Double = 0
     @State private var timer: Timer?
-    
+
     var body: some View {
         ZStack {
             Circle()
                 .stroke(tint.opacity(0.3), lineWidth: 2)
                 .frame(width: 20 * scale, height: 20 * scale)
-            
+
             Circle()
                 .trim(from: 0, to: 0.7)
                 .stroke(tint, style: StrokeStyle(lineWidth: 2, lineCap: .round))
@@ -37,9 +37,9 @@ struct CustomProgressView: View {
 // MARK: - 简化的加载点（用于更小的占位）
 struct LoadingDots: View {
     var tint: Color = .white.opacity(0.72)
-    
+
     @State private var animatingDot = 0
-    
+
     var body: some View {
         HStack(spacing: 4) {
             ForEach(0..<3) { index in
@@ -64,7 +64,7 @@ struct LoadingDots: View {
 // MARK: - 带固定尺寸的 ProgressView 包装器
 struct FixedProgressView: View {
     var tint: Color = .white
-    
+
     var body: some View {
         ProgressView()
             .progressViewStyle(CircularProgressViewStyle(tint: tint))

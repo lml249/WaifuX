@@ -27,9 +27,32 @@ final class MediaLibraryService: ObservableObject {
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
     private var downloadIDSet: Set<String> = []
+    /// 下载记录字典索引（item.id → record），O(1) 查找替代 O(n) first(where:)
+    private var downloadRecordIndex: [String: MediaDownloadRecord] = [:]
+    /// 文件存在性缓存，避免主线程反复 FileManager.fileExists(atPath:)
+    private let fileCache = FileExistenceCache.shared
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 注册内存压力通知，自动清空文件存在性缓存
+        // 用静态数组持有 observer token（非 Sendable），避免 deinit 中访问 actor 隔离属性
+        Self.registerMemoryPressureObserver(service: self)
+    }
+
+    /// 持有所有 observer tokens，避免被 dealloc 导致 observer 自动移除
+    private static var _observerTokens: [Any] = []
+    private static func registerMemoryPressureObserver(service: MediaLibraryService) {
+        let token = NotificationCenter.default.addObserver(
+            forName: .appDidReceiveMemoryPressure,
+            object: nil,
+            queue: nil,
+            using: { _ in
+                Task { @MainActor in
+                    service.fileCache.clearAll()
+                }
+            }
+        )
+        _observerTokens.append(token)
     }
 
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
@@ -43,6 +66,10 @@ final class MediaLibraryService: ObservableObject {
 
     private func rebuildDownloadIndex() {
         downloadIDSet = Set(downloadRecords.filter(\.isActive).map(\.item.id))
+        downloadRecordIndex = Dictionary(
+            downloadRecords.filter(\.isActive).map { ($0.item.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
     }
 
     /// 供 ViewModel 缓存重建时快速排除已下载项目的 ID 集合
@@ -117,7 +144,7 @@ final class MediaLibraryService: ObservableObject {
 
     func downloadRecord(for itemID: String) -> MediaDownloadRecord? {
         guard downloadIDSet.contains(itemID) else { return nil }
-        return downloadRecords.first { $0.item.id == itemID && $0.isActive }
+        return downloadRecordIndex[itemID]
     }
 
     func downloadRecord(forLocalFilePath path: String) -> MediaDownloadRecord? {
@@ -131,13 +158,13 @@ final class MediaLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ item: MediaItem) -> Bool {
-        // ⚡ 先通过 Set 快速判断
+        // ⚡ 先通过 Set 快速判断（O(1)），再通过字典索引 O(1) 获取记录
         guard downloadIDSet.contains(item.id),
-              let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+              let record = downloadRecordIndex[item.id] else {
             return false
         }
-        // 验证文件实际存在
-        let fileExists = FileManager.default.fileExists(atPath: record.localFilePath)
+        // 使用缓存检查文件存在性，避免主线程 FileManager.fileExists(atPath:)
+        let fileExists = fileCache.fileExists(atPath: record.localFilePath)
         if !fileExists {
             print("[MediaLibraryService] File not found for downloaded item: \(item.id) at \(record.localFilePath)")
         }
@@ -147,11 +174,11 @@ final class MediaLibraryService: ObservableObject {
     /// 已下载媒体在磁盘上的文件 URL（存在且可读时）
     func localFileURLIfAvailable(for item: MediaItem) -> URL? {
         guard downloadIDSet.contains(item.id),
-              let record = downloadRecords.first(where: { $0.item.id == item.id && $0.isActive }) else {
+              let record = downloadRecordIndex[item.id] else {
             return nil
         }
         let url = URL(fileURLWithPath: record.localFilePath)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard fileCache.fileExists(atPath: url.path) else { return nil }
         return url
     }
 
@@ -176,6 +203,9 @@ final class MediaLibraryService: ObservableObject {
                 at: 0
             )
         }
+
+        // 预缓存文件存在性，后续 isDownloaded() 不再走 FileManager
+        fileCache.markExisting(atPath: localFileURL.path)
 
         persistDownloads()
         upsert(item)
@@ -613,34 +643,46 @@ final class MediaLibraryService: ObservableObject {
         }
     }
 
+    /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
+    private static let persistQueue = DispatchQueue(label: "com.waifux.media.persist", qos: .utility)
+
     private func persistFavorites() {
         persistFavoritesWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.favoriteRecords) else { return }
-            self.defaults.set(data, forKey: self.favoriteRecordsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let records = favoriteRecords
+        let key = favoriteRecordsKey
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(records) else { return }
+            UserDefaults.standard.set(data, forKey: key)
         }
         persistFavoritesWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func persistDownloads() {
         persistDownloadsWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.downloadRecords) else { return }
-            self.defaults.set(data, forKey: self.downloadRecordsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let records = downloadRecords
+        let key = downloadRecordsKey
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(records) else { return }
+            UserDefaults.standard.set(data, forKey: key)
         }
         persistDownloadsWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func persistRecents() {
         persistRecentsWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.recentItems) else { return }
-            self.defaults.set(data, forKey: self.recentsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let items = recentItems
+        let key = recentsKey
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(items) else { return }
+            UserDefaults.standard.set(data, forKey: key)
         }
         persistRecentsWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func deduplicated(_ items: [MediaItem]) -> [MediaItem] {
@@ -682,9 +724,31 @@ final class WallpaperLibraryService: ObservableObject {
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
     private var downloadIDSet: Set<String> = []
+    /// 下载记录字典索引（wallpaper.id → record），O(1) 查找替代 O(n) first(where:)
+    private var downloadRecordIndex: [String: WallpaperDownloadRecord] = [:]
+    /// 文件存在性缓存，避免主线程反复 FileManager.fileExists(atPath:)
+    private let fileCache = FileExistenceCache.shared
 
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
+        // 用静态数组持有 observer token（非 Sendable），避免 deinit 中访问 actor 隔离属性
+        Self.registerMemoryPressureObserver(service: self)
+    }
+
+    /// 持有所有 observer tokens，避免被 dealloc 导致 observer 自动移除
+    private static var _observerTokens: [Any] = []
+    private static func registerMemoryPressureObserver(service: WallpaperLibraryService) {
+        let token = NotificationCenter.default.addObserver(
+            forName: .appDidReceiveMemoryPressure,
+            object: nil,
+            queue: nil,
+            using: { _ in
+                Task { @MainActor in
+                    service.fileCache.clearAll()
+                }
+            }
+        )
+        _observerTokens.append(token)
     }
 
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
@@ -698,6 +762,10 @@ final class WallpaperLibraryService: ObservableObject {
 
     private func rebuildDownloadIndex() {
         downloadIDSet = Set(downloadRecords.filter(\.isActive).map(\.wallpaper.id))
+        downloadRecordIndex = Dictionary(
+            downloadRecords.filter(\.isActive).map { ($0.wallpaper.id, $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
     }
 
     /// 供 ViewModel 缓存重建时快速排除已下载项目的 ID 集合
@@ -769,7 +837,7 @@ final class WallpaperLibraryService: ObservableObject {
 
     func downloadRecord(for wallpaperID: String) -> WallpaperDownloadRecord? {
         guard downloadIDSet.contains(wallpaperID) else { return nil }
-        return downloadRecords.first { $0.wallpaper.id == wallpaperID && $0.isActive }
+        return downloadRecordIndex[wallpaperID]
     }
 
     func downloadRecord(forLocalFilePath path: String) -> WallpaperDownloadRecord? {
@@ -783,13 +851,13 @@ final class WallpaperLibraryService: ObservableObject {
     }
 
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
-        // ⚡ 先通过 Set 快速判断
+        // ⚡ 先通过 Set 快速判断（O(1)），再通过字典索引 O(1) 获取记录
         guard downloadIDSet.contains(wallpaper.id),
-              let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+              let record = downloadRecordIndex[wallpaper.id] else {
             return false
         }
-        // 验证文件实际存在
-        let fileExists = FileManager.default.fileExists(atPath: record.localFilePath)
+        // 使用缓存检查文件存在性，避免主线程 FileManager.fileExists(atPath:)
+        let fileExists = fileCache.fileExists(atPath: record.localFilePath)
         if !fileExists {
             print("[WallpaperLibraryService] File not found for downloaded wallpaper: \(wallpaper.id) at \(record.localFilePath)")
         }
@@ -801,15 +869,15 @@ final class WallpaperLibraryService: ObservableObject {
         if wallpaper.id.hasPrefix("local_"),
            let u = wallpaper.fullImageURL,
            u.isFileURL,
-           FileManager.default.fileExists(atPath: u.path) {
+           fileCache.fileExists(atPath: u.path) {
             return u
         }
         guard downloadIDSet.contains(wallpaper.id),
-              let record = downloadRecords.first(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) else {
+              let record = downloadRecordIndex[wallpaper.id] else {
             return nil
         }
         let url = URL(fileURLWithPath: record.localFilePath)
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        guard fileCache.fileExists(atPath: url.path) else { return nil }
         return url
     }
 
@@ -825,6 +893,9 @@ final class WallpaperLibraryService: ObservableObject {
                 at: 0
             )
         }
+
+        // 预缓存文件存在性，后续 isDownloaded() 不再走 FileManager
+        fileCache.markExisting(atPath: fileURL.path)
 
         persistDownloads()
         upsert(wallpaper)
@@ -1147,24 +1218,33 @@ final class WallpaperLibraryService: ObservableObject {
         }
     }
 
+    /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
+    private static let persistQueue = DispatchQueue(label: "com.waifux.wallpaper.persist", qos: .utility)
+
     private func persistFavorites() {
         persistFavoritesWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.favoriteRecords) else { return }
-            self.defaults.set(data, forKey: self.favoriteRecordsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let records = favoriteRecords
+        let key = favoriteRecordsKey
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(records) else { return }
+            UserDefaults.standard.set(data, forKey: key)
         }
         persistFavoritesWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func persistDownloads() {
         persistDownloadsWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let data = try? JSONEncoder().encode(self.downloadRecords) else { return }
-            self.defaults.set(data, forKey: self.downloadRecordsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let records = downloadRecords
+        let key = downloadRecordsKey
+        let work = DispatchWorkItem {
+            guard let data = try? JSONEncoder().encode(records) else { return }
+            UserDefaults.standard.set(data, forKey: key)
         }
         persistDownloadsWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     private func deduplicated(_ records: [WallpaperFavoriteRecord]) -> [WallpaperFavoriteRecord] {

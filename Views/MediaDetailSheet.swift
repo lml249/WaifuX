@@ -368,8 +368,9 @@ struct MediaDetailSheet: View {
             return cachedSceneBakeVideoURL
         }
         // 已下载的视频文件优先使用本地路径，避免从网络加载
+        // 使用 FileExistenceCache 避免主线程 FileManager.fileExists(atPath:)
         if let localURL = currentDownloadRecord?.localFileURL,
-           FileManager.default.fileExists(atPath: localURL.path),
+           FileExistenceCache.shared.fileExists(atPath: localURL.path),
            ["mp4", "mov", "webm", "m4v"].contains(localURL.pathExtension.lowercased()) {
             return localURL
         }
@@ -2882,9 +2883,9 @@ struct MediaDetailSheet: View {
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
-        // macOS 26+：清除锁屏视频
+        // macOS 26+：清空锁屏镜像帧源缓存
         if #available(macOS 26.0, *) {
-            LockScreenWallpaperService.shared.clearLockScreenVideo()
+            LockScreenWallpaperService.shared.clearMirroringSourceCache()
         }
 
         let screens = NSScreen.screens

@@ -29,6 +29,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         var scaleFactor: CGFloat = 1.0
         var isPreview = false
         var choiceConfiguration: String?
+        var choiceFiles: [URL] = []
 
         if let reqObj = request as? NSObject {
             let mirror = Mirror(reflecting: reqObj)
@@ -56,7 +57,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                     }
                 }
                 isPreview = desc.contains("isPreview: true")
-                // 尝试解析 String 格式的 configuration: Optional("videoID")
+                // 尝试解析 String 格式的 configuration: Optional("display-instance-id")
                 if let cRange = desc.range(of: "configuration: Optional(\""), let cEnd = desc[cRange.upperBound...].range(of: "\")") {
                     choiceConfiguration = String(desc[cRange.upperBound..<cEnd.lowerBound])
                 }
@@ -71,10 +72,47 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                         }
                     }
                 }
+                // 从 Mirror 遍历提取 cacheDirectory 和 choice files（更可靠的提取方式）
+                for child in mirror.children {
+                    let reqMirror = Mirror(reflecting: child.value)
+                    for prop in reqMirror.children {
+                        if prop.label == "destination" {
+                            let destMirror = Mirror(reflecting: prop.value)
+                            for destProp in destMirror.children {
+                                if destProp.label == "directDisplayID", let did = destProp.value as? UInt32 {
+                                    displayID = did
+                                } else if destProp.label == "cacheDirectory" {
+                                    if let url = prop.value as? URL {
+                                        WallpaperState.shared.cacheDirectoryURL = url
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 从 descriptor 提取配置和文件
+            let rawMirror = Mirror(reflecting: reqObj)
+            if let rawValue = rawMirror.children.first?.value {
+                let rMirror = Mirror(reflecting: rawValue)
+                for prop in rMirror.children where prop.label == "descriptor" {
+                    let descMirror = Mirror(reflecting: prop.value)
+                    for descProp in descMirror.children {
+                        if descProp.label == "configuration" {
+                            if let data = descProp.value as? Data, !data.isEmpty {
+                                choiceConfiguration = String(data: data, encoding: .utf8)
+                            }
+                        } else if descProp.label == "files" {
+                            if let urls = descProp.value as? [URL] {
+                                choiceFiles = urls
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 回退：如果无法从 request 解析 configuration，使用命令文件设置的 currentVideoID
+        // 回退：如果 request 没带配置，使用上一次实例 ID。
         if choiceConfiguration == nil || choiceConfiguration?.isEmpty == true {
             let fallbackID = WallpaperState.shared.currentVideoID
             if let fallbackID, !fallbackID.isEmpty {
@@ -83,9 +121,51 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             }
         }
 
-        // Update current video ID from choice
-        if let config = choiceConfiguration, !config.isEmpty {
-            WallpaperState.shared.currentVideoID = config
+        // 回退：如果 displayID 仍为 nil，尝试从 choiceConfiguration 提取
+        // 实例 ID 格式为 "display-<number>"
+        if displayID == nil, let config = choiceConfiguration,
+           config.hasPrefix("display-"),
+           let idStr = config.split(separator: "-").last,
+           let parsed = UInt32(idStr) {
+            displayID = parsed
+            extLog("[acquire] ⚠️ 从 choiceConfiguration 提取 displayID: \(parsed) (config: \(config))")
+        }
+
+        // 最终回退：如果 displayID 为 nil，尝试从系统获取
+        if displayID == nil {
+            // 尝试 NSScreen（可能受限于沙箱）
+            if let mainScreen = NSScreen.screens.first,
+               let screenNumber = mainScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                displayID = screenNumber.uint32Value
+                extLog("[acquire] ⚠️ 从 NSScreen 获取 displayID: \(displayID!)")
+            }
+        }
+        // 最后手段：CGGetActiveDisplayList（不依赖 AppKit，沙箱安全）
+        if displayID == nil {
+            var count: UInt32 = 0
+            if CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 {
+                var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+                if CGGetActiveDisplayList(count, &displays, &count) == .success {
+                    displayID = displays[0]
+                    extLog("[acquire] ⚠️ 从 CGGetActiveDisplayList 获取 displayID: \(displayID!)")
+                }
+            }
+        }
+        if displayID == nil {
+            extLog("[acquire] ❌ 无法确定 displayID，无法创建渲染管线")
+            reply(nil, NSError(domain: "WaifuXExtension", code: 4,
+                               userInfo: [NSLocalizedDescriptionKey: "Cannot determine display ID"]))
+            return
+        }
+
+        // 记录当前激活的实例 ID（display instance），供状态同步和日志使用。
+        if let instanceID = choiceConfiguration, !instanceID.isEmpty {
+            let previousID = WallpaperState.shared.currentVideoID
+            if previousID != instanceID {
+                extLog("  Instance changed: \(previousID ?? "nil") → \(instanceID)")
+                WallpaperState.shared.currentVideoID = instanceID
+                WallpaperPrefs.shared.updateCurrentVideo()
+            }
         }
 
         // Create remote CAContext
@@ -145,10 +225,9 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             extLog("  Set cached snapshot as initial layer content")
         }
 
-        let videoURL = findVideoURL(videoID: choiceConfiguration)
-
-        if let videoURL {
-            extLog("  Setting up VideoRenderer with: \(videoURL.lastPathComponent) (videoID: \(choiceConfiguration ?? "default"))")
+        if let did = displayID {
+            let instanceID = choiceConfiguration ?? "display-\(did)"
+            extLog("  Setting up display instance \(instanceID) for display \(did)")
             caContext.layer = rootLayer
             CATransaction.flush()
 
@@ -156,48 +235,135 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             nonisolated(unsafe) let unsafeRootLayer = rootLayer
 
             Task {
-                let videoRenderer: VideoRenderer
-                do {
-                    videoRenderer = try await VideoRenderer.create(
-                        rootLayer: unsafeRootLayer, videoURL: videoURL
+                let generation = UUID()
+                let frameRenderer = IOSurfaceFrameRenderer.create(
+                    displayID: did,
+                    rootLayer: unsafeRootLayer,
+                    width: Int(destSize.width),
+                    height: Int(destSize.height)
+                )
+                let activeCtx = ActiveWallpaper(
+                    caContext: unsafeCAContext,
+                    rootLayer: unsafeRootLayer,
+                    renderer: nil,
+                    displayID: did,
+                    videoID: instanceID
+                )
+                let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
+                existing?.renderer?.stop()
+
+                let surfID0: IOSurfaceID?
+                let surfID1: IOSurfaceID?
+                if #available(macOS 15.0, *) {
+                    surfID0 = frameRenderer.idleSurfaceID
+                    surfID1 = frameRenderer.surfaces.first??.surfaceID
+                } else {
+                    surfID0 = nil
+                    surfID1 = nil
+                }
+
+                if #available(macOS 15.0, *) {
+                    frameRenderer.start()
+                }
+
+                FrameChannel.shared.registerCallback(displayID: did) { surfaceID, pts, dur in
+                    guard WallpaperState.shared.isCurrentIOSurfaceRendererGeneration(generation, for: did) else {
+                        return
+                    }
+                    WallpaperState.shared.ioSurfaceRenderer(for: did)?.frameReady(surfaceID: surfaceID, timestamp: pts, duration: dur)
+                }
+                WallpaperState.shared.storeIOSurfaceRenderer(frameRenderer, generation: generation, for: did)
+
+                var registeredSurfaces = false
+                if let id0 = surfID0, let id1 = surfID1 {
+                    guard WallpaperState.shared.isCurrentIOSurfaceRendererGeneration(generation, for: did) else {
+                        extLog("  [Acquire] 跳过过期 surface 注册 display=\(did)")
+                        doReply("expired")
+                        return
+                    }
+                    registeredSurfaces = await UnixSocketClient.shared.registerSurfaces(
+                        displayID: did,
+                        surfaceID0: id0,
+                        surfaceID1: id1,
+                        videoID: instanceID
                     )
-                } catch {
-                    extLog("  [Renderer] Failed to create: \(error)")
-                    doReply("renderer failed")
+                }
+
+                guard registeredSurfaces else {
+                    extLog("  [Acquire] IOSurface 注册失败，回退到扩展本地解码 display=\(did)")
+                    FrameChannel.shared.unregisterCallback(displayID: did)
+                    WallpaperState.shared.removeIOSurfaceRenderer(for: did)
+                    frameRenderer.displayLayer.removeFromSuperlayer()
+                    await Self.startLocalVideoFallback(
+                        displayID: did,
+                        instanceID: instanceID,
+                        rootLayer: unsafeRootLayer,
+                        caContext: unsafeCAContext,
+                        contextId: contextId,
+                        wallpaperIDString: wallpaperIDString,
+                        doReply: doReply
+                    )
                     return
                 }
 
-                let existing = WallpaperState.shared.storeContext(
-                    ActiveWallpaper(caContext: unsafeCAContext, rootLayer: unsafeRootLayer, renderer: videoRenderer, displayID: displayID, videoID: choiceConfiguration),
-                    id: contextId,
-                    wallpaperID: wallpaperIDString
-                )
-                if let existing {
-                    existing.renderer?.stop()
-                    extLog("  Stopped existing renderer for wallpaperID: \(wallpaperIDString ?? "?")")
-                }
                 WallpaperPrefs.shared.setActive(true)
+                extLog("  IOSurfaceFrameRenderer started for display \(did)")
 
-                videoRenderer.start()
-                extLog("  VideoRenderer started (reply deferred 500ms)")
-                try? await Task.sleep(for: .milliseconds(500))
-                doReply("pipeline ready")
+                // 快速检查：如果本地没有任何可用视频，无需等待帧推送，直接回退
+                if findVideoURL(videoID: instanceID) == nil && findVideoURL() == nil {
+                    extLog("  [Acquire] ⚠️ 本地无可用视频，跳过帧等待，直接回退到本地解码 display=\(did)")
+                    frameRenderer.displayLayer.isHidden = true
+                    await Self.startLocalVideoFallback(
+                        displayID: did,
+                        instanceID: instanceID,
+                        rootLayer: unsafeRootLayer,
+                        caContext: unsafeCAContext,
+                        contextId: contextId,
+                        wallpaperIDString: wallpaperIDString,
+                        doReply: doReply
+                    )
+                    return
+                }
+
+                // 等待首帧到达（最多 30 秒），若超时则回退到本地解码
+                let frameTimeoutNs: UInt64 = 30_000_000_000  // 30 秒
+                let pollIntervalNs: UInt64 = 100_000_000     // 100ms
+                var elapsedNs: UInt64 = 0
+                var frameArrived = false
+                while elapsedNs < frameTimeoutNs {
+                    if frameRenderer.hasReceivedFirstFrame {
+                        frameArrived = true
+                        break
+                    }
+                    try? await Task.sleep(for: .nanoseconds(pollIntervalNs))
+                    elapsedNs += pollIntervalNs
+                }
+
+                if !frameArrived {
+                    extLog("  [Acquire] ⚠️ 首帧超时 (\(Double(frameTimeoutNs) / 1_000_000_000)s) 未到达，回退到扩展本地解码 display=\(did)")
+                    // 保留 IOSurfaceFrameRenderer 和 callback 不释放，确保 surface 存活供后续 FramePusher 复用
+                    frameRenderer.displayLayer.isHidden = true
+                    await Self.startLocalVideoFallback(
+                        displayID: did,
+                        instanceID: instanceID,
+                        rootLayer: unsafeRootLayer,
+                        caContext: unsafeCAContext,
+                        contextId: contextId,
+                        wallpaperIDString: wallpaperIDString,
+                        doReply: doReply
+                    )
+                    return
+                }
+
+                extLog("  [Acquire] ✅ 首帧已到达，使用帧推送管线 display=\(did)")
+                doReply("iosurface ready")
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15.0) {
                 doReply("timeout")
             }
-
-            if !isPreview {
-                let displayW = Int(destSize.width * scaleFactor)
-                let displayH = Int(destSize.height * scaleFactor)
-                let currentVideoID = WallpaperState.shared.currentVideoID
-                Task {
-                    await writeBMPSnapshot(videoURL: videoURL, videoID: currentVideoID, displayPixelWidth: displayW, displayPixelHeight: displayH)
-                }
-            }
         } else {
-            extLog("  No video file found — using solid color fallback")
+            extLog("  No displayID in acquire request — using solid color fallback")
             let gradientLayer = CAGradientLayer()
             gradientLayer.colors = [
                 CGColor(red: 0.1, green: 0.1, blue: 0.2, alpha: 1.0),
@@ -212,7 +378,45 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 id: contextId,
                 wallpaperID: wallpaperIDString
             )
-            doReply("no video")
+            doReply("no display")
+        }
+    }
+
+    private static func startLocalVideoFallback(
+        displayID: UInt32,
+        instanceID: String,
+        rootLayer: CALayer,
+        caContext: CAContext,
+        contextId: UInt32,
+        wallpaperIDString: String?,
+        doReply: @escaping @Sendable (String) -> Void
+    ) async {
+        guard let videoURL = findVideoURL(videoID: instanceID) ?? findVideoURL() else {
+            extLog("  [Acquire] ❌ 本地回退失败：未找到可播放视频")
+            WallpaperPrefs.shared.setActive(true)
+            doReply("fallback no video")
+            return
+        }
+
+        do {
+            let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: videoURL)
+            let activeCtx = ActiveWallpaper(
+                caContext: caContext,
+                rootLayer: rootLayer,
+                renderer: renderer,
+                displayID: displayID,
+                videoID: instanceID
+            )
+            let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
+            existing?.renderer?.stop()
+            renderer.start()
+            WallpaperPrefs.shared.setActive(true)
+            extLog("  [Acquire] ✅ 本地回退渲染已启动 display=\(displayID) video=\(videoURL.lastPathComponent)")
+            doReply("local video fallback")
+        } catch {
+            extLog("  [Acquire] ❌ 本地回退渲染失败: \(error.localizedDescription)")
+            WallpaperPrefs.shared.setActive(true)
+            doReply("fallback failed")
         }
     }
 
@@ -248,6 +452,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         }
 
         let prefs = WallpaperPrefs.shared
+        let power = PowerMonitor.shared.currentState
         let basePolicy = PlaybackPolicy.compute(
             presentationMode: presentationMode,
             activityState: activityState,
@@ -255,9 +460,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             alwaysPauseDesktop: prefs.alwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
-            thermalState: ProcessInfo.processInfo.thermalState,
-            isOnBattery: false,
-            batteryLevel: 100
+            powerState: power
         )
 
         let modeChanged = presentationMode != previousPresentationMode
@@ -389,15 +592,58 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         }
     }
 
-    func addChoiceRequest(withChoiceRequest _: Any?, onBehalfOfProcess _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func addChoiceRequest(withChoiceRequest request: Any?, onBehalfOfProcess _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+        extLog("=== ADD CHOICE REQUEST ===")
         reply(nil, nil)
     }
 
-    func removeChoiceRequest(withChoiceRequest _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func removeChoiceRequest(withChoiceRequest request: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+        extLog("=== REMOVE CHOICE REQUEST ===")
+
+        // 显示器实例不支持从扩展侧移除；这里只做日志并返回成功。
+        var instanceID: String?
+        if let reqObj = request as? NSObject {
+            let desc = String(describing: reqObj)
+            if let range = desc.range(of: "identifier: \"") {
+                let after = desc[range.upperBound...]
+                if let endQuote = after.firstIndex(of: "\"") {
+                    instanceID = String(after[..<endQuote])
+                }
+            }
+        }
+
+        extLog("  [Remove] 忽略实例删除请求: \(instanceID ?? "unknown")")
         reply(nil)
     }
 
-    func selectedChoicesDidChange(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func selectedChoicesDidChange(for id: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+        extLog("=== SELECTED CHOICES DID CHANGE ===")
+
+        // 从 WallpaperChoiceID 中提取 choice identifier
+        var choiceIdentifier: String?
+        if let idObj = id as? NSObject {
+            let mirror = Mirror(reflecting: idObj)
+            for child in mirror.children {
+                let desc = String(describing: child.value)
+                if let range = desc.range(of: "identifier: \"") {
+                    let after = desc[range.upperBound...]
+                    if let endQuote = after.firstIndex(of: "\"") {
+                        choiceIdentifier = String(after[..<endQuote])
+                    }
+                }
+            }
+        }
+
+        guard let instanceID = choiceIdentifier else {
+            extLog("selectedChoicesDidChange: 未知 choice \(String(describing: choiceIdentifier))")
+            reply(nil)
+            return
+        }
+
+        extLog("=== INSTANCE CHANGED === id: \(instanceID)")
+
+        WallpaperState.shared.currentVideoID = instanceID
+        WallpaperPrefs.shared.updateCurrentVideo()
         reply(nil)
     }
 
@@ -408,10 +654,12 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     }
 
     func isChoiceDownloaded(with _: Any?, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+        extLog("isChoiceDownloaded")
         reply(true, nil)
     }
 
     func download(withChoiceID _: Any?, reply: ((any Error)?) -> Void) -> Any? {
+        extLog("download")
         reply(nil)
         return nil
     }
@@ -420,24 +668,34 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     func cancelDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
     func resumeDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
     func removeDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func migrateSelectedChoice(for _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) { reply(nil, nil) }
-    func migrate(from _: Any?, to _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func skipShuffledContent(withId _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
+    func migrateSelectedChoice(for _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+        extLog("migrateSelectedChoice")
+        reply(nil, nil)
+    }
+
+    func migrate(from _: Any?, to _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+        extLog("migrate")
+        reply(nil)
+    }
+
+    func skipShuffledContent(withId _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+        extLog("skipShuffledContent")
+        reply(nil)
+    }
 
     func canSkipShuffledContent(withId _: Any?, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+        extLog("canSkipShuffledContent")
         reply(false, nil)
     }
 
     func handleDebugRequest(for _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+        extLog("handleDebugRequest")
         reply(nil, nil)
     }
 
     func handleNotification(withNamed _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
         reply(nil)
     }
-
-    // MARK: - Helpers
-
     private func createRemoteContextXPC(contextId: UInt32) -> AnyObject? {
         guard let realClass = objc_getClass("WallpaperRemoteContextXPC") as? AnyClass,
               let raw = class_createInstance(realClass, 0) else {

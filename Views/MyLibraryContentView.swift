@@ -2134,16 +2134,12 @@ struct MyLibraryContentView: View {
         }
     }
 
-    /// 同步按钮入口：先检查 Profile ID，然后获取订阅列表
+    /// 同步按钮入口：始终弹出 Steam Web 登录页面以建立有效会话
+    /// 登录成功后自动关闭 Web 页面 → onDisappear 触发 fetchSubscriptionList() → 弹出选择弹窗
     @State private var showSteamLoginSheet = false
 
     private func syncSubscriptions() {
-        guard workshopSourceManager.hasSteamProfileID else {
-            // 显示 Web 登录页面而不是输入 SteamID
-            showSteamLoginSheet = true
-            return
-        }
-        Task { await fetchSubscriptionList() }
+        showSteamLoginSheet = true
     }
 
     private func makeImportedWallpaper(from fileURL: URL) -> Wallpaper {

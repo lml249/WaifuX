@@ -1346,6 +1346,19 @@ final class BakeService: ObservableObject {
         }
         UserDefaults.standard.set(fileURL.path, forKey: cacheKey)
 
+        // ⚠️ 如果锁屏扩展已激活，跳过设置静态桌面壁纸，
+        // 避免覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例。
+        let shouldSkipForLockScreen: Bool = {
+            if #available(macOS 26.0, *) {
+                return VideoWallpaperManager.shared.isLockScreenMirroringActive
+            }
+            return false
+        }()
+        guard !shouldSkipForLockScreen else {
+            print("[BakeService] 🔒 锁屏扩展已激活，跳过设置静态 fallback 壁纸以保护用户锁屏选择")
+            return
+        }
+
         // 设为静态桌面壁纸（所有显示器）
         let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
             .imageScaling: NSImageScaling.scaleAxesIndependently.rawValue,

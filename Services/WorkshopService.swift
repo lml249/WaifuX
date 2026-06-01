@@ -236,8 +236,8 @@ class WorkshopService: ObservableObject {
         var components = URLComponents(string: "https://steamcommunity.com\(profilePath)/myworkshopfiles/")
         components?.queryItems = [
             URLQueryItem(name: "appid", value: wallpaperEngineAppID),
+            URLQueryItem(name: "sort", value: "score"),
             URLQueryItem(name: "browsefilter", value: "mysubscriptions"),
-            URLQueryItem(name: "browsesort", value: "mysubscriptions"),
             URLQueryItem(name: "view", value: "imagewall"),
             URLQueryItem(name: "p", value: String(page)),
             URLQueryItem(name: "numperpage", value: String(authorPageSize))
@@ -247,6 +247,7 @@ class WorkshopService: ObservableObject {
         }
 
         var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
 
         let data = try await NetworkService.shared.fetchData(request: request)
@@ -273,6 +274,10 @@ class WorkshopService: ObservableObject {
         var parsed = try items.compactMap { try parseWorkshopItem($0) }
         if parsed.isEmpty {
             parsed = try parseModernWorkshopHTML(doc)
+        }
+        // 如果还为空，尝试解析当前 Steam 订阅页面格式（workshopItemSubscription）
+        if parsed.isEmpty {
+            parsed = try parseSubscriptionPageHTML(doc)
         }
         do {
             parsed = try await enrichWithAPIDetails(parsed)
@@ -819,6 +824,72 @@ class WorkshopService: ObservableObject {
         var raw = String(style[swiftRange])
         if raw.hasPrefix("//") { raw = "https:" + raw }
         return URL(string: raw)
+    }
+
+    /// 解析当前 Steam 订阅页面格式（2025+）
+    /// 选择器：div.workshopItemSubscription（每个订阅项）
+    private func parseSubscriptionPageHTML(_ document: Document) throws -> [WorkshopWallpaper] {
+        let containers = try document.select("div.workshopItemSubscription")
+        guard !containers.isEmpty() else { return [] }
+
+        var wallpapers: [WorkshopWallpaper] = []
+        var seenIDs = Set<String>()
+
+        for container in containers {
+            // 从容器 ID 提取：Subscription{id}
+            let containerID = try container.attr("id")
+            guard let id = containerID.components(separatedBy: "Subscription").last,
+                  !id.isEmpty, !seenIDs.contains(id) else { continue }
+            seenIDs.insert(id)
+
+            // 标题
+            let titleEl = try container.select(".workshopItemTitle").first()
+            let title = (try titleEl?.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Untitled"
+
+            // 预览图
+            let previewImg = try container.select(".workshopItemPreviewImage").first()
+            let previewSrc = try (previewImg?.attr("src") ?? "")
+            let previewURL = previewSrc.isEmpty ? nil : URL(string: previewSrc)
+
+            // 应用名
+            let appEl = try container.select(".workshopItemApp").first()
+            let appName = (try appEl?.text())?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            // 日期
+            let dateEls = try container.select(".workshopItemDate")
+            var subscribedDate: String?
+            var updatedDate: String?
+            if dateEls.size() >= 1 {
+                subscribedDate = try dateEls.get(0).text()
+            }
+            if dateEls.size() >= 2 {
+                updatedDate = try dateEls.get(1).text()
+            }
+
+            let isAnimatedImage = previewSrc.lowercased().contains(".gif")
+
+            wallpapers.append(WorkshopWallpaper(
+                id: id,
+                title: title,
+                description: nil,
+                previewURL: previewURL,
+                author: WorkshopAuthor(steamID: "", name: "Unknown", avatarURL: nil),
+                fileSize: nil,
+                fileURL: nil,
+                steamAppID: wallpaperEngineAppID,
+                subscriptions: nil,
+                favorites: nil,
+                views: nil,
+                rating: nil,
+                type: .unknown,
+                tags: [],
+                isAnimatedImage: isAnimatedImage,
+                createdAt: nil,
+                updatedAt: nil
+            ))
+        }
+
+        return wallpapers
     }
 
     private func parseWorkshopItem(_ element: Element) throws -> WorkshopWallpaper? {

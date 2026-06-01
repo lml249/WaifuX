@@ -1,4 +1,9 @@
 //  Extension-side reader for shared preferences written by the main app.
+//  以及 extension 状态写入（isActive），供 App 读取。
+//
+//  线程安全 via OSAllocatedUnfairLock。监听 Darwin 通知以在 App 写入新值时重新加载。
+//
+//  参考 Phosphene (MIT) 的实现。
 
 import Foundation
 import os
@@ -8,12 +13,24 @@ final class WallpaperPrefs: @unchecked Sendable {
 
     private struct PrefsFile: Codable {
         var userPaused: Bool = false
-        var alwaysPauseDesktop: Bool = false
-        var currentVideoPath: String?
-        /// Per-display pause: displayID 集合，这些显示器的视频应暂停
+        var alwaysPauseDesktop: Bool = true
+        var pauseWhenOccluded: Bool = false
+        var desktopOccluded: Bool = false
         var pausedDisplayIDs: Set<UInt32>?
-        /// Per-display mute: displayID 集合，这些显示器的视频应静音
         var mutedDisplayIDs: Set<UInt32>?
+    }
+
+    private struct ContextState: Codable {
+        var displayID: UInt32
+        var videoID: String?
+        var videoName: String?
+    }
+
+    private struct StateFile: Codable {
+        var isActive: Bool
+        var currentVideoID: String?
+        var currentVideoName: String?
+        var contexts: [ContextState]?
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: PrefsFile())
@@ -26,13 +43,21 @@ final class WallpaperPrefs: @unchecked Sendable {
         sharedContainerURL?.appendingPathComponent("waifux-wallpaper-prefs.json")
     }
 
+    private static var stateURL: URL? {
+        sharedContainerURL?.appendingPathComponent("waifux-wallpaper-state.json")
+    }
+
     private init() { reload() }
+
+    // MARK: - Public (Prefs — app → extension)
 
     var userPaused: Bool { lock.withLock { $0.userPaused } }
     var alwaysPauseDesktop: Bool { lock.withLock { $0.alwaysPauseDesktop } }
+    var pauseWhenOccluded: Bool { lock.withLock { $0.pauseWhenOccluded } }
+    var desktopOccluded: Bool { lock.withLock { $0.desktopOccluded } }
 
-    var currentVideoPath: String? {
-        lock.withLock { $0.currentVideoPath }
+    var pausedDisplayIDs: Set<UInt32> {
+        lock.withLock { $0.pausedDisplayIDs ?? [] }
     }
 
     /// 指定 displayID 是否应暂停
@@ -45,6 +70,38 @@ final class WallpaperPrefs: @unchecked Sendable {
         lock.withLock { $0.mutedDisplayIDs?.contains(displayID) ?? false }
     }
 
+    // MARK: - Public (State — extension → app)
+
+    /// 扩展获得或失去活跃壁纸上下文时调用
+    func setActive(_ active: Bool) {
+        let videoID = active ? WallpaperState.shared.currentVideoID : nil
+        let contexts = active ? buildContextStates() : nil
+        let state = StateFile(isActive: active, currentVideoID: videoID, currentVideoName: nil, contexts: contexts)
+        guard let data = try? JSONEncoder().encode(state),
+              let url = Self.stateURL else { return }
+        try? data.write(to: url, options: .atomic)
+        postStateNotification()
+        extLog("[WallpaperPrefs] setActive(\(active), video: \(videoID ?? "nil"))")
+    }
+
+    /// 活动壁纸变化时调用（扩展已激活状态）
+    func updateCurrentVideo() {
+        let videoID = WallpaperState.shared.currentVideoID
+        let contexts = buildContextStates()
+        let state = StateFile(isActive: true, currentVideoID: videoID, currentVideoName: nil, contexts: contexts)
+        guard let data = try? JSONEncoder().encode(state),
+              let url = Self.stateURL else { return }
+        try? data.write(to: url, options: .atomic)
+        postStateNotification()
+        extLog("[WallpaperPrefs] updateCurrentVideo(\(videoID ?? "nil"))")
+    }
+
+    private func buildContextStates() -> [ContextState] {
+        WallpaperState.shared.activeDisplayContexts().map { ctx in
+            ContextState(displayID: ctx.displayID, videoID: ctx.videoID, videoName: nil)
+        }
+    }
+
     // MARK: - I/O
 
     func reload() {
@@ -52,36 +109,74 @@ final class WallpaperPrefs: @unchecked Sendable {
               let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode(PrefsFile.self, from: data) else { return }
         lock.withLock { $0 = decoded }
+        applyPauseState()
     }
 
-    // MARK: - State (extension -> app)
+    // MARK: - Darwin Observer
 
-    func setActive(_ active: Bool) {
-        let state: [String: Any] = [
-            "isActive": active,
-            "videoID": WallpaperState.shared.currentVideoID ?? "",
-            "timestamp": ISO8601DateFormatter().string(from: Date())
-        ]
-        if let data = try? JSONSerialization.data(withJSONObject: state),
-           let url = Self.sharedContainerURL?.appendingPathComponent("waifux-wallpaper-state.json") {
-            try? data.write(to: url, options: .atomic)
-        }
-        postStateNotification()
-    }
+    private var isObservingChanges = false
 
     func observeChanges() {
+        guard !isObservingChanges else { return }
+        isObservingChanges = true
+
         let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
         CFNotificationCenterAddObserver(
             center,
-            Unmanaged.passUnretained(self).toOpaque(),
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                Unmanaged<WallpaperPrefs>.fromOpaque(observer).takeUnretainedValue().reload()
+            observer,
+            { _, _, _, _, _ in
+                WallpaperPrefs.shared.reload()
             },
             "com.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
             .deliverImmediately
         )
+    }
+
+    private var previousDesktopOccluded = false
+
+    /// 重新计算播放策略并应用到所有活跃渲染器
+    private func applyPauseState() {
+        let state = WallpaperState.shared
+        let occlusionChanged = desktopOccluded != previousDesktopOccluded
+        previousDesktopOccluded = desktopOccluded
+        let animated = occlusionChanged && pauseWhenOccluded
+
+        let power = PowerMonitor.shared.currentState
+        let displayIDs = state.uniqueDisplayIDs()
+        let currentPausedDisplays = pausedDisplayIDs
+
+        if displayIDs.isEmpty {
+            let policy = PlaybackPolicy.compute(
+                presentationMode: state.presentationMode,
+                activityState: state.activityState,
+                userPaused: userPaused,
+                alwaysPauseDesktop: alwaysPauseDesktop,
+                pauseWhenOccluded: pauseWhenOccluded,
+                desktopOccluded: desktopOccluded,
+                powerState: power
+            )
+            state.forEachRenderer { renderer in
+                renderer.applyPolicy(policy, animated: animated)
+            }
+        } else {
+            for displayID in displayIDs {
+                let isDisplayPaused = currentPausedDisplays.contains(displayID)
+                let policy = PlaybackPolicy.compute(
+                    presentationMode: state.presentationMode,
+                    activityState: state.activityState,
+                    userPaused: userPaused || isDisplayPaused,
+                    alwaysPauseDesktop: alwaysPauseDesktop,
+                    pauseWhenOccluded: pauseWhenOccluded,
+                    desktopOccluded: desktopOccluded,
+                    powerState: power
+                )
+                state.forRenderers(displayID: displayID) { renderer in
+                    renderer.applyPolicy(policy, animated: animated)
+                }
+            }
+        }
     }
 
     private func postStateNotification() {

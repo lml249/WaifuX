@@ -5,6 +5,11 @@ import CoreMedia
 @preconcurrency import IOSurface
 
 func createSnapshotViaRuntime(currentTime: CMTime? = nil) async -> AnyObject? {
+    if let ioSurfaceSnapshot = WallpaperState.shared.anyIOSurfaceRenderer()?.makeSnapshotXPC() {
+        extLog("  [Snapshot] Created WallpaperSnapshotXPC from active IOSurface")
+        return ioSurfaceSnapshot
+    }
+
     guard let videoURL = findVideoURL() else {
         extLog("  [Snapshot] No video file found")
         return nil

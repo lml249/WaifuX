@@ -56,7 +56,7 @@ class PlaybackProgressCache: ObservableObject {
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
     }
-    
+
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
         loadFromDisk()

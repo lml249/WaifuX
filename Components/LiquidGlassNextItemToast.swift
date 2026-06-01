@@ -73,7 +73,7 @@ public class NextItemDataSource: ObservableObject {
         // 只在真正有变化时才更新，避免不必要的通知
         let itemsChanged = newItems.map(\.previewId) != items.map(\.previewId)
         let indexChanged = newIndex != self.currentIndex
-        
+
         if itemsChanged {
             self.items = newItems
         }
@@ -186,7 +186,7 @@ public struct LiquidGlassNextItemToast: View {
         @Binding var isHovered: Bool
         @Binding var isPressed: Bool
         let onTap: () -> Void
-        
+
         var body: some View {
             Button(action: onTap) {
                 HStack(spacing: 12) {
@@ -243,17 +243,17 @@ public struct LiquidGlassNextItemToast: View {
                 }
             }
         }
-        
+
         /// iOS 平滑缓动曲线
         private func iOSSmoothEase(duration: TimeInterval) -> Animation {
             .easeInOut(duration: duration)
         }
     }
-    
+
     // 按钮样式：内部处理按压状态
     private struct ToastPressableStyle: ButtonStyle {
         @Binding var isPressed: Bool
-        
+
         func makeBody(configuration: Configuration) -> some View {
             configuration.label
                 .onChange(of: configuration.isPressed) { _, newValue in
@@ -398,17 +398,17 @@ public struct LiquidGlassNextItemToast: View {
     private func resetForNewItem() {
         // 停止当前计时器
         stopViewTimer()
-        
+
         // 如果正在显示，先隐藏（不带动画，避免闪烁）
         if isVisible {
             isVisible = false
             contentOpacity = 0
         }
-        
+
         // 直接开始新的计时
         startViewTimer()
     }
-    
+
     /// 用户点击弹窗时隐藏，不重新开始计时
     private func hideOnTap() {
         stopViewTimer()

@@ -1008,11 +1008,12 @@ class WallpaperViewModel: ObservableObject {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             }
 
-            // 写入文件
-            try imageData.write(to: fileURL)
+            // 写入文件（使用后台 I/O，避免阻塞 MainActor）
+            try await imageData.writeAsync(to: fileURL)
 
-            // 验证文件是否成功写入
-            if FileManager.default.fileExists(atPath: fileURL.path) {
+            // 验证文件是否成功写入（后台 I/O）
+            let fileExists = await fileURL.fileExistsAsync()
+            if fileExists {
                 wallpaperLibrary.recordDownload(wallpaper, fileURL: fileURL)
                 downloadTaskService.markCompleted(id: task.id)
             } else {
@@ -1105,8 +1106,15 @@ class WallpaperViewModel: ObservableObject {
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
 
         // macOS 26+：设置静态壁纸时清除锁屏扩展状态（无论扩展是否激活）
-        if #available(macOS 26.0, *) {
-            LockScreenWallpaperService.shared.clearLockScreenVideo()
+        // ⚠️ 但如果锁屏扩展当前活跃，说明用户特意选择了动态锁屏，不应清除
+        let shouldClearExtension: Bool = {
+            if #available(macOS 26.0, *) {
+                return !VideoWallpaperManager.shared.isLockScreenMirroringActive
+            }
+            return true
+        }()
+        if #available(macOS 26.0, *), shouldClearExtension {
+            LockScreenWallpaperService.shared.clearMirroringSourceCache()
             VideoWallpaperManager.shared.clearExtensionState()
         }
 
@@ -1142,9 +1150,15 @@ class WallpaperViewModel: ObservableObject {
             }
             // 只停目标屏幕的动态壁纸，避免影响其他屏幕
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: targetScreen)
-            // macOS 26+：清除锁屏视频
-            if #available(macOS 26.0, *) {
-                LockScreenWallpaperService.shared.clearLockScreenVideo()
+            // macOS 26+：清空锁屏镜像帧源缓存（扩展活跃时跳过，保护用户锁屏选择）
+            let shouldClearExtension: Bool = {
+                if #available(macOS 26.0, *) {
+                    return !VideoWallpaperManager.shared.isLockScreenMirroringActive
+                }
+                return true
+            }()
+            if #available(macOS 26.0, *), shouldClearExtension {
+                LockScreenWallpaperService.shared.clearMirroringSourceCache()
             }
             let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),

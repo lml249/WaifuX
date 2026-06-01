@@ -89,11 +89,13 @@ extension MediaItem {
     }
 
     /// 「我的库」列表封面（仅静态 `KFImage`）：有本地文件时优先已缓存的截取帧，其次本地静图，再回退 `posterURL` / 站点 `coverImageURL`（下载与导入一致）。
+    /// 使用 FileExistenceCache 避免主线程 FileManager.fileExists(atPath:)。
     @MainActor
     func libraryGridThumbnailURL(localFileURL: URL?) -> URL {
+        let fileCache = FileExistenceCache.shared
         if let local = localFileURL,
            local.isFileURL,
-           FileManager.default.fileExists(atPath: local.path) {
+           fileCache.fileExists(atPath: local.path) {
             let isWebWorkshop = Self.localWorkshopProjectType(from: local) == "web"
             if isWebWorkshop, let localPreview = Self.resolveLocalWorkshopPreviewImage(from: local) {
                 return localPreview
@@ -121,7 +123,7 @@ extension MediaItem {
                 return localPreview
             }
         }
-        if let poster = posterURL, poster.isFileURL, FileManager.default.fileExists(atPath: poster.path) {
+        if let poster = posterURL, poster.isFileURL, fileCache.fileExists(atPath: poster.path) {
             return poster
         }
         return coverImageURL

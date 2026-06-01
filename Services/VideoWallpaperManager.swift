@@ -36,9 +36,7 @@ final class VideoWallpaperManager: ObservableObject {
 
     @Published private(set) var currentVideoURL: URL?
     /// 是否有任何屏幕正在播放视频壁纸（外部使用）
-    /// macOS 26+：扩展接管桌面渲染时，即使本地视频窗口已停止，仍视为"活跃"
     var isVideoWallpaperActive: Bool {
-        if isExtensionControllingDesktop, currentVideoURL != nil { return true }
         return !videoURLByScreen.isEmpty || !videoURLByScreenFingerprint.isEmpty
     }
     /// 已废弃：多屏场景下请使用 `posterURL(for:)` 获取指定屏幕的 poster
@@ -78,10 +76,18 @@ final class VideoWallpaperManager: ObservableObject {
     /// "播完即换"模式下的播放器播放结束观察者（key: screenID）
     private var playbackEndObservers: [String: Any] = [:]
 
-    /// macOS 26+：WallpaperExtensionKit 扩展是否正在控制桌面渲染。
-    /// 扩展激活时系统通过 CAContext 渲染桌面+锁屏，主应用的视频窗口应停止以避免双重渲染。
+    /// macOS 26+：WallpaperExtensionKit 锁屏实例是否处于活跃状态。
+    /// 这里仅表示锁屏镜像链路已建立，不代表扩展接管桌面渲染。
+    /// 桌面动态壁纸仍由主应用自己的视频窗口负责。
     /// 非 macOS 26 系统始终为 false。
-    private(set) var isExtensionControllingDesktop = false
+    private(set) var isLockScreenExtensionActive = false
+
+    var isLockScreenMirroringActive: Bool {
+        if #available(macOS 26.0, *) {
+            return isLockScreenExtensionActive
+        }
+        return false
+    }
 
     /// 应挂载 MP4 壁纸层的屏幕 ID（`NSScreen.wallpaperScreenIdentifier`）。唤醒 / 分辨率变化时全局 `rebuildWindows()` 只重建这些屏，避免「只设一块屏动态」却给所有显示器都建了视频窗。
     private var videoTargetScreenIDs = Set<String>()
@@ -156,6 +162,7 @@ final class VideoWallpaperManager: ObservableObject {
 
     private init() {
         setupNotificationObservers()
+        configureAudioSession()
     }
 
     private func setupNotificationObservers() {
@@ -210,8 +217,7 @@ final class VideoWallpaperManager: ObservableObject {
             object: nil
         )
 
-        // macOS 26+：监听 WallpaperExtension 扩展状态变化
-        // 扩展激活时系统接管桌面渲染，主应用应停止自己的视频窗口
+        // macOS 26+：监听 WallpaperExtension 锁屏镜像实例状态变化
         if #available(macOS 26.0, *) {
             observeExtensionStateChanges()
         }
@@ -228,10 +234,31 @@ final class VideoWallpaperManager: ObservableObject {
         pendingWakeRebuildWorkItem = nil
     }
 
+    // MARK: - Audio Session Management
+
+    /// AVAudioSession 是 iOS API，在 macOS 上不可用。
+    /// macOS 的音频混合由系统自动管理，无需 App 干预。
+    /// 此处保留空方法占位，便于未来切换到 CoreAudio 方案。
+
+    /// 配置音频会话（macOS 无操作）
+    private func configureAudioSession() {
+        // macOS: 系统自动管理音频路由与混合
+    }
+
+    /// 根据静音状态更新音频（macOS 无操作）
+    private func updateAudioSession() {
+        // macOS: 无需显式激活/停用会话
+    }
+
+    /// 停用音频会话（macOS 无操作）
+    private func deactivateAudioSession() {
+        // macOS: 无需显式停用
+    }
+
     // MARK: - macOS 26+ Extension State Monitoring
 
     /// 监听 WallpaperExtension 的状态变化（通过 Darwin 通知 + 共享容器 JSON）
-    /// 当扩展激活时，系统通过 CAContext 渲染桌面+锁屏，主应用的视频窗口应停止。
+    /// 这里只表示锁屏镜像实例是否活跃，不影响桌面本地播放器生命周期。
     @available(macOS 26.0, *)
     private func observeExtensionStateChanges() {
         // 1. 监听 Darwin 通知（扩展 post 的 stateChanged）
@@ -256,7 +283,7 @@ final class VideoWallpaperManager: ObservableObject {
         checkExtensionState()
     }
 
-    /// 从共享容器读取扩展状态，判断扩展是否正在控制桌面渲染
+    /// 从共享容器读取扩展状态，判断锁屏镜像实例是否活跃。
     @available(macOS 26.0, *)
     private func checkExtensionState() {
         guard let container = FileManager.default.containerURL(
@@ -268,88 +295,90 @@ final class VideoWallpaperManager: ObservableObject {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let isActive = json["isActive"] as? Bool else {
             // 无法读取状态 → 认为扩展未激活
-            if isExtensionControllingDesktop {
-                isExtensionControllingDesktop = false
-                print("[VideoWallpaperManager] Extension state unreadable → not controlling")
+            if isLockScreenExtensionActive {
+                isLockScreenExtensionActive = false
+                print("[VideoWallpaperManager] Lock screen extension state unreadable → inactive")
             }
             return
         }
 
-        let wasActive = isExtensionControllingDesktop
-        isExtensionControllingDesktop = isActive
+        let wasActive = isLockScreenExtensionActive
+        isLockScreenExtensionActive = isActive
 
         if isActive && !wasActive {
-            // 扩展刚激活：系统接管桌面渲染，停止主应用的视频窗口
-            // 先保存 per-screen 数据（自动更换需要），再停止窗口，再恢复数据
-            let savedVideoURLs = videoURLByScreen
-            let savedVideoURLsFP = videoURLByScreenFingerprint
-            let savedPosterURLs = posterURLByScreen
-            let savedPosterURLsFP = posterURLByScreenFingerprint
-            let savedTargetIDs = videoTargetScreenIDs
-            let savedTargetFPs = videoTargetScreenFingerprints
-            let savedCurrentURL = currentVideoURL
-            let savedMuted = isMuted
-            let savedPosterURL = currentPosterURL
-
-            print("[VideoWallpaperManager] Extension activated → stopping native video windows")
-            stopNativeVideoWallpaperOnly()
-
-            // 恢复 per-screen 追踪数据（不恢复窗口，仅恢复数据结构）
-            videoURLByScreen = savedVideoURLs
-            videoURLByScreenFingerprint = savedVideoURLsFP
-            posterURLByScreen = savedPosterURLs
-            posterURLByScreenFingerprint = savedPosterURLsFP
-            videoTargetScreenIDs = savedTargetIDs
-            videoTargetScreenFingerprints = savedTargetFPs
-            currentVideoURL = savedCurrentURL
-            isMuted = savedMuted
-            currentPosterURL = savedPosterURL
+            print("[VideoWallpaperManager] Lock screen extension became active")
+            if hasActiveVideoWallpaper {
+                syncAllDisplayVideosToExtension()
+            }
         } else if !isActive && wasActive {
-            // 扩展失活：不自动恢复视频播放器（用户可手动重新设置）
-            print("[VideoWallpaperManager] Extension deactivated")
+            print("[VideoWallpaperManager] Lock screen extension became inactive")
         }
     }
 
-    /// 将所有显示器的视频同步到扩展共享容器。
-    /// 多显示器场景下每个显示器可能播放不同视频，扩展需要所有视频才能按显示器分配。
+    /// 将所有显示器的当前视频源同步到锁屏扩展的 per-display 推帧服务。
+    /// 用户在系统设置中手动为每个显示器选择一次 WaifuX 实例后，
+    /// 锁屏侧只需要知道每块屏当前应该镜像哪一个桌面视频源。
     @available(macOS 26.0, *)
     private func syncAllDisplayVideosToExtension() {
-        // 构建 [videoID: videoURL] 映射
-        var videoMap: [String: URL] = [:]
-        for (_, videoURL) in videoURLByScreen {
-            let videoID = videoURL.deletingPathExtension().lastPathComponent
-            videoMap[videoID] = videoURL
+        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+            print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 动态锁屏已关闭，跳过")
+            return
         }
-        // 如果 per-screen 为空但有全局 URL，使用全局
-        if videoMap.isEmpty, let globalURL = currentVideoURL {
-            let videoID = globalURL.deletingPathExtension().lastPathComponent
-            videoMap[videoID] = globalURL
+        var displayVideoPairs: [(displayID: UInt32, videoURL: URL)] = []
+
+        for screen in NSScreen.screens {
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                continue
+            }
+            guard let videoURL = videoURL(for: screen), FileManager.default.fileExists(atPath: videoURL.path) else {
+                continue
+            }
+            displayVideoPairs.append((displayID: screenNumber.uint32Value, videoURL: videoURL))
         }
 
-        guard !videoMap.isEmpty else {
-            print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: videoMap 为空，跳过")
+        if displayVideoPairs.isEmpty, let globalURL = currentVideoURL,
+           FileManager.default.fileExists(atPath: globalURL.path) {
+            for screen in NSScreen.screens {
+                guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                    continue
+                }
+                displayVideoPairs.append((displayID: screenNumber.uint32Value, videoURL: globalURL))
+            }
+        }
+
+        guard !displayVideoPairs.isEmpty else {
+            print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 没有可同步的显示器视频源，跳过")
             return
         }
 
-        print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 同步 \(videoMap.count) 个显示器视频到共享容器")
-        Task {
-            do {
-                try await LockScreenWallpaperService.shared.deployVideosForDisplays(videoMap: videoMap)
-                print("[VideoWallpaperManager] ✅ 扩展视频同步成功")
-            } catch {
-                print("[VideoWallpaperManager] ❌ 扩展视频同步失败: \(error.localizedDescription)")
-            }
+        print("[VideoWallpaperManager] syncAllDisplayVideosToExtension: 同步 \(displayVideoPairs.count) 个显示器帧源到锁屏扩展")
+
+        // 同步执行：先停旧后启新，确保切换原子性
+        LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
+        WallpaperExtensionSocketServer.shared.clearDisplayVideos()
+
+        for pair in displayVideoPairs {
+            let videoID = pair.videoURL.deletingPathExtension().lastPathComponent
+            WallpaperExtensionSocketServer.shared.registerDisplayVideo(
+                displayID: pair.displayID,
+                videoID: videoID,
+                videoURL: pair.videoURL
+            )
+            print("[VideoWallpaperManager] 📺 注册锁屏帧源 display=\(pair.displayID) video=\(videoID)")
         }
+
+        // 通知扩展视频源已切换，防止扩展回退到旧视频的本地解码
+        LockScreenWallpaperService.shared.notifyExtensionPrefsChanged()
     }
 
-    /// 扩展模式下的全局暂停/恢复切换（仅更新本地 isPaused 状态，prefs 由调用方写入）
+    /// 锁屏镜像模式下的全局暂停/恢复切换（仅更新本地 isPaused 状态，prefs 由调用方写入）
     func toggleExtensionGlobalPause() {
         isPaused.toggle()
     }
 
-    /// 清除扩展控制状态（供外部调用方在清除锁屏视频后调用）
+    /// 清除锁屏镜像活跃状态（供外部调用方在清空镜像帧源后调用）
     func clearExtensionState() {
-        isExtensionControllingDesktop = false
+        isLockScreenExtensionActive = false
     }
 
     func applyVideoWallpaper(
@@ -395,52 +424,6 @@ final class VideoWallpaperManager: ObservableObject {
             throw NSError(domain: "VideoWallpaper", code: 1002, userInfo: [NSLocalizedDescriptionKey: "视频文件不存在。"])
         }
 
-        // macOS 26+：如果 WallpaperExtension 已接管桌面渲染，只同步视频到共享容器，
-        // 不创建本地视频窗口（系统通过扩展 CAContext 渲染桌面+锁屏）
-        if #available(macOS 26.0, *), isExtensionControllingDesktop {
-            let videoID = localFileURL.lastPathComponent
-
-            // 更新 per-screen 追踪（不创建窗口，仅维护数据结构供自动更换使用）
-            if let targetScreen {
-                let screenID = targetScreen.wallpaperScreenIdentifier
-                let fingerprint = targetScreen.wallpaperScreenFingerprint
-                videoURLByScreen[screenID] = localFileURL
-                videoURLByScreenFingerprint[fingerprint] = localFileURL
-                videoTargetScreenIDs.insert(screenID)
-                videoTargetScreenFingerprints.insert(fingerprint)
-                if let posterURL {
-                    posterURLByScreen[screenID] = posterURL
-                    posterURLByScreenFingerprint[fingerprint] = posterURL
-                }
-            } else {
-                videoURLByScreen.removeAll()
-                videoURLByScreenFingerprint.removeAll()
-                for screen in NSScreen.screens {
-                    let screenID = screen.wallpaperScreenIdentifier
-                    let fingerprint = screen.wallpaperScreenFingerprint
-                    videoURLByScreen[screenID] = localFileURL
-                    videoURLByScreenFingerprint[fingerprint] = localFileURL
-                    videoTargetScreenIDs.insert(screenID)
-                    videoTargetScreenFingerprints.insert(fingerprint)
-                    if let posterURL {
-                        posterURLByScreen[screenID] = posterURL
-                        posterURLByScreenFingerprint[fingerprint] = posterURL
-                    }
-                }
-            }
-
-            currentVideoURL = localFileURL
-            isMuted = muted
-            if let posterURL { currentPosterURL = posterURL }
-            persistState()
-
-            // 同步所有显示器的视频到共享容器（多显示器各自不同视频）
-            syncAllDisplayVideosToExtension()
-
-            print("[VideoWallpaperManager] Extension controlling → synced \(videoURLByScreen.count) display video(s)")
-            return
-        }
-
         // 本机视频不经过 CLI：如果设到全局或目标屏幕恰好被 CLI 管理时 stop CLI。
         // 多屏场景下，如果 CLI 正在渲染另一块屏的壁纸而本屏不需要 CLI，不杀 CLI 进程。
         if let targetScreen {
@@ -477,10 +460,10 @@ final class VideoWallpaperManager: ObservableObject {
             }
             DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
-            // 即使复用已有播放器，也要同步到锁屏（可能换了新视频文件）
+            // 即使复用已有播放器，也要同步锁屏镜像的 per-display 帧源。
             if #available(macOS 26.0, *) {
-                let videoID = localFileURL.deletingPathExtension().lastPathComponent
-                LockScreenWallpaperService.shared.syncFromVideoWallpaper(videoURL: localFileURL, videoID: videoID)
+                LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
+                syncAllDisplayVideosToExtension()
             }
             return
         }
@@ -497,11 +480,18 @@ final class VideoWallpaperManager: ObservableObject {
 
         discardOriginalWallpaperSnapshot()
 
-        // 如果有预览图，设置为桌面壁纸（锁屏会显示这个）
-        // 注意：此处 fire-and-forget，不阻塞主线程；poster 为 nil 时保持当前桌面不变。
-        // 视频窗口会覆盖在桌面壁纸上方。
-        if let posterURL = posterURL {
+        // 如果有预览图，设置为桌面壁纸（锁屏默认会沿用桌面 poster 作静态兜底）。
+        // ⚠️ 如果锁屏扩展已激活，跳过设置静态桌面壁纸，避免覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例。
+        let shouldSkipPosterForLockScreen: Bool = {
+            if #available(macOS 26.0, *) {
+                return isLockScreenExtensionActive || WallpaperExtensionSocketServer.shared.hasActivePipeline
+            }
+            return false
+        }()
+        if let posterURL = posterURL, !shouldSkipPosterForLockScreen {
             setPosterAsDesktopWallpaper(posterURL, targetScreen: targetScreen)
+        } else if posterURL != nil {
+            print("[VideoWallpaperManager] 🔒 锁屏扩展已激活，跳过设置静态桌面壁纸以保护用户锁屏选择")
         }
 
         currentVideoURL = localFileURL
@@ -529,16 +519,23 @@ final class VideoWallpaperManager: ObservableObject {
             },
             animatedTransition: animatedTransition
         )
+        updateAudioSession()
         syncCurrentVideoURL()
         persistState()
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
-        // 同步到锁屏动态壁纸（macOS 26+）
+        // 同步到锁屏镜像实例（macOS 26+）
         if #available(macOS 26.0, *) {
-            let videoID = localFileURL.deletingPathExtension().lastPathComponent
-            // 延迟调用，确保 setPosterAsDesktopWallpaper 的 Task 完成后再写 Index.plist，
-            // 防止 NSWorkspace.setDesktopImageURLForAllSpaces 触发的系统异步写入覆盖我们的 choice
-            LockScreenWallpaperService.shared.syncFromVideoWallpaper(videoURL: localFileURL, videoID: videoID)
+            LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
+            syncAllDisplayVideosToExtension()
+
+            // 异步生成缩略图并写入共享容器（供系统设置封面预览 + 扩展本地解码回退）
+            Task.detached(priority: .background) {
+                try? await LockScreenWallpaperService.shared.cacheMirroringSource(
+                    videoURL: localFileURL,
+                    videoID: localFileURL.deletingPathExtension().lastPathComponent
+                )
+            }
         }
     }
 
@@ -549,6 +546,7 @@ final class VideoWallpaperManager: ObservableObject {
             let screenVolume = volumeByScreen[screenID] ?? volume
             player.volume = muted ? 0 : Float(screenVolume)
         }
+        updateAudioSession()
         persistState()
     }
 
@@ -700,13 +698,9 @@ final class VideoWallpaperManager: ObservableObject {
             // 全局停止（原有逻辑）
             WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
-            // macOS 26+：清除锁屏视频（无论扩展是否激活，防止残留）
+            // macOS 26+：清空锁屏镜像帧源映射，但保留用户在系统设置中手动选择的实例。
             if #available(macOS 26.0, *) {
-                LockScreenWallpaperService.shared.clearLockScreenVideo()
-            }
-            if isExtensionControllingDesktop {
-                isExtensionControllingDesktop = false
-                print("[VideoWallpaperManager] Cleared lock screen extension video")
+                LockScreenWallpaperService.shared.clearMirroringSourceCache()
             }
 
             teardownAllWindows()
@@ -721,6 +715,8 @@ final class VideoWallpaperManager: ObservableObject {
             videoTargetScreenFingerprints = []
             discardOriginalWallpaperSnapshot()
             syncCurrentVideoURL()
+            // 停止所有壁纸 → 停用音频会话，释放音频设备
+            deactivateAudioSession()
             // 不删除保存的状态，以便下次可以恢复
             return
         }
@@ -729,8 +725,8 @@ final class VideoWallpaperManager: ObservableObject {
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
 
-        // macOS 26+：扩展控制模式下，清理 per-screen 追踪并回退到静态 poster
-        if isExtensionControllingDesktop {
+        // 锁屏镜像实例活跃时，也只需要清理该屏帧源追踪并回退到静态 poster。
+        if isLockScreenExtensionActive {
             videoTargetScreenIDs.remove(screenID)
             videoTargetScreenFingerprints.remove(screenFingerprint)
             videoURLByScreen.removeValue(forKey: screenID)
@@ -743,11 +739,10 @@ final class VideoWallpaperManager: ObservableObject {
             posterURLByScreenFingerprint.removeValue(forKey: screenFingerprint)
 
             if videoURLByScreen.isEmpty {
-                // 所有屏幕都停止了，清除扩展状态
+                // 所有屏幕都停止了，清空锁屏镜像帧源映射
                 if #available(macOS 26.0, *) {
-                    LockScreenWallpaperService.shared.clearLockScreenVideo()
+                    LockScreenWallpaperService.shared.clearMirroringSourceCache()
                 }
-                isExtensionControllingDesktop = false
                 currentVideoURL = nil
                 currentPosterURL = nil
                 isPaused = false
@@ -787,6 +782,10 @@ final class VideoWallpaperManager: ObservableObject {
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
         }
+        if #available(macOS 26.0, *),
+           let screenNumber = targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            WallpaperExtensionSocketServer.shared.unregisterDisplayVideo(displayID: screenNumber.uint32Value)
+        }
         syncCurrentVideoURL()
     }
 
@@ -794,12 +793,6 @@ final class VideoWallpaperManager: ObservableObject {
     /// 与 `stopWallpaper()` 不同，此方法不清理保存的状态（`stateKey`），下次启动仍可恢复视频壁纸。
     func prepareForAppTermination() {
         guard hasActiveVideoWallpaper else { return }
-
-        // macOS 26+：扩展控制桌面时，退出不需要设置静态 poster（扩展继续独立运行）
-        if isExtensionControllingDesktop {
-            persistState()
-            return
-        }
 
         discardOriginalWallpaperSnapshot()
         posterTasks.values.forEach { $0.cancel() }
@@ -871,10 +864,9 @@ final class VideoWallpaperManager: ObservableObject {
             discardOriginalWallpaperSnapshot()
             defaults.removeObject(forKey: stateKey)
             syncCurrentVideoURL()
-            // macOS 26+：清除锁屏视频（不在此清除 isExtensionControllingDesktop，
-            // 因为 checkExtensionState() 等调用方依赖该状态管理流程）
+            // macOS 26+：清空锁屏镜像帧源映射（不移除显示器实例目录）
             if #available(macOS 26.0, *) {
-                LockScreenWallpaperService.shared.clearLockScreenVideo()
+                LockScreenWallpaperService.shared.clearMirroringSourceCache()
             }
             return
         }
@@ -883,8 +875,8 @@ final class VideoWallpaperManager: ObservableObject {
         let screenID = targetScreen.wallpaperScreenIdentifier
         let screenFingerprint = targetScreen.wallpaperScreenFingerprint
 
-        // macOS 26+：扩展控制模式下，清理 per-screen 追踪
-        if isExtensionControllingDesktop {
+        // 锁屏镜像实例活跃时，也只需要清理 per-screen 帧源追踪。
+        if isLockScreenExtensionActive {
             videoTargetScreenIDs.remove(screenID)
             videoTargetScreenFingerprints.remove(screenFingerprint)
             videoURLByScreen.removeValue(forKey: screenID)
@@ -894,9 +886,8 @@ final class VideoWallpaperManager: ObservableObject {
 
             if videoURLByScreen.isEmpty {
                 if #available(macOS 26.0, *) {
-                    LockScreenWallpaperService.shared.clearLockScreenVideo()
+                    LockScreenWallpaperService.shared.clearMirroringSourceCache()
                 }
-                isExtensionControllingDesktop = false
                 currentVideoURL = nil
                 currentPosterURL = nil
                 isPaused = false
@@ -935,6 +926,10 @@ final class VideoWallpaperManager: ObservableObject {
             defaults.removeObject(forKey: stateKey)
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
+        }
+        if #available(macOS 26.0, *),
+           let screenNumber = targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            WallpaperExtensionSocketServer.shared.unregisterDisplayVideo(displayID: screenNumber.uint32Value)
         }
         syncCurrentVideoURL()
     }
@@ -1173,30 +1168,6 @@ final class VideoWallpaperManager: ObservableObject {
             return
         }
 
-        // macOS 26+：如果扩展正在控制桌面渲染，恢复 per-screen 追踪并同步所有视频到共享容器
-        if #available(macOS 26.0, *), isExtensionControllingDesktop {
-            // 恢复 per-screen 追踪数据（供自动更换使用）
-            let restoredVideoURLs = savedState.videoURLs?.compactMapValues { URL(string: $0) } ?? [:]
-            let restoredVideoURLsByFingerprint = savedState.videoURLsByFingerprint?.compactMapValues { URL(string: $0) } ?? [:]
-            videoURLByScreen = restoredVideoURLs
-            videoURLByScreenFingerprint = restoredVideoURLsByFingerprint
-            posterURLByScreen = savedState.posterURLs?.compactMapValues { URL(string: $0) } ?? [:]
-            posterURLByScreenFingerprint = savedState.posterURLsByFingerprint?.compactMapValues { URL(string: $0) } ?? [:]
-            videoTargetScreenIDs = Set(savedState.videoScreenIDs ?? [])
-            videoTargetScreenFingerprints = Set(savedState.videoScreenFingerprints ?? [])
-
-            currentVideoURL = url
-            isMuted = savedState.isMuted
-            volume = savedState.volume ?? (savedState.isMuted ? 0 : 1)
-            volumeByScreen = savedState.volumeByScreen ?? [:]
-            volumeByScreenFingerprint = savedState.volumeByScreenFingerprint ?? [:]
-
-            // 同步所有显示器视频到共享容器
-            syncAllDisplayVideosToExtension()
-            print("[VideoWallpaperManager] Extension controlling desktop during restore → synced all display videos")
-            return
-        }
-
         // 恢复预览图 URL（兼容旧版单例 poster）
         let globalPosterURL = savedState.posterURL.flatMap { URL(string: $0) }
         // 恢复 per-screen poster（新版）
@@ -1250,6 +1221,7 @@ final class VideoWallpaperManager: ObservableObject {
                     }
                 }
                 try rebuildWindows()
+                updateAudioSession()
                 if savedState.isPaused {
                     pauseWallpaper()
                 }
@@ -1318,10 +1290,10 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSNotification 回调可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            if #available(macOS 26.0, *) {
+                LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
+            }
             guard self.hasActiveVideoWallpaper else { return }
-
-            // macOS 26+：扩展控制桌面时不需要重建本地视频窗口
-            if self.isExtensionControllingDesktop { return }
 
             // 防抖：延迟 300ms 执行，避免屏幕参数变化时的频繁重建
             self.pendingRebuildWorkItem?.cancel()
@@ -1364,9 +1336,9 @@ final class VideoWallpaperManager: ObservableObject {
         // ⚠️ NSWorkspace 通知可能不在主线程，dispatch 到主线程
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-
-            // macOS 26+：扩展控制桌面时不需要重建本地视频窗口
-            if self.isExtensionControllingDesktop { return }
+            if #available(macOS 26.0, *) {
+                LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
+            }
 
             // 屏幕唤醒时防抖重建
             self.pendingWakeRebuildWorkItem?.cancel()
@@ -1427,9 +1399,9 @@ final class VideoWallpaperManager: ObservableObject {
         // 系统唤醒后防抖重建并恢复播放
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-
-            // macOS 26+：扩展控制桌面时不需要重建本地视频窗口
-            if self.isExtensionControllingDesktop { return }
+            if #available(macOS 26.0, *) {
+                LockScreenWallpaperService.shared.syncDisplayInstancesToSocketServer()
+            }
 
             self.pendingWakeRebuildWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
@@ -1648,9 +1620,6 @@ final class VideoWallpaperManager: ObservableObject {
 
     private func rebuildWindows(targetScreen: NSScreen? = nil, animatedTransition: Bool = false) throws {
         guard hasActiveVideoWallpaper else { return }
-
-        // macOS 26+：扩展控制桌面时，不创建本地视频窗口
-        if isExtensionControllingDesktop { return }
 
         // 如果正在重建，跳过此次请求
         // 注意：@MainActor 保证串行执行，无需额外加锁
@@ -2224,8 +2193,7 @@ final class VideoWallpaperManager: ObservableObject {
     }
 
     private func persistState() {
-        // macOS 26+：扩展控制桌面时虽无本地窗口，仍需持久化 currentVideoURL 供重启恢复
-        guard hasActiveVideoWallpaper || isExtensionControllingDesktop else { return }
+        guard hasActiveVideoWallpaper else { return }
 
         let globalFileURL = currentVideoURL?.absoluteString
             ?? videoURLByScreen.values.first?.absoluteString

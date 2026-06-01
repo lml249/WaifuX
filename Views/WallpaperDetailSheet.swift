@@ -318,8 +318,13 @@ struct WallpaperDetailSheet: View {
         if isPortraitWallpaper {
             portraitWallpaperBackground(width: width, height: viewH)
         } else {
+            // 根据屏幕尺寸计算降采样目标大小（2x Retina），避免解码 4K/8K 全分辨率位图
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            let downsampleSize = CGSize(width: width * scale, height: viewH * scale)
             // 使用 Kingfisher 加载，有可靠的回调
             KFImage(heroImageURL)
+                .setProcessor(DownsamplingImageProcessor(size: downsampleSize))
+                .backgroundDecode()
                 .fade(duration: 0.3)
                 .onSuccess { _ in
                     isImageLoaded = true
@@ -339,8 +344,10 @@ struct WallpaperDetailSheet: View {
         ZStack {
             Color.black
 
-            // 左右延伸层：基于居中缩放图做横向拉伸和高斯模糊，仅在两侧显现
+            // 左右延伸层：大幅降采样（模糊/拉伸后无需高清），节省解码开销
             KFImage(heroImageURL)
+                .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 300, height: 300)))
+                .backgroundDecode()
                 .placeholder { _ in Color.clear }
                 .resizable()
                 .scaledToFit()
@@ -351,8 +358,12 @@ struct WallpaperDetailSheet: View {
                 .brightness(-0.08)
                 .mask(portraitWallpaperSideMask)
 
-            // 主图：完整缩放展示，避免竖图被过度裁切（控制加载状态）
+            // 主图：降采样到屏幕分辨率，避免解码 4K/8K 全尺寸位图
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            let downsampleSize = CGSize(width: width * scale, height: height * scale)
             KFImage(heroImageURL)
+                .setProcessor(DownsamplingImageProcessor(size: downsampleSize))
+                .backgroundDecode()
                 .fade(duration: 0.3)
                 .onSuccess { _ in
                     isImageLoaded = true

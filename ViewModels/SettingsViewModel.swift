@@ -36,6 +36,11 @@ class SettingsViewModel: ObservableObject {
     @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
     @Published var hdrEnabled = true { didSet { UserDefaults.standard.set(hdrEnabled, forKey: "hdr_enabled") } }
     @Published var showAllWorkshopContent = false { didSet { UserDefaults.standard.set(showAllWorkshopContent, forKey: "show_all_workshop_content") } }
+    /// 动态锁屏壁纸开关（仅 macOS 26+ 可用，关闭后走旧逻辑）
+    @Published var dynamicLockScreenEnabled = true {
+        didSet { UserDefaults.standard.set(dynamicLockScreenEnabled, forKey: "dynamic_lock_screen_enabled") }
+    }
+
     @Published var proxyEnabled = false { didSet { UserDefaults.standard.set(proxyEnabled, forKey: "proxy_enabled"); syncProxySettings() } }
     @Published var proxyHost: String = "" { didSet { UserDefaults.standard.set(proxyHost, forKey: "proxy_host"); syncProxySettings() } }
     @Published var proxyPort: String = "" { didSet { UserDefaults.standard.set(proxyPort, forKey: "proxy_port"); syncProxySettings() } }
@@ -130,6 +135,8 @@ class SettingsViewModel: ObservableObject {
         pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")
         hdrEnabled = defaults.object(forKey: "hdr_enabled") as? Bool ?? true
         showAllWorkshopContent = defaults.bool(forKey: "show_all_workshop_content")
+        dynamicLockScreenEnabled = defaults.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true
+
         proxyEnabled = defaults.bool(forKey: "proxy_enabled")
         proxyHost = defaults.string(forKey: "proxy_host") ?? ""
         proxyPort = defaults.string(forKey: "proxy_port") ?? ""
@@ -156,6 +163,11 @@ class SettingsViewModel: ObservableObject {
         DynamicWallpaperAutoPauseManager.shared.pauseWhenOtherAppForeground = pauseWhenOtherAppForeground
         DynamicWallpaperAutoPauseManager.shared.pauseWhenFullscreenCovers = pauseWhenFullscreenCovers
         DynamicWallpaperAutoPauseManager.shared.pauseOnBatteryPower = pauseOnBatteryPower
+    }
+
+    /// 清理所有锁屏实例：清空视频缓存、显示器实例列表、推送管线
+    func clearLockScreenInstances() {
+        LockScreenWallpaperService.shared.clearLockScreenInstances()
     }
 
     /// 同步代理设置到 NetworkService

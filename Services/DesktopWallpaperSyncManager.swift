@@ -211,12 +211,6 @@ final class DesktopWallpaperSyncManager {
 
         let videoManager = VideoWallpaperManager.shared
 
-        // macOS 26+：扩展控制桌面时，不同步静态壁纸（会覆盖扩展的视频渲染）
-        if videoManager.isExtensionControllingDesktop {
-            print("[DesktopWallpaperSyncManager] Skipping sync from '\(source)' — extension controlling desktop")
-            return
-        }
-
         let workspace = NSWorkspace.shared
         let currentScreens = NSScreen.screens
         relinkScreenStateForCurrentDisplays()

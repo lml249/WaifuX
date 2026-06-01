@@ -300,10 +300,18 @@ class DownloadTaskService: ObservableObject {
 
     // MARK: - Persistence
 
+    /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
+    private static let persistQueue = DispatchQueue(label: "com.waifux.downloadTask.persist", qos: .utility)
+
     private func persistTasks() {
         saveTask?.cancel()
-        if let encoded = try? JSONEncoder().encode(tasks) {
-            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+        // ⚡ 在主线程捕获数据副本，后台编码写入
+        let currentTasks = tasks
+        let key = userDefaultsKey
+        Self.persistQueue.async {
+            if let encoded = try? JSONEncoder().encode(currentTasks) {
+                UserDefaults.standard.set(encoded, forKey: key)
+            }
         }
     }
 

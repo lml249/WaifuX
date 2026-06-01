@@ -1,4 +1,9 @@
-//  Thread-safe shared state for the wallpaper extension.
+//  线程安全的扩展共享状态
+//
+//  所有访问通过 OSAllocatedUnfairLock 保护，避免并发 XPC 回调竞争。
+//
+//  参考 Phosphene (MIT) 的实现，增加了库变化监听、display contexts、
+//  cachedThumbnailURL 等特性。
 
 import Foundation
 import os
@@ -20,20 +25,50 @@ final class WallpaperState: Sendable {
     private struct State: @unchecked Sendable {
         var activeContexts: [UInt32: ActiveWallpaper] = [:]
         var wallpaperIDToContext: [String: UInt32] = [:]
+        var cachedThumbnailURL: URL?
+        var cacheDirectoryURL: URL?
         var cachedVideoURL: URL?
         var currentVideoID: String? = UserDefaults.standard.string(forKey: WallpaperState.selectedVideoKey)
         var presentationMode: String = "active"
         var activityState: String = "active"
         var isDisplayAsleep: Bool = false
         var isScreenLocked: Bool = false
+        /// IOSurface 帧渲染器（每显示器），用于帧通道回调
+        var ioSurfaceRenderers: [UInt32: IOSurfaceFrameRenderer] = [:]
+        var ioSurfaceRendererGenerations: [UInt32: UUID] = [:]
     }
 
     private let lock = OSAllocatedUnfairLock(initialState: State())
 
-    private init() {}
+    private init() {
+        // 注册库变化通知 — 收到通知时清除缓存
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let state = Unmanaged<WallpaperState>.fromOpaque(observer).takeUnretainedValue()
+                state.clearCaches()
+            },
+            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    /// 清除缓存的 URL，使下次查找重新评估当前库。
+    func clearCaches() {
+        lock.withLock { state in
+            state.cachedVideoURL = nil
+            state.cachedThumbnailURL = nil
+        }
+    }
 
     // MARK: - Context Management
 
+    /// 存储新的渲染上下文。如果同一 wallpaperID 已有渲染器，先停止并返回旧的。
     func storeContext(_ context: ActiveWallpaper, id: UInt32, wallpaperID: String?) -> ActiveWallpaper? {
         lock.withLock { state in
             var existing: ActiveWallpaper?
@@ -56,20 +91,34 @@ final class WallpaperState: Sendable {
     }
 
     func removeAllContexts() -> [ActiveWallpaper] {
-        let removed = lock.withLock { state -> [ActiveWallpaper] in
+        let removed = lock.withLock { state -> ([ActiveWallpaper], [IOSurfaceFrameRenderer]) in
             let all = Array(state.activeContexts.values)
+            let ioRenderers = Array(state.ioSurfaceRenderers.values)
             state.activeContexts.removeAll()
             state.wallpaperIDToContext.removeAll()
-            return all
+            state.ioSurfaceRenderers.removeAll()
+            state.ioSurfaceRendererGenerations.removeAll()
+            return (all, ioRenderers)
         }
-        for ctx in removed { ctx.renderer?.stop() }
-        return removed
+        for ctx in removed.0 { ctx.renderer?.stop() }
+        for renderer in removed.1 { renderer.stop() }
+        return removed.0
     }
 
     // MARK: - Iteration
 
     func forEachRenderer(_ body: (VideoRenderer) -> Void) {
         let renderers = lock.withLock { $0.activeContexts.values.compactMap(\.renderer) }
+        for renderer in renderers { body(renderer) }
+    }
+
+    /// 对指定 displayID 的渲染器执行闭包
+    func forRenderers(displayID: UInt32, _ body: (VideoRenderer) -> Void) {
+        let renderers = lock.withLock {
+            $0.activeContexts.values
+                .filter { $0.displayID == displayID }
+                .compactMap(\.renderer)
+        }
         for renderer in renderers { body(renderer) }
     }
 
@@ -83,36 +132,84 @@ final class WallpaperState: Sendable {
         }
     }
 
-    func switchActiveRenderers(to videoURL: URL, displayID: UInt32? = nil) -> Int {
-        let renderers = lock.withLock {
-            $0.activeContexts.values.compactMap { context -> VideoRenderer? in
-                if let displayID, context.displayID != displayID {
-                    return nil
-                }
-                return context.renderer
-            }
+    /// 根据 displayID 查找活跃 renderer
+    func renderer(for displayID: UInt32) -> VideoRenderer? {
+        lock.withLock {
+            $0.activeContexts.values.first(where: { $0.displayID == displayID })?.renderer
         }
-        for renderer in renderers {
-            renderer.replaceVideo(with: videoURL)
-        }
-        return renderers.count
     }
 
+    // MARK: - IOSurfaceFrameRenderer Registry
+
+    /// 存储 IOSurfaceFrameRenderer 供帧通道回调使用
+    func storeIOSurfaceRenderer(_ renderer: IOSurfaceFrameRenderer, generation: UUID, for displayID: UInt32) {
+        let previous = lock.withLock { state -> IOSurfaceFrameRenderer? in
+            let old = state.ioSurfaceRenderers[displayID]
+            state.ioSurfaceRenderers[displayID] = renderer
+            state.ioSurfaceRendererGenerations[displayID] = generation
+            return old
+        }
+        previous?.stop()
+    }
+
+    /// 移除 IOSurfaceFrameRenderer
+    func removeIOSurfaceRenderer(for displayID: UInt32) {
+        let previous = lock.withLock { state -> IOSurfaceFrameRenderer? in
+            let old = state.ioSurfaceRenderers[displayID]
+            state.ioSurfaceRenderers[displayID] = nil
+            state.ioSurfaceRendererGenerations[displayID] = nil
+            return old
+        }
+        previous?.stop()
+    }
+
+    /// 获取指定显示器的 IOSurfaceFrameRenderer
+    func ioSurfaceRenderer(for displayID: UInt32) -> IOSurfaceFrameRenderer? {
+        lock.withLock { $0.ioSurfaceRenderers[displayID] }
+    }
+
+    func isCurrentIOSurfaceRendererGeneration(_ generation: UUID, for displayID: UInt32) -> Bool {
+        lock.withLock { $0.ioSurfaceRendererGenerations[displayID] == generation }
+    }
+
+    /// 获取任意一个活跃的 IOSurfaceFrameRenderer（用于 snapshot 回退）。
+    func anyIOSurfaceRenderer() -> IOSurfaceFrameRenderer? {
+        lock.withLock { $0.ioSurfaceRenderers.values.first }
+    }
+
+    /// 所有活跃 context 的唯一 displayID 集合
     func uniqueDisplayIDs() -> Set<UInt32> {
         lock.withLock { Set($0.activeContexts.values.compactMap(\.displayID)) }
+    }
+
+    /// 每个唯一显示器的活跃 context 信息
+    func activeDisplayContexts() -> [(displayID: UInt32, videoID: String?)] {
+        lock.withLock { state in
+            var seen = Set<UInt32>()
+            var result: [(displayID: UInt32, videoID: String?)] = []
+            for ctx in state.activeContexts.values {
+                guard let did = ctx.displayID, seen.insert(did).inserted else { continue }
+                result.append((displayID: did, videoID: ctx.videoID))
+            }
+            return result
+        }
     }
 
     var activeContextCount: Int {
         lock.withLock { $0.activeContexts.count }
     }
 
-    func clearCaches() {
-        lock.withLock { state in
-            state.cachedVideoURL = nil
-        }
+    // MARK: - Properties
+
+    var cachedThumbnailURL: URL? {
+        get { lock.withLock { $0.cachedThumbnailURL } }
+        set { lock.withLock { $0.cachedThumbnailURL = newValue } }
     }
 
-    // MARK: - Properties
+    var cacheDirectoryURL: URL? {
+        get { lock.withLock { $0.cacheDirectoryURL } }
+        set { lock.withLock { $0.cacheDirectoryURL = newValue } }
+    }
 
     var cachedVideoURL: URL? {
         get { lock.withLock { $0.cachedVideoURL } }

@@ -28,7 +28,7 @@ struct DanmakuView: View {
     // 轨道配置
     private let trackHeight: Double = 30
     private let maxTracks = 15
-    
+
     // 性能优化：弹幕池
     @State private var danmakuPool: [DanmakuItem] = []
 
@@ -135,7 +135,7 @@ struct DanmakuView: View {
             return createBottomItem(danmaku: danmaku)
         }
     }
-    
+
     // 从弹幕池中获取或创建新的弹幕项
     private func getDanmakuItem() -> DanmakuItem {
         if let item = danmakuPool.popLast() {
@@ -270,7 +270,7 @@ struct DanmakuView: View {
                 updatedItem.x -= speed * deltaTime
                 activeItems[index] = updatedItem
             }
-            
+
             // 检查是否需要移除
             if item.x < -estimateTextWidth(item.danmaku.text) {
                 toRemove.append(index)
@@ -421,12 +421,12 @@ private struct DanmakuLiquidToggle: View {
     @Binding var isOn: Bool
     @State private var isHovered = false
     @State private var isPressed = false
-    
+
     init(_ title: String, isOn: Binding<Bool>) {
         self.title = title
         self._isOn = isOn
     }
-    
+
     var body: some View {
         HStack(spacing: 10) {
             HStack(spacing: 6) {
@@ -434,14 +434,14 @@ private struct DanmakuLiquidToggle: View {
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(isOn ? Color(hex: "FF3366") : .white.opacity(0.4))
                     .contentTransition(.symbolEffect(.replace))
-                
+
                 Text(title)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white)
             }
-            
+
             Spacer()
-            
+
             // 液态玻璃开关
             Button(action: {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
@@ -452,7 +452,7 @@ private struct DanmakuLiquidToggle: View {
                     Capsule()
                         .fill(isOn ? Color(hex: "FF3366").opacity(0.35) : Color.white.opacity(0.12))
                         .frame(width: 40, height: 22)
-                    
+
                     Circle()
                         .fill(.white)
                         .frame(width: 18, height: 18)

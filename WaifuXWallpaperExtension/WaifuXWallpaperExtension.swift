@@ -143,11 +143,15 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             _ = handle
             extLog("INIT (PID: \(ProcessInfo.processInfo.processIdentifier)) — WallpaperExtensionKit loaded")
             swizzleSnapshotEncodeIfNeeded()
+            VideoLibrary.shared.scan()
             WallpaperPrefs.shared.observeChanges()
             observeLibraryChanges()
-            observeCommands()
             observeDisplaySleepWake()
             observeScreenLockState()
+            PowerMonitor.shared.startMonitoring()
+            observePowerStateChanges()
+            observeSocketCommands()
+            FrameChannel.shared.start()
         } else {
             let err = String(cString: dlerror())
             extLog("INIT — dlopen failed: \(err)")
@@ -222,6 +226,101 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         }
     }
 
+    // MARK: - Power State Changes
+
+    /// 监听电源状态变化（热状态、电池、亮度）并重新计算播放策略
+    private func observePowerStateChanges() {
+        Task {
+            for await powerState in PowerMonitor.shared.stateChanges() {
+                let state = WallpaperState.shared
+                let prefs = WallpaperPrefs.shared
+                let policy = PlaybackPolicy.compute(
+                    presentationMode: state.presentationMode,
+                    activityState: state.activityState,
+                    userPaused: prefs.userPaused,
+                    alwaysPauseDesktop: prefs.alwaysPauseDesktop,
+                    pauseWhenOccluded: false,
+                    desktopOccluded: false,
+                    powerState: powerState
+                )
+                WallpaperState.shared.forEachRenderer { renderer in
+                    renderer.applyPolicy(policy)
+                }
+            }
+        }
+    }
+
+    // MARK: - Socket Command Polling
+
+    /// 定期轮询 App 的挂起命令（如 switch_video），实现 App 主动推送切换壁纸。
+    /// 用户只需在系统设置初始化选择一次，之后 App 通过 socket 控制。
+    private func observeSocketCommands() {
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            guard let socketPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+                .appendingPathComponent("socket/extension.ipc").path
+            else { return }
+
+            // 用轻量级 poll 请求检查是否有挂起命令
+            let req = IPCRequest(id: UUID().uuidString, method: "poll_commands", params: nil)
+            guard let data = try? JSONEncoder().encode(req) else { return }
+
+            let sock = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard sock >= 0 else { return }
+            defer { close(sock) }
+
+            // 防止写入已断开的 socket 时触发 SIGPIPE
+            var noSigPipe: Int32 = 1
+            setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            socketPath.withCString { src in
+                Darwin.strncpy(UnsafeMutablePointer<CChar>(&addr.sun_path.0), src, MemoryLayout.size(ofValue: addr.sun_path))
+            }
+            let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+            guard Darwin.connect(sock, UnsafeRawPointer(&addr).assumingMemoryBound(to: sockaddr.self), len) == 0 else { return }
+
+            var reqLen = UInt32(data.count).bigEndian
+            guard write(sock, &reqLen, 4) == 4 else { return }
+            guard data.withUnsafeBytes({ write(sock, $0.baseAddress!, data.count) }) == data.count else { return }
+
+            var respLen: UInt32 = 0
+            guard read(sock, &respLen, 4) == 4 else { return }
+            let payloadLen = Int(UInt32(bigEndian: respLen))
+            guard payloadLen > 0, payloadLen < 10_000 else { return }
+
+            let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: payloadLen, alignment: 1)
+            defer { buf.deallocate() }
+            var total = 0
+            while total < payloadLen {
+                let n = read(sock, buf.baseAddress! + total, payloadLen - total)
+                guard n > 0 else { return }
+                total += n
+            }
+            let respData = Data(bytes: buf.baseAddress!, count: payloadLen)
+
+            guard let resp = try? JSONDecoder().decode(IPCResponse.self, from: respData) else { return }
+            // poll_commands 的响应将命令 JSON 放在 videoPath 字段中
+            if let cmdJSON = resp.videoPath, let cmdData = cmdJSON.data(using: .utf8),
+               let cmd = try? JSONDecoder().decode(IPCCommand.self, from: cmdData) {
+                if cmd.action == "switch_video", let videoID = cmd.videoID, let displayID = cmd.displayID {
+                    extLog("[Commands] Socket switch_video: display=\(displayID) video=\(videoID)")
+                    if let path = UnixSocketClient.shared.fetchVideoPathSync(for: videoID) {
+                        let url = URL(fileURLWithPath: path)
+                        if FileManager.default.fileExists(atPath: path) {
+                            WallpaperState.shared.renderer(for: displayID)?.replaceVideo(with: url)
+                            extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到视频: \(videoID)")
+                        }
+                    }
+                }
+            }
+        }
+        extLog("[Extension] Socket command polling started")
+    }
+
     // MARK: - Library Changes
 
     private func observeLibraryChanges() {
@@ -230,10 +329,10 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         CFNotificationCenterAddObserver(
             center,
             observer,
-            { _, observer, _, _, _ in
-                guard observer != nil else { return }
+            { _, _, _, _, _ in
+                VideoLibrary.shared.scan()
                 WallpaperState.shared.clearCaches()
-                extLog("[Extension] Library changed — cleared caches")
+                extLog("[Extension] Library changed — re-scanned")
             },
             "com.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
@@ -241,35 +340,14 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
         )
     }
 
-    // MARK: - Command IPC (App → Extension via shared container)
-
-    /// 监听 App 写入的命令文件，实现可靠的 App → 扩展通信。
-    /// App 在共享容器的 Commands/ 目录写入 JSON 文件，扩展定期扫描处理。
-    /// 使用 Timer 轮询而非 DispatchSource，避免沙箱下 open() 被拦截的问题。
-    private func observeCommands() {
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
-            extLog("[Commands] ⚠️ 共享容器不可用，命令监听不可用")
-            return
-        }
-
-        let cmdDir = container.appendingPathComponent("Commands", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cmdDir, withIntermediateDirectories: true)
-
-        // 每 1 秒轮询命令目录（开销极小，避免沙箱下 DispatchSource + open() 不可用）
-        // processCommands 是顶层函数，不捕获 self，避免 Sendable 警告
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            processCommands(in: cmdDir)
-        }
-
-        extLog("[Commands] 命令目录轮询已启动: \(cmdDir.path)")
-
-        // 立即处理可能积压的命令
-        processCommands(in: cmdDir)
-    }
-
+    /// 重新计算播放策略并应用到所有渲染器。
+    /// 处理锁屏时的竞争条件：当屏幕已锁定但 WallpaperAgent 尚未更新 presentationMode 时，
+    /// 使用 "locked" 防止陈旧的桌面模式策略阻止锁屏播放。
     static func recomputeAndApplyPolicy() {
         let state = WallpaperState.shared
         let prefs = WallpaperPrefs.shared
+        let power = PowerMonitor.shared.currentState
+
         let effectiveMode = state.isScreenLocked && state.presentationMode != "locked"
             ? "locked"
             : state.presentationMode
@@ -281,9 +359,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             alwaysPauseDesktop: prefs.alwaysPauseDesktop,
             pauseWhenOccluded: false,
             desktopOccluded: false,
-            thermalState: ProcessInfo.processInfo.thermalState,
-            isOnBattery: false,
-            batteryLevel: 100
+            powerState: power
         )
         WallpaperState.shared.forEachRenderer { renderer in
             renderer.applyPolicy(policy)
@@ -291,109 +367,14 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     }
 }
 
-// MARK: - Command Processing (top-level to avoid Sendable capture of WaifuXWallpaperExtension.self)
-
-/// 扫描并处理 Commands 目录中的所有命令文件
-private func processCommands(in cmdDir: URL) {
-    guard let files = try? FileManager.default.contentsOfDirectory(
-        at: cmdDir, includingPropertiesForKeys: [.contentModificationDateKey]
-    ) else { return }
-
-    // 按修改时间排序，逐个处理
-    let sorted = files
-        .filter { $0.pathExtension == "json" }
-        .sorted { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                 < (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
-
-    var parsedCommands: [(url: URL, action: String, command: [String: Any])] = []
-    for fileURL in sorted {
-        guard let data = try? Data(contentsOf: fileURL),
-              let cmd = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let action = cmd["action"] as? String else {
-            try? FileManager.default.removeItem(at: fileURL)
-            continue
-        }
-
-        parsedCommands.append((fileURL, action, cmd))
-    }
-
-    guard !parsedCommands.isEmpty else { return }
-
-    // setVideo is last-write-wins. Replaying stale video switches on startup can
-    // trigger a storm of settings refreshes and renderer acquisitions.
-    let setVideoCommands = parsedCommands.filter { $0.action == "setVideo" }
-    if setVideoCommands.count > 1 {
-        extLog("[Commands] 合并 \(setVideoCommands.count) 条积压 setVideo，仅处理最新一条")
-    }
-
-    let latestSetVideoURL = setVideoCommands.last?.url
-    let commandsToProcess = parsedCommands.filter { item in
-        item.action != "setVideo" || item.url == latestSetVideoURL
-    }
-
-    for item in commandsToProcess {
-        let action = item.action
-        extLog("[Commands] 处理命令: \(action)")
-
-        switch action {
-        case "setVideo":
-            handleSetVideoCommand(item.command)
-        default:
-            extLog("[Commands] 未知命令: \(action)")
-        }
-    }
-
-    // 处理后删除本轮扫描到的命令，包括被合并跳过的过期 setVideo。
-    for item in parsedCommands {
-        try? FileManager.default.removeItem(at: item.url)
-    }
-}
-
-/// 处理设置壁纸命令
-private func handleSetVideoCommand(_ cmd: [String: Any]) {
-    guard let videoID = cmd["videoID"] as? String else {
-        extLog("[Commands] setVideo 缺少 videoID")
-        return
-    }
-
-    extLog("[Commands] 切换到视频: \(videoID)")
-
-    // 更新扩展状态（只更新 currentVideoID，不停止已有渲染器）
-    // 系统负责每个显示器单独的 acquire/释放生命周期
-    WallpaperState.shared.currentVideoID = videoID
-    WallpaperState.shared.cachedVideoURL = nil
-    WallpaperState.shared.clearCaches()
-
-    let displayID = (cmd["displayID"] as? NSNumber)?.uint32Value ?? cmd["displayID"] as? UInt32
-    if let videoURL = findVideoURL(videoID: videoID) {
-        let switched = WallpaperState.shared.switchActiveRenderers(to: videoURL, displayID: displayID)
-        if switched > 0 {
-            extLog("[Commands] 已直接切换 \(switched) 个活跃 renderer 到视频: \(videoID)")
-        } else {
-            extLog("[Commands] 当前没有活跃 renderer，等待 WallpaperAgent acquire: \(videoID)")
-        }
-    } else {
-        extLog("[Commands] ⚠️ 未找到命令指定的视频文件: \(videoID)")
-    }
-
-    // 通知 App 侧状态变化
-    WallpaperPrefs.shared.setActive(true)
-
-    // 发送 Darwin 通知，触发 XPCHandler.handlePrefsChanged() → updateSettingsViewModels
-    // 这样系统会立即收到刷新信号，知晓新视频可用
-    let center = CFNotificationCenterGetDarwinNotifyCenter()
-    CFNotificationCenterPostNotification(
-        center,
-        CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
-        nil, nil, true
-    )
-
-    extLog("[Commands] 视频切换完成: \(videoID)")
-}
-
 // MARK: - Logging
 
-let extLogFileURL = URL(fileURLWithPath: "/tmp/waifux-extension.log")
+private var extLogFileURL: URL {
+    if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+        return container.appendingPathComponent("waifux-extension.log")
+    }
+    return URL(fileURLWithPath: "/tmp/waifux-extension.log")
+}
 
 func extLog(_ message: String) {
     if #available(macOS 11.0, *) {

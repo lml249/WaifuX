@@ -276,7 +276,7 @@ final class StatusBarController: NSObject {
         // macOS 26+：扩展控制模式下，activeScreens 为空但壁纸仍活跃
         // 使用所有屏幕 + per-display prefs 来构建控件
         let isExtensionMode: Bool
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             isExtensionMode = true
         } else {
             isExtensionMode = false
@@ -399,7 +399,7 @@ final class StatusBarController: NSObject {
         }
 
         // macOS 26+：扩展控制模式下通过共享 prefs 控制 per-display 暂停
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             if let displayID = Self.cgDisplayID(for: screen) {
                 let isPaused = LockScreenWallpaperService.shared.isDisplayPaused(displayID)
                 LockScreenWallpaperService.shared.setDisplayPaused(!isPaused, forDisplayID: displayID)
@@ -428,7 +428,7 @@ final class StatusBarController: NSObject {
         }
 
         // macOS 26+：扩展控制模式下停止单屏视频
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             videoWallpaperManager.stopWallpaper(for: screen)
             return
         }
@@ -451,7 +451,7 @@ final class StatusBarController: NSObject {
         }
 
         // macOS 26+：扩展控制模式下全局暂停/恢复
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             LockScreenWallpaperService.shared.setPaused(!videoWallpaperManager.isPaused)
             videoWallpaperManager.toggleExtensionGlobalPause()
             return
@@ -493,7 +493,7 @@ final class StatusBarController: NSObject {
         }
 
         // macOS 26+：扩展控制模式下停止所有壁纸
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             videoWallpaperManager.stopWallpaper()
             return
         }
@@ -515,7 +515,7 @@ final class StatusBarController: NSObject {
 
     @objc private func toggleMute() {
         // macOS 26+：扩展模式下静音对所有显示器生效（扩展不播放音频，但记录状态）
-        if #available(macOS 26.0, *), videoWallpaperManager.isExtensionControllingDesktop {
+        if #available(macOS 26.0, *), videoWallpaperManager.isLockScreenMirroringActive {
             let newMuted = !videoWallpaperManager.isMuted
             videoWallpaperManager.setMuted(newMuted)
             // 同步到所有活跃显示器的 prefs

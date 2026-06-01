@@ -105,6 +105,9 @@ final class MediaExploreViewModel: ObservableObject {
     @Published var cachedAllLocalMedia: [UnifiedLocalMedia] = []
 
     init() {
+        // 缓存 UserDefaults 值，避免后台线程访问触发 _CFXPreferences 递归崩溃
+        persistDownloadedMediaToAppLibrary = UserDefaults.standard.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
+
         // 注册内存压力通知（由 WaifuXApp.configureKingfisher 中的 DispatchSource 触发）
         NotificationCenter.default.addObserver(
             forName: .appDidReceiveMemoryPressure,
@@ -835,9 +838,8 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 是否与设置一致：下载后写入应用内媒体库（而非仅临时缓存）。与系统「下载」文件夹无关。
-    private var persistDownloadedMediaToAppLibrary: Bool {
-        UserDefaults.standard.object(forKey: DownloadPathManager.persistDownloadsToAppLibraryDefaultsKey) as? Bool ?? true
-    }
+    /// 缓存值在 init 时读取，避免后台线程访问 UserDefaults.standard 触发 _CFXPreferences 递归崩溃。
+    private let persistDownloadedMediaToAppLibrary: Bool
 
     func download(_ item: MediaItem, preferredOption: MediaDownloadOption? = nil) async throws {
         let task = downloadTaskService.addTask(mediaItem: item)
@@ -1234,8 +1236,9 @@ final class MediaExploreViewModel: ObservableObject {
                         print("[MediaExploreViewModel] Created directory: \(directory.path)")
                     }
 
-                    let cachedData = try Data(contentsOf: cachedURL)
-                    try cachedData.write(to: fileURL, options: .atomic)
+                    // 后台读取缓存文件 + 后台写入目标文件，避免 MainActor 阻塞
+                    let cachedData = try await cachedURL.readDataAsync()
+                    try await cachedData.writeAsync(to: fileURL, options: .atomic)
 
                     // 验证文件是否成功写入
                     if FileManager.default.fileExists(atPath: fileURL.path) {

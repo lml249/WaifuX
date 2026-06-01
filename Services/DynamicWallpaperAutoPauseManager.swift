@@ -281,6 +281,12 @@ final class DynamicWallpaperAutoPauseManager {
         guard hasNative || hasExternal else { return }
         guard !VideoWallpaperManager.shared.isScreenLocked else { return }
 
+        // 在 accessory 模式下（菜单栏后台运行），不因前台应用切换而暂停壁纸。
+        // 用户已明确选择将 App 放入后台，壁纸应继续播放。
+        if NSApp.activationPolicy() == .accessory {
+            return
+        }
+
         appSwitchDebounceTask?.cancel()
         appSwitchDebounceTask = Task { [weak self] in
             do {

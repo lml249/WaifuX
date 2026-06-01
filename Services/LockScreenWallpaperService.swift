@@ -1,25 +1,33 @@
 //  LockScreenWallpaperService.swift
 //  WaifuX
 //
-//  管理锁屏动态壁纸的部署与状态同步。
+//  管理锁屏镜像实例的共享状态与偏好同步。
 //  仅在 macOS 26.0+ 生效，通过 WallpaperExtensionKit 私有框架实现。
 //
 //  支持多显示器：每个显示器可以部署不同的视频，扩展根据 choiceConfiguration 选择对应视频。
 
+import AVFoundation
 import Foundation
 import AppKit
+import ImageIO
 import notify
 
-/// 锁屏动态壁纸管理服务
+/// 锁屏镜像实例管理服务
 ///
-/// 当用户在 macOS 26+ 上设置动态壁纸（本机 MP4 或烘焙后的 Scene 视频）时，
-/// 该服务会将视频复制到 App Group 共享容器，并通过 Darwin 通知通知 Wallpaper Extension。
-///
-/// 多显示器场景下，每个显示器的视频都会被部署到共享容器的 WallpaperVideos/ 目录，
-/// 扩展的 SettingsProvider 会为每个视频创建设置项，系统壁纸选择器支持按显示器分配不同视频。
+/// 真实业务模型是：
+/// 1. 扩展为每个显示器暴露一个固定的锁屏实例，用户在系统设置中手动选择一次
+/// 2. 主 App 维护“显示器 -> 当前桌面视频源”映射
+/// 3. 实例激活后，主 App 仅向对应显示器实例推送桌面帧，不自动切换系统壁纸选择
 @MainActor
 final class LockScreenWallpaperService {
     static let shared = LockScreenWallpaperService()
+
+    struct DisplayInstance: Codable, Sendable {
+        let id: String
+        let displayID: UInt32
+        let name: String
+        let thumbnailPath: String?
+    }
 
     /// 功能是否可用（macOS 26.0+ 且已配置 App Group）
     var isAvailable: Bool {
@@ -27,15 +35,16 @@ final class LockScreenWallpaperService {
         return sharedContainerURL != nil
     }
 
-    /// 当前部署到共享容器的视频路径（主屏/单显示器）
-    private(set) var currentLockScreenVideoPath: String?
+    /// 当前写入共享容器的镜像帧源路径
+    private(set) var currentMirroringSourcePath: String?
 
-    /// 已部署的视频 ID 集合（用于清理不再需要的视频）
+    /// 已写入共享容器的视频 ID 集合（兼容旧缓存清理）
     private var deployedVideoIDs: Set<String> = []
 
     private let appGroupID = "group.com.waifux.app"
     private let prefsFileName = "waifux-wallpaper-prefs.json"
     private let videoDirName = "WallpaperVideos"
+    private let displayInstancesFileName = "waifux-display-instances.json"
 
     private var sharedContainerURL: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
@@ -43,15 +52,24 @@ final class LockScreenWallpaperService {
 
     private init() {}
 
+    var displayInstancesURL: URL? {
+        sharedContainerURL?.appendingPathComponent(displayInstancesFileName)
+    }
+
     // MARK: - Public API
 
-    /// 将指定视频部署为锁屏动态壁纸（单视频模式）
+    /// 将指定桌面视频源写入共享容器，供锁屏实例在需要时读取缩略图/兜底内容。
     /// - Parameters:
     ///   - videoURL: 本地视频文件路径（MP4/MOV）
     ///   - videoID: 壁纸唯一标识（用于区分不同壁纸）
-    func deployLockScreenVideo(videoURL: URL, videoID: String) async throws {
+    func cacheMirroringSource(videoURL: URL, videoID: String) async throws {
         guard isAvailable else {
             print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
+            return
+        }
+
+        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+            print("[LockScreenWallpaper] 动态锁屏已关闭，跳过")
             return
         }
 
@@ -71,12 +89,16 @@ final class LockScreenWallpaperService {
         keepIDs.insert(videoID)
         cleanupOldVideos(in: videoDir, keeping: keepIDs)
 
-        // 复制新视频到共享容器
+        // 用 hard link 将视频放到共享容器（同一卷不占额外空间）
         let destURL = videoDir.appendingPathComponent("\(videoID).mp4")
         if FileManager.default.fileExists(atPath: destURL.path) {
             try? FileManager.default.removeItem(at: destURL)
         }
-        try FileManager.default.copyItem(at: videoURL, to: destURL)
+        do {
+            try FileManager.default.linkItem(at: videoURL, to: destURL)
+        } catch {
+            try FileManager.default.copyItem(at: videoURL, to: destURL)
+        }
 
         deployedVideoIDs.insert(videoID)
 
@@ -90,88 +112,23 @@ final class LockScreenWallpaperService {
         let data = try JSONEncoder().encode(prefs)
         try data.write(to: prefsURL, options: .atomic)
 
-        currentLockScreenVideoPath = destURL.path
+        currentMirroringSourcePath = destURL.path
 
-        // 通知 Extension 刷新
+        // 先更新显示器实例目录
+        syncInstanceCatalogToSocketServer()
+
+        // 再通知 Extension 刷新（此时 SocketServer 已有最新数据）
         notifyExtensionPrefsChanged()
 
-        // 写入系统壁纸配置，选中 WaifuX 为当前壁纸
-        selectWaifuXInSystemWallpaper(videoID: videoID)
+        // 生成缩略图
+        generateThumbnail(for: destURL, videoID: videoID)
 
-        print("[LockScreenWallpaper] ✅ 已部署锁屏视频: \(destURL.lastPathComponent)")
+        print("[LockScreenWallpaper] ✅ 已更新锁屏镜像帧源缓存: \(destURL.lastPathComponent)")
     }
 
-    /// 为多显示器部署多个视频到共享容器。
-    /// 每个视频以 videoID 命名，扩展通过 choiceConfiguration 选择对应视频。
-    /// - Parameter videoMap: [videoID: 本地视频文件 URL]
-    func deployVideosForDisplays(videoMap: [String: URL]) async throws {
-        guard isAvailable else { return }
-        guard !videoMap.isEmpty else { return }
-
-        guard let container = sharedContainerURL else {
-            throw LockScreenError.appGroupNotAvailable
-        }
-
-        let videoDir = container.appendingPathComponent(videoDirName, isDirectory: true)
-        try FileManager.default.createDirectory(at: videoDir, withIntermediateDirectories: true)
-
-        var newDeployedIDs: Set<String> = []
-
-        for (videoID, videoURL) in videoMap {
-            guard videoURL.isFileURL, FileManager.default.fileExists(atPath: videoURL.path) else {
-                print("[LockScreenWallpaper] ⚠️ 跳过不存在的视频: \(videoID)")
-                continue
-            }
-
-            let destURL = videoDir.appendingPathComponent("\(videoID).mp4")
-
-            // 如果目标文件已存在且大小相同，跳过复制（避免不必要的 I/O）
-            let srcAttrs = try? FileManager.default.attributesOfItem(atPath: videoURL.path)
-            let dstAttrs = try? FileManager.default.attributesOfItem(atPath: destURL.path)
-            if let srcSize = srcAttrs?[.size] as? Int,
-               let dstSize = dstAttrs?[.size] as? Int,
-               srcSize == dstSize {
-                newDeployedIDs.insert(videoID)
-                continue
-            }
-
-            if FileManager.default.fileExists(atPath: destURL.path) {
-                try? FileManager.default.removeItem(at: destURL)
-            }
-            try FileManager.default.copyItem(at: videoURL, to: destURL)
-            newDeployedIDs.insert(videoID)
-            print("[LockScreenWallpaper] ✅ 已部署视频: \(videoID).mp4")
-        }
-
-        // 清理不再需要的旧视频
-        cleanupOldVideos(in: videoDir, keeping: newDeployedIDs)
-        deployedVideoIDs = newDeployedIDs
-
-        // 更新主屏路径（第一个视频作为默认）
-        if let firstID = newDeployedIDs.first {
-            currentLockScreenVideoPath = videoDir.appendingPathComponent("\(firstID).mp4").path
-        }
-
-        // 写入偏好设置
-        let prefs = PrefsFile(
-            userPaused: false,
-            alwaysPauseDesktop: false,
-            currentVideoPath: currentLockScreenVideoPath
-        )
-        let prefsURL = container.appendingPathComponent(prefsFileName)
-        let data = try JSONEncoder().encode(prefs)
-        try data.write(to: prefsURL, options: .atomic)
-
-        notifyExtensionPrefsChanged()
-        if let selectedID = newDeployedIDs.sorted().first {
-            selectWaifuXInSystemWallpaper(videoID: selectedID)
-            sendSetVideoCommand(videoID: selectedID)
-        }
-        print("[LockScreenWallpaper] ✅ 多显示器视频部署完成: \(newDeployedIDs.count) 个视频")
-    }
-
-    /// 清除所有锁屏动态壁纸
-    func clearLockScreenVideo() {
+    /// 清空当前锁屏镜像帧源缓存。
+    /// 不触碰用户在系统设置里手动选择的显示器实例。
+    func clearMirroringSourceCache() {
         guard isAvailable else { return }
 
         guard let container = sharedContainerURL else { return }
@@ -187,15 +144,15 @@ final class LockScreenWallpaperService {
             try? data.write(to: prefsURL, options: .atomic)
         }
 
-        currentLockScreenVideoPath = nil
+        currentMirroringSourcePath = nil
         deployedVideoIDs.removeAll()
-
-        // 从系统壁纸配置中移除 WaifuX（恢复默认壁纸）
-        removeWaifuXFromSystemWallpaper()
+        if #available(macOS 26.0, *) {
+            WallpaperExtensionSocketServer.shared.clearDisplayVideos()
+        }
 
         notifyExtensionPrefsChanged()
 
-        print("[LockScreenWallpaper] ✅ 已清除锁屏视频")
+        print("[LockScreenWallpaper] ✅ 已清空锁屏镜像帧源缓存")
     }
 
     /// 暂停/恢复锁屏壁纸播放（用户手动控制）
@@ -274,320 +231,16 @@ final class LockScreenWallpaperService {
         notifyExtensionPrefsChanged()
     }
 
-    // MARK: - System Wallpaper Properties
-
-    /// 系统壁纸配置文件路径
-    private var wallpaperStoreURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
-    }
-
-    /// WaifuX 壁纸扩展 Bundle ID
-    private let extensionBundleID = "com.waifux.app.wallpaperextension"
-
-    // MARK: - Integration Helpers
-
-    /// 当用户通过 VideoWallpaperManager 设置本机视频壁纸时，同时部署到锁屏
-    func syncFromVideoWallpaper(videoURL: URL, videoID: String) {
-        guard isAvailable else {
-            print("[LockScreenWallpaper] ⚠️ syncFromVideoWallpaper skipped: isAvailable=false")
-            return
-        }
-        Task {
-            do {
-                try await deployLockScreenVideo(videoURL: videoURL, videoID: videoID)
-                // 通过命令文件通知扩展切换视频（比 Darwin 通知更可靠）
-                sendSetVideoCommand(videoID: videoID)
-                // selectWaifuXInSystemWallpaper 已在 deployLockScreenVideo 中调用
-            } catch {
-                print("[LockScreenWallpaper] ❌ syncFromVideoWallpaper 失败: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// 当用户通过 WallpaperEngineXBridge 设置 WE 动态壁纸且已烘焙为视频时，同时部署到锁屏
-    func syncFromBakedVideo(videoURL: URL, videoID: String) {
-        guard isAvailable else {
-            print("[LockScreenWallpaper] ⚠️ syncFromBakedVideo skipped: isAvailable=false")
-            return
-        }
-        Task {
-            do {
-                try await deployLockScreenVideo(videoURL: videoURL, videoID: videoID)
-                sendSetVideoCommand(videoID: videoID)
-                // selectWaifuXInSystemWallpaper 已在 deployLockScreenVideo 中调用
-            } catch {
-                print("[LockScreenWallpaper] ❌ syncFromBakedVideo 失败: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// 通过命令文件通知扩展切换视频（比 Darwin 通知更可靠）
-    private func sendSetVideoCommand(videoID: String, displayID: UInt32? = nil) {
-        guard let container = sharedContainerURL else { return }
-
-        let cmdDir = container.appendingPathComponent("Commands", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cmdDir, withIntermediateDirectories: true)
-
-        var cmd: [String: Any] = [
-            "action": "setVideo",
-            "videoID": videoID,
-            "timestamp": ISO8601DateFormatter().string(from: Date())
-        ]
-        if let displayID {
-            cmd["displayID"] = displayID
-        }
-
-        let fileName = "set-video-\(UUID().uuidString).json"
-        let fileURL = cmdDir.appendingPathComponent(fileName)
-
-        guard let data = try? JSONSerialization.data(withJSONObject: cmd) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-
-        print("[LockScreenWallpaper] 📝 写入命令文件: \(fileName)")
-    }
-
-    // MARK: - System Wallpaper Configuration
-
-    /// 直接写入系统壁纸配置文件 Index.plist，将 WaifuX 设为当前壁纸。
-    /// App 无沙箱限制，可以修改此文件。系统 WallpaperAgent 通过 DispatchSource
-    /// 监听文件变化，检测到变更后自动加载 WaifuX 扩展。
-    /// 路径: ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist
-    ///
-    /// - 优先从现有 plist 中读取显示器 UUID（保证跟系统使用的完全一致）
-    /// - 保留已有的所有结构和 Choice（追加而非覆盖）
-    /// - 保持原始 plist 格式（binary/XML）
-    /// - 先用临时文件写入 + 完整性校验，再覆盖原文件
-    /// - 延迟 1.5 秒执行，防止 setPosterAsDesktopWallpaper 触发的系统异步写覆盖
-    func selectWaifuXInSystemWallpaper(videoID: String) {
-        // 延迟写入，确保 NSWorkspace.setDesktopImageURLForAllSpaces
-        // 触发的系统异步写操作先完成，避免覆盖我们的 choice
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.performSelectWallpaper(videoID: videoID)
-        }
-    }
-
-    /// 构建系统壁纸 Choice 字典
-    /// macOS 26 Index.plist 的 Choice 需要 Provider + Configuration(Data) + Files(Array)
-    /// Configuration 存储视频 ID 的 UTF-8 Data，扩展的 acquire 方法通过 Mirror 解析还原
-    private func makeWaifuXChoice(videoID: String) -> [String: Any] {
-        return [
-            "Configuration": Data(videoID.utf8),
-            "Files": [] as [Any],
-            "Provider": extensionBundleID
-        ]
-    }
-
-    private func performSelectWallpaper(videoID: String) {
-        // 读取现有壁纸配置
-        guard FileManager.default.fileExists(atPath: wallpaperStoreURL.path) else {
-            print("[LockScreenWallpaper] ⚠️ 系统壁纸配置文件不存在: \(wallpaperStoreURL.path)")
-            return
-        }
-
-        guard let plistData = try? Data(contentsOf: wallpaperStoreURL) else {
-            print("[LockScreenWallpaper] ❌ 无法读取系统壁纸配置数据")
-            return
-        }
-
-        var originalFormat: PropertyListSerialization.PropertyListFormat = .xml
-        guard var plist = try? PropertyListSerialization.propertyList(from: plistData, format: &originalFormat) as? [String: Any] else {
-            print("[LockScreenWallpaper] ❌ 无法解析系统壁纸配置 plist")
-            return
-        }
-
-        // 获取显示器 UUID：只使用当前连接的显示器
-        let currentDisplays = resolveDisplayUUIDs()
-        let currentUUIDs = Set(currentDisplays.map { $0.uuid })
-        print("[LockScreenWallpaper] 当前连接的显示器 (\(currentDisplays.count) 个): \(currentUUIDs)")
-
-        guard !currentUUIDs.isEmpty else {
-            print("[LockScreenWallpaper] ⚠️ 无法获取任何显示器 UUID，跳过写入")
-            return
-        }
-
-        let newChoice = makeWaifuXChoice(videoID: videoID)
-
-        // 构建 Displays 字典：保留所有现有条目，但只更新当前已连接的显示器
-        var displaysDict = plist["Displays"] as? [String: Any] ?? [:]
-        var changed = false
-
-        for displayUUID in currentUUIDs {
-            var displayDict = displaysDict[displayUUID] as? [String: Any] ?? [:]
-
-            // 同时更新 Desktop（桌面壁纸）和 Idle（锁屏壁纸）两个 scope
-            for scope in ["Desktop", "Idle"] {
-                var scopeDict = displayDict[scope] as? [String: Any] ?? [:]
-                var contentDict = scopeDict["Content"] as? [String: Any] ?? [:]
-
-                // Choices 是当前选中的内容集合；只追加会让系统看到候选项，
-                // 但不会把 WaifuX 切成当前壁纸。
-                contentDict["Choices"] = [newChoice]
-                contentDict["Shuffle"] = NSNull()
-                scopeDict["Content"] = contentDict
-                scopeDict["LastSet"] = Date()
-                scopeDict["LastUse"] = Date()
-                displayDict[scope] = scopeDict
-            }
-
-            displaysDict[displayUUID] = displayDict
-            changed = true
-        }
-
-        plist["Displays"] = displaysDict
-
-        guard changed else {
-            print("[LockScreenWallpaper] ⚠️ 没有需要更新的显示器")
-            return
-        }
-
-        // 序列化（保持原始格式）
-        guard let serializedData = try? PropertyListSerialization.data(fromPropertyList: plist, format: originalFormat, options: 0) else {
-            print("[LockScreenWallpaper] ❌ 无法序列化壁纸配置")
-            return
-        }
-
-        // 先写临时文件 → 完整性校验 → 覆盖原文件
-        let tempURL = wallpaperStoreURL.appendingPathExtension("tmp")
-        try? FileManager.default.removeItem(at: tempURL)
-        try? FileManager.default.createDirectory(at: wallpaperStoreURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-
-        do {
-            try serializedData.write(to: tempURL, options: .atomic)
-            let verifyData = try Data(contentsOf: tempURL)
-            guard !verifyData.isEmpty else {
-                throw NSError(domain: "LockScreenWallpaper", code: 1, userInfo: [NSLocalizedDescriptionKey: "写入的文件为空"])
-            }
-            if FileManager.default.fileExists(atPath: wallpaperStoreURL.path) {
-                try FileManager.default.removeItem(at: wallpaperStoreURL)
-            }
-            try FileManager.default.moveItem(at: tempURL, to: wallpaperStoreURL)
-            print("[LockScreenWallpaper] ✅ 已写入系统壁纸配置，选中 WaifuX (\(videoID))")
-
-            // 通知系统壁纸配置已变更
-            postWallpaperChangeNotifications()
-        } catch {
-            print("[LockScreenWallpaper] ❌ 写入壁纸配置失败: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: tempURL)
-        }
-    }
-
-    /// 从系统壁纸配置中移除 WaifuX（恢复默认壁纸）
-    private func removeWaifuXFromSystemWallpaper() {
-        guard FileManager.default.fileExists(atPath: wallpaperStoreURL.path) else { return }
-
-        guard let plistData = try? Data(contentsOf: wallpaperStoreURL),
-              var plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
-              var displaysDict = plist["Displays"] as? [String: Any] else {
-            print("[LockScreenWallpaper] ❌ 无法读取系统壁纸配置")
-            return
-        }
-
-        var changed = false
-
-        for (displayUUID, displayValue) in displaysDict {
-            guard var displayDict = displayValue as? [String: Any] else { continue }
-
-            // 同时清理 Desktop 和 Idle 两个 scope 中的 WaifuX choice
-            for scope in ["Desktop", "Idle"] {
-                guard var scopeDict = displayDict[scope] as? [String: Any],
-                      var contentDict = scopeDict["Content"] as? [String: Any],
-                      var choices = contentDict["Choices"] as? [[String: Any]] else {
-                    continue
-                }
-
-                let filteredChoices = choices.filter { ($0["Provider"] as? String) != extensionBundleID }
-                if filteredChoices.count < choices.count {
-                    if filteredChoices.isEmpty {
-                        contentDict.removeValue(forKey: "Choices")
-                    } else {
-                        contentDict["Choices"] = filteredChoices
-                    }
-                    scopeDict["Content"] = contentDict
-                    scopeDict["LastSet"] = Date()
-                    scopeDict["LastUse"] = Date()
-                    displayDict[scope] = scopeDict
-                    changed = true
-                }
-            }
-
-            if changed {
-                displaysDict[displayUUID] = displayDict
-            }
-        }
-
-        guard changed else { return }
-
-        plist["Displays"] = displaysDict
-
-        if let updatedData = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0) {
-            try? updatedData.write(to: wallpaperStoreURL, options: .atomic)
-            print("[LockScreenWallpaper] ✅ 已从系统壁纸配置中移除 WaifuX")
-            postWallpaperChangeNotifications()
-        }
-    }
-
-    /// 解析当前所有显示器的 UUID（兼容 macOS 26+ 的私有 API 和回退方案）
-    private func resolveDisplayUUIDs() -> [(uuid: String, displayID: UInt32)] {
-        // 尝试使用 NSCGSDisplayConfiguration 私有 API 获取真实 UUID
-        if let configClass = NSClassFromString("NSCGSDisplayConfiguration") as? NSObject.Type,
-           let config = configClass.perform(NSSelectorFromString("currentConfiguration"))?.takeUnretainedValue() as? NSObject,
-           let uniqueDisplays = config.value(forKey: "uniqueDisplays") as? [NSObject] {
-            var results: [(String, UInt32)] = []
-            for display in uniqueDisplays {
-                if let uuid = (display.value(forKey: "UUID") as? NSUUID)?.uuidString,
-                   let displayID = display.value(forKey: "displayID") as? UInt32 {
-                    results.append((uuid, displayID))
-                }
-            }
-            if !results.isEmpty {
-                return results
-            }
-            print("[LockScreenWallpaper] 私有 API 返回空，尝试 CGDisplayCreateUUIDFromDisplayID 回退")
-        } else {
-            print("[LockScreenWallpaper] NSCGSDisplayConfiguration 不可用，使用 CGDisplayCreateUUIDFromDisplayID")
-        }
-
-        // 回退：使用 CGDisplayCreateUUIDFromDisplayID 生成稳定的 UUID
-        var fallbackResults: [(uuid: String, displayID: UInt32)] = []
-        for screen in NSScreen.screens {
-            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-                print("[LockScreenWallpaper] ⚠️ 跳过无法获取 NSScreenNumber 的屏幕: \(screen.localizedName)")
-                continue
-            }
-            let displayID = screenNumber.uint32Value
-            if let cfUUID = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue() {
-                let uuidString = CFUUIDCreateString(nil, cfUUID) as String? ?? UUID().uuidString
-                fallbackResults.append((uuidString, displayID))
-            } else {
-                print("[LockScreenWallpaper] ⚠️ 无法为 displayID \(displayID) 创建 UUID")
-            }
-        }
-        return fallbackResults
-    }
-
     // MARK: - Notification Helpers
 
     /// 通知 Extension 偏好设置已变更
-    private func notifyExtensionPrefsChanged() {
+        func notifyExtensionPrefsChanged() {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
             CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
             nil, nil, true
         )
-    }
-
-    /// 发送系统壁纸变更通知
-    private func postWallpaperChangeNotifications() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterPostNotification(
-            center,
-            CFNotificationName("com.apple.wallpaper.prefsChanged" as CFString),
-            nil, nil, true
-        )
-        notify_post("com.apple.wallpaper.changed")
-        notify_post("com.apple.wallpaper.wallpaperDidChange")
     }
 
     /// 清理不再需要的旧视频，保留 keepIDs 中的所有视频
@@ -601,6 +254,151 @@ final class LockScreenWallpaperService {
                 print("[LockScreenWallpaper] 🗑️ 清理旧视频: \(name)")
             }
         }
+    }
+
+    // MARK: - Display Instances
+
+    /// 当前显示器对应的锁屏实例目录。
+    /// 用户在系统设置里手动为每块显示器选择一次这些实例，之后实例只负责接收对应显示器的推帧。
+    func currentDisplayInstances() -> [DisplayInstance] {
+        NSScreen.screens.compactMap { screen in
+            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            let displayID = screenNumber.uint32Value
+            let instanceID = "display-\(displayID)"
+            let thumbnailPath = posterThumbnailPath(for: screen)
+            return DisplayInstance(
+                id: instanceID,
+                displayID: displayID,
+                name: screen.localizedName,
+                thumbnailPath: thumbnailPath
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.name == rhs.name { return lhs.displayID < rhs.displayID }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    func syncDisplayInstancesToSocketServer() {
+        guard #available(macOS 26.0, *), isAvailable else { return }
+
+        let instances = currentDisplayInstances()
+        persistDisplayInstances(instances)
+
+        let videos = instances.map { instance in
+            IPCVideoInfo(
+                id: instance.id,
+                name: instance.name,
+                videoPath: "",
+                thumbnailPath: instance.thumbnailPath ?? ""
+            )
+        }
+        WallpaperExtensionSocketServer.shared.updateVideos(videos)
+        notifyExtensionPrefsChanged()
+        print("[LockScreenWallpaper] 🖥️ 已同步 \(instances.count) 个显示器实例到 Socket 服务端")
+    }
+
+    func loadDisplayInstances() -> [DisplayInstance] {
+        guard let url = displayInstancesURL,
+              let data = try? Data(contentsOf: url),
+              let instances = try? JSONDecoder().decode([DisplayInstance].self, from: data) else {
+            return currentDisplayInstances()
+        }
+        return instances
+    }
+
+    /// 彻底清理锁屏实例：清除视频缓存、偏好设置、显示器实例列表、推送管线。
+    /// 用户不再使用锁屏动态壁纸时调用。
+    func clearLockScreenInstances() {
+        guard isAvailable else { return }
+
+        // 1. 清空视频缓存和偏好
+        clearMirroringSourceCache()
+
+        // 2. 删除显示器实例列表
+        if let url = displayInstancesURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        // 3. 清空 Socket 服务端可用实例
+        WallpaperExtensionSocketServer.shared.updateVideos([])
+
+        // 4. 通知扩展刷新
+        notifyExtensionPrefsChanged()
+
+        print("[LockScreenWallpaper] ✅ 已彻底清理锁屏实例")
+    }
+
+    private func persistDisplayInstances(_ instances: [DisplayInstance]) {
+        guard let url = displayInstancesURL,
+              let data = try? JSONEncoder().encode(instances) else {
+            return
+        }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    private func posterThumbnailPath(for screen: NSScreen) -> String? {
+        let thumbDir = sharedContainerURL?.appendingPathComponent("WallpaperCache/thumbnails")
+        let candidates = [
+            "display-\(screen.wallpaperScreenIdentifier).jpg",
+            "\(screen.wallpaperScreenIdentifier).jpg"
+        ]
+        for name in candidates {
+            if let url = thumbDir?.appendingPathComponent(name),
+               FileManager.default.fileExists(atPath: url.path) {
+                return url.path
+            }
+        }
+        return nil
+    }
+
+    // MARK: - 缩略图
+
+    /// 生成视频的 JPEG 缩略图并写入共享容器供扩展读取
+    private func generateThumbnail(for videoURL: URL, videoID: String) {
+        guard let container = sharedContainerURL else { return }
+        let thumbDir = container.appendingPathComponent("WallpaperCache/thumbnails")
+        try? FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
+        let thumbURL = thumbDir.appendingPathComponent("\(videoID).jpg")
+
+        if FileManager.default.fileExists(atPath: thumbURL.path) { return }
+
+        let asset = AVURLAsset(url: videoURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 480, height: 270)
+
+        var actualTime: CMTime = .zero
+        guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: &actualTime) else {
+            print("[LockScreenWallpaper] ⚠️ 缩略图生成失败: \(videoURL.lastPathComponent)")
+            return
+        }
+
+        guard let dest = CGImageDestinationCreateWithURL(thumbURL as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        if CGImageDestinationFinalize(dest) {
+            print("[LockScreenWallpaper] ✅ 缩略图已生成: \(thumbURL.lastPathComponent)")
+        }
+    }
+
+    // MARK: - Socket IPC 集成
+
+    /// 将当前显示器实例目录同步到 Socket IPC 服务端。
+    func syncInstanceCatalogToSocketServer() {
+        guard #available(macOS 26.0, *) else { return }
+        let instances = loadDisplayInstances()
+        let instanceInfos = instances.map { instance in
+            IPCVideoInfo(
+                id: instance.id,
+                name: instance.name,
+                videoPath: "",
+                thumbnailPath: instance.thumbnailPath ?? ""
+            )
+        }
+        WallpaperExtensionSocketServer.shared.updateVideos(instanceInfos)
+        print("[LockScreenWallpaper] 📋 已同步 \(instanceInfos.count) 个显示器实例到 Socket 服务端")
     }
 
     // MARK: - Types

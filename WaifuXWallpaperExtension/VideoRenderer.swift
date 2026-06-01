@@ -1,5 +1,12 @@
-//  Feeds video sample buffers to AVSampleBufferDisplayLayer
-//  AVPlayerLayer doesn't work in remote CAContexts, so we render manually.
+//  AVSampleBufferDisplayLayer 视频渲染器
+//
+//  AVPlayerLayer 在远程 CAContext 中无法工作（DisplaySize 保持 0x0），
+//  因此我们手动渲染帧 — 与 Apple 的 VideoPlayer 做法一致。
+//
+//  循环播放是无缝的：在每个循环边界，新样本的 DTS 和 PTS 都会偏移以继续时间线。
+//  这避免了刷新渲染器（会丢弃缓冲帧并导致可见卡顿）。
+//
+//  严格参照 Phosphene (MIT) 的实现。
 
 @preconcurrency import AVFoundation
 import CoreMedia
@@ -11,41 +18,47 @@ final class VideoRenderer: @unchecked Sendable {
     private let stillFrameLayer: CALayer
     private var asset: AVURLAsset
     private var videoTrack: AVAssetTrack
-    private var cachedMinFrameDuration: CMTime?
     private let queue = DispatchQueue(label: "video-renderer", qos: .userInitiated)
     private var isRunning = true
     private(set) var isPaused = false
     private var currentPolicy: PlaybackPolicy = .full
+    private var rampTimer: (any DispatchSourceTimer)?
+    private var deepPauseTimer: (any DispatchSourceTimer)?
 
     private var currentReader: AVAssetReader?
     private var currentOutput: AVAssetReaderTrackOutput?
     private var nextReader: AVAssetReader?
     private var nextOutput: AVAssetReaderTrackOutput?
 
+    // 无缝循环状态
     private var ptsOffset: CMTime = .zero
     private var lastEnqueuedEnd: CMTime = .zero
-    private var emptyReadCount = 0
 
-    private var rampTimer: (any DispatchSourceTimer)?
-    private var deepPauseTimer: (any DispatchSourceTimer)?
-    private var retryTimer: (any DispatchSourceTimer)?
-    private var isRequestingMediaData = false
+    /// 在每个循环边界调用，选择下一轮迭代的视频 URL。
+    /// 用于自适应播放（根据策略切换 FPS 变体）。
+    var variantSelector: (() -> URL)?
 
     static func create(rootLayer: CALayer, videoURL: URL) async throws -> VideoRenderer {
         let asset = AVURLAsset(url: videoURL)
         let tracks = try await asset.loadTracks(withMediaType: .video)
         guard let track = tracks.first else {
-            throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: "No video track"])
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "No video track found in \(videoURL.lastPathComponent)",
+            ])
         }
-        let minFrameDuration = try? await track.load(.minFrameDuration)
+
         let displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspectFill
         displayLayer.frame = rootLayer.bounds
         displayLayer.contentsScale = rootLayer.contentsScale
         rootLayer.addSublayer(displayLayer)
-        let renderer = VideoRenderer(rootLayer: rootLayer, displayLayer: displayLayer, asset: asset, videoTrack: track)
-        renderer.cachedMinFrameDuration = minFrameDuration
-        return renderer
+
+        return VideoRenderer(
+            rootLayer: rootLayer,
+            displayLayer: displayLayer,
+            asset: asset,
+            videoTrack: track
+        )
     }
 
     private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack) {
@@ -71,33 +84,38 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Playback Control
 
     func start() {
-        guard isRunning else { return }
-        queue.async { [weak self] in
-            guard let self, self.isRunning else { return }
-            self.recreatePlayback()
-            guard self.currentReader != nil else { return }
-            CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
-            self.startMediaRequests()
+        guard let reader = try? AVAssetReader(asset: asset) else { return }
+        let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+        output.alwaysCopiesSampleData = false
+        reader.add(output)
+        reader.startReading()
+
+        // 在第一次入队前重置 timebase，使帧不会被视为迟到
+        CMTimebaseSetTime(timebase, time: .zero)
+
+        if let firstSample = output.copyNextSampleBuffer() {
+            renderer.enqueue(firstSample)
         }
+
+        currentReader = reader
+        currentOutput = output
+        ptsOffset = .zero
+        lastEnqueuedEnd = .zero
+
+        // 开始推进 timebase — 播放开始
+        CMTimebaseSetRate(timebase, rate: 1.0)
+
+        prepareNextReader()
+        feedFromCurrentReader()
     }
 
     func stop() {
-        isRunning = false
-        isPaused = false
-        currentPolicy = .full
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.renderer.stopRequestingMediaData()
-            self.currentReader?.cancelReading()
-            self.nextReader?.cancelReading()
-            self.cancelRamp()
-            self.cancelDeepPauseTimer()
-            self.cancelRetryTimer()
-            self.isRequestingMediaData = false
-            // 重置循环时间戳偏移，避免下次 start() 时累积错误
-            self.ptsOffset = .zero
-            self.lastEnqueuedEnd = .zero
-            self.emptyReadCount = 0
+        cancelDeepPauseTimer()
+        queue.sync {
+            isRunning = false
+            renderer.stopRequestingMediaData()
+            currentReader?.cancelReading()
+            nextReader?.cancelReading()
         }
     }
 
@@ -114,32 +132,41 @@ final class VideoRenderer: @unchecked Sendable {
         cancelDeepPauseTimer()
         stillFrameLayer.opacity = 0
         if currentReader == nil {
+            // 从深度暂停中唤醒 — reader 已被释放，重建前先恢复
             queue.async { [weak self] in
-                guard let self, self.isRunning else { return }
-                self.recreatePlayback()
-                CMTimebaseSetRate(self.timebase, rate: 1.0)
-                self.startMediaRequests()
+                guard let self, isRunning else { return }
+                recreatePlayback()
+                CMTimebaseSetRate(timebase, rate: 1.0)
             }
         } else {
             CMTimebaseSetRate(timebase, rate: 1.0)
         }
     }
 
+    /// 热切换视频文件。保留当前 CAContext/layer，只替换视频源。
     func replaceVideo(with videoURL: URL) {
         let newAsset = AVURLAsset(url: videoURL)
         Task.detached(priority: .userInitiated) { [weak self] in
             guard let self else { return }
-            do {
-                let tracks = try await newAsset.loadTracks(withMediaType: .video)
-                guard let track = tracks.first else {
-                    extLog("[VideoRenderer] ❌ 新视频没有视频轨道: \(videoURL.lastPathComponent)")
-                    return
-                }
-                let minFrameDuration = try? await track.load(.minFrameDuration)
-                // 将 track 和 duration 存入属性，避免在回调中捕获非 Sendable 类型
-                self.replaceAsset(newAsset, track: track, minFrameDuration: minFrameDuration)
-            } catch {
-                extLog("[VideoRenderer] ❌ 新视频加载失败: \(videoURL.lastPathComponent), \(error.localizedDescription)")
+            guard let track = try? await newAsset.loadTracks(withMediaType: .video).first else {
+                extLog("[Renderer] ❌ 新视频无轨道: \(videoURL.lastPathComponent)")
+                return
+            }
+            queue.async { [weak self] in
+                guard let self, isRunning else { return }
+                // 停止当前管线，切换到新视频
+                renderer.stopRequestingMediaData()
+                renderer.flush()
+                currentReader?.cancelReading()
+                nextReader?.cancelReading()
+                asset = newAsset
+                videoTrack = track
+                ptsOffset = .zero
+                lastEnqueuedEnd = .zero
+                CMTimebaseSetTime(timebase, time: .zero)
+                recreatePlayback()
+                CMTimebaseSetRate(timebase, rate: isPaused ? 0.0 : 1.0)
+                extLog("[Renderer] ✅ 热切换视频: \(newAsset.url.lastPathComponent)")
             }
         }
     }
@@ -151,63 +178,111 @@ final class VideoRenderer: @unchecked Sendable {
         let oldPolicy = currentPolicy
         currentPolicy = policy
         cancelRamp()
+
         switch policy {
         case .paused:
-            if animated { rampDown() } else { pause() }
+            if animated {
+                rampDown()
+            } else {
+                pause()
+            }
         case .full, .reduced, .minimal:
-            if animated, oldPolicy == .paused { rampUp() } else { resume() }
-        }
-    }
-
-    // MARK: - Ramp
-
-    private static let rampDuration: TimeInterval = 2.0
-    private static let rampStepInterval: TimeInterval = 1.0 / 60.0
-
-    private static func easeInOut(_ t: Double) -> Double {
-        t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3) / 2.0
-    }
-
-    private func rampUp() {
-        guard !isPaused else { resume(); return }
-        let totalSteps = Int(Self.rampDuration / Self.rampStepInterval)
-        var step = 0
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + Self.rampStepInterval, repeating: Self.rampStepInterval)
-        timer.setEventHandler { [weak self] in
-            guard let self, self.isRunning else { timer.cancel(); return }
-            step += 1
-            let progress = Double(step) / Double(totalSteps)
-            let eased = Self.easeInOut(progress)
-            CMTimebaseSetRate(self.timebase, rate: Float64(eased))
-            if step >= totalSteps {
-                timer.cancel()
-                self.rampTimer = nil
+            if animated, oldPolicy == .paused {
+                rampUp()
+            } else {
+                resume()
             }
         }
-        self.rampTimer = timer
-        timer.resume()
     }
 
+    // MARK: - Ramp（类 Apple 锁屏过渡动画）
+
+    private static let rampDuration: TimeInterval = 2.0
+    private static let rampStepInterval: TimeInterval = 1.0 / 120.0
+
+    /// 缓入缓出三次方：平滑加速然后减速。
+    private static func easeInOut(_ t: Double) -> Double {
+        t < 0.5
+            ? 4.0 * t * t * t
+            : 1.0 - pow(-2.0 * t + 2.0, 3) / 2.0
+    }
+
+    /// 逐步降低 timebase 速率到零，然后冻结。
+    /// 使用平滑缓入曲线使减速看起来自然。
     private func rampDown() {
         guard !isPaused else { return }
         let totalSteps = Int(Self.rampDuration / Self.rampStepInterval)
         var step = 0
+
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + Self.rampStepInterval, repeating: Self.rampStepInterval)
         timer.setEventHandler { [weak self] in
-            guard let self, self.isRunning else { timer.cancel(); return }
+            guard let self, self.isRunning else {
+                timer.cancel()
+                return
+            }
             step += 1
             let progress = Double(step) / Double(totalSteps)
-            let eased = 1.0 - Self.easeInOut(progress)
-            CMTimebaseSetRate(self.timebase, rate: max(0, Float64(eased)))
+            // 缓入：慢开始，快结束 → rate 开始时下降缓慢
+            let eased = Self.easeInOut(progress)
+            let rate = max(1.0 - eased, 0.0)
+            CMTimebaseSetRate(self.timebase, rate: rate)
+
             if step >= totalSteps {
                 timer.cancel()
                 self.rampTimer = nil
-                self.pause()
+                self.isPaused = true
+                self.generateStillFrame()
+                self.scheduleDeepPause()
             }
         }
-        self.rampTimer = timer
+        rampTimer = timer
+        timer.resume()
+    }
+
+    /// 逐步将 timebase 速率从零提升到 1.0。
+    /// 使用平滑缓出曲线使加速看起来自然。
+    private func rampUp() {
+        guard isPaused else { return }
+        isPaused = false
+        cancelDeepPauseTimer()
+        stillFrameLayer.opacity = 0
+
+        if currentReader == nil {
+            // 深度暂停：没有帧可用于 ramp。立即唤醒而不是对空管道运行 2 秒 ramp。
+            queue.async { [weak self] in
+                guard let self, isRunning else { return }
+                recreatePlayback()
+                CMTimebaseSetRate(timebase, rate: 1.0)
+            }
+            return
+        }
+
+        let totalSteps = Int(Self.rampDuration / Self.rampStepInterval)
+        var step = 0
+
+        // 立即启动，避免速率为 0 时出现死帧
+        CMTimebaseSetRate(timebase, rate: 0.01)
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.rampStepInterval, repeating: Self.rampStepInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self, self.isRunning else {
+                timer.cancel()
+                return
+            }
+            step += 1
+            let progress = Double(step) / Double(totalSteps)
+            let eased = Self.easeInOut(progress)
+            let rate = min(eased, 1.0)
+            CMTimebaseSetRate(self.timebase, rate: rate)
+
+            if step >= totalSteps {
+                timer.cancel()
+                self.rampTimer = nil
+            }
+        }
+        rampTimer = timer
         timer.resume()
     }
 
@@ -216,19 +291,22 @@ final class VideoRenderer: @unchecked Sendable {
         rampTimer = nil
     }
 
-    // MARK: - Deep Pause
+    // MARK: - Deep Pause（深度暂停）
+    //
+    // 持续暂停后（锁屏过夜、亮度为零等），asset reader 仍然持有解码缓冲区和底层
+    // 视频解码器。拆除它们可以释放内存并让系统完全空闲。
+    // 恢复时通过 `recreatePlayback()` 从头重建管线。
+
+    private static let deepPauseDelay: TimeInterval = 30
 
     private func scheduleDeepPause() {
+        cancelDeepPauseTimer()
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 30)
+        timer.schedule(deadline: .now() + Self.deepPauseDelay)
         timer.setEventHandler { [weak self] in
-            guard let self, self.isPaused else { return }
-            self.currentReader?.cancelReading()
-            self.nextReader?.cancelReading()
-            self.currentReader = nil
-            self.nextReader = nil
+            self?.enterDeepPause()
         }
-        self.deepPauseTimer = timer
+        deepPauseTimer = timer
         timer.resume()
     }
 
@@ -237,220 +315,236 @@ final class VideoRenderer: @unchecked Sendable {
         deepPauseTimer = nil
     }
 
-    // MARK: - Feed Loop
-
-    private func startMediaRequests() {
-        guard isRunning, !isRequestingMediaData else { return }
-        isRequestingMediaData = true
-        renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
-            self?.feedReadySamples()
-        }
-    }
-
-    private func stopMediaRequestsForRetry(after interval: TimeInterval) {
-        guard isRunning else { return }
-        // 不要立即把 isRequestingMediaData 置 false：
-        // requestMediaDataWhenReady 的回调在 isReadyForMoreMediaData 为 true 时会
-        // 立即再次触发；如果此时 isRequestingMediaData 已为 false，startMediaRequests
-        // 就能重新注册回调，形成无间隔的 CPU 紧循环。让 scheduleRetry 在定时器触发
-        // 时才重置标志，确保重试间隔真正生效。
+    /// 在渲染队列上运行，当深度暂停计时器触发时调用。
+    private func enterDeepPause() {
+        deepPauseTimer = nil
+        guard isRunning, isPaused, currentReader != nil else { return }
         renderer.stopRequestingMediaData()
-        scheduleRetry(after: interval)
-    }
-
-    private func scheduleRetry(after interval: TimeInterval) {
-        cancelRetryTimer()
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + interval)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.retryTimer = nil
-            self.isRequestingMediaData = false
-            self.startMediaRequests()
-        }
-        retryTimer = timer
-        timer.resume()
-    }
-
-    private func cancelRetryTimer() {
-        retryTimer?.cancel()
-        retryTimer = nil
-    }
-
-    private func feedReadySamples() {
-        guard isRunning else { return }
-
-        while isRunning, let output = currentOutput, renderer.isReadyForMoreMediaData {
-            if let sample = output.copyNextSampleBuffer() {
-                emptyReadCount = 0
-                let adjusted = adjustedSampleBuffer(sample)
-                renderer.enqueue(adjusted)
-                let pts = CMSampleBufferGetPresentationTimeStamp(adjusted)
-                let dur = effectiveDuration(for: adjusted)
-                let end = dur.isValid && dur.isNumeric ? CMTimeAdd(pts, dur) : pts
-                if CMTimeCompare(end, lastEnqueuedEnd) > 0 {
-                    lastEnqueuedEnd = end
-                }
-            } else {
-                let readerStatus = currentReader?.status ?? .unknown
-                if readerStatus == .completed {
-                    advanceToNextLoop()
-                    // Continue loop — next iteration picks up new currentOutput
-                    continue
-                } else if readerStatus == .reading {
-                    // AVAssetReader can briefly report "reading" while no sample is
-                    // currently available. Treating that as EOF recreates readers in a
-                    // tight loop and can peg the extension process.
-                    emptyReadCount += 1
-                    if emptyReadCount >= 3, hasEnqueuedFramesInCurrentLoop {
-                        advanceToNextLoop()
-                        continue
-                    }
-                    stopMediaRequestsForRetry(after: 1.0 / 30.0)
-                    return
-                } else {
-                    // Reader failed or was cancelled — attempt recovery
-                    // 某些视频格式（HEVC/H.265、含 B 帧、变帧率等）可能导致
-                    // AVAssetReader 中途 .failed，需要重建 reader 重新循环
-                    currentReader?.cancelReading()
-                    currentReader = nil
-                    currentOutput = nil
-                    recreatePlayback()
-                    if currentOutput != nil {
-                        continue
-                    }
-                    break
-                }
-            }
-        }
-
-        if isRunning, currentOutput == nil {
-            stopMediaRequestsForRetry(after: 1.0)
-        }
-    }
-
-    private func replaceAsset(_ newAsset: AVURLAsset, track: AVAssetTrack, minFrameDuration: CMTime? = nil) {
-        queue.async { [weak self] in
-            guard let self, self.isRunning else { return }
-            self.renderer.stopRequestingMediaData()
-            self.renderer.flush(removingDisplayedImage: true) {}
-            self.cancelRetryTimer()
-            self.currentReader?.cancelReading()
-            self.nextReader?.cancelReading()
-            self.currentReader = nil
-            self.currentOutput = nil
-            self.nextReader = nil
-            self.nextOutput = nil
-            self.asset = newAsset
-            self.videoTrack = track
-            if let minFrameDuration { self.cachedMinFrameDuration = minFrameDuration }
-            self.ptsOffset = .zero
-            self.lastEnqueuedEnd = .zero
-            self.emptyReadCount = 0
-            self.isRequestingMediaData = false
-            CMTimebaseSetTime(self.timebase, time: .zero)
-            CMTimebaseSetRate(self.timebase, rate: self.isPaused ? 0.0 : 1.0)
-            self.recreatePlayback()
-            if self.currentReader != nil {
-                self.startMediaRequests()
-                extLog("[VideoRenderer] ✅ 已切换视频: \(newAsset.url.lastPathComponent)")
-            }
-        }
-    }
-
-    private var hasEnqueuedFramesInCurrentLoop: Bool {
-        lastEnqueuedEnd.isValid && CMTimeCompare(lastEnqueuedEnd, ptsOffset) > 0
-    }
-
-    private func advanceToNextLoop() {
-        emptyReadCount = 0
-        // Loop boundary: gapless loop — no flush, no timebase reset.
-        // Advance ptsOffset so the next loop's sample PTS continues
-        // from where the previous loop ended.
-        if hasEnqueuedFramesInCurrentLoop {
-            ptsOffset = lastEnqueuedEnd
-        }
-        lastEnqueuedEnd = .zero
-
-        currentReader = nextReader
-        currentOutput = nextOutput
-        nextReader = nil
-        nextOutput = nil
-        if currentOutput == nil {
-            recreatePlayback()
-        }
-    }
-
-    private func recreatePlayback() {
         currentReader?.cancelReading()
         nextReader?.cancelReading()
+        currentReader = nil
+        currentOutput = nil
+        nextReader = nil
+        nextOutput = nil
+        extLog("  [Renderer] 深度暂停 — 已释放 asset reader")
+    }
+
+    /// 在渲染队列上从头重建播放管线。由深度暂停唤醒和错误恢复路径使用。
+    /// 从零重启时间线 — 调用者负责恢复 timebase 速率。
+    private func recreatePlayback() {
+        renderer.stopRequestingMediaData()
+        renderer.flush()
+        ptsOffset = .zero
+        lastEnqueuedEnd = .zero
+        CMTimebaseSetTime(timebase, time: .zero)
+
+        currentReader?.cancelReading()
+        nextReader?.cancelReading()
+        nextReader = nil
+        nextOutput = nil
 
         guard let reader = try? AVAssetReader(asset: asset) else {
-            extLog("[VideoRenderer] ❌ AVAssetReader 创建失败: \(asset.url.lastPathComponent)")
+            extLog("  [Renderer] 重建时创建 reader 失败")
+            currentReader = nil
+            currentOutput = nil
             return
         }
-        let track = self.videoTrack
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
         output.alwaysCopiesSampleData = false
         reader.add(output)
         reader.startReading()
-
-        // 验证 reader 是否成功开始读取
-        guard reader.status == .reading else {
-            extLog("[VideoRenderer] ❌ AVAssetReader.startReading 失败, status=\(reader.status.rawValue): \(asset.url.lastPathComponent)")
-            reader.cancelReading()
-            return
-        }
-
         currentReader = reader
         currentOutput = output
 
-        // ptsOffset 由循环边界维护，不能在重建 reader 时重置或再累加；
-        // 否则第二轮开始的 sample 时间戳会倒退/重叠，renderer 会停止出帧。
-        if !ptsOffset.isValid {
-            ptsOffset = .zero
-        }
-        lastEnqueuedEnd = .zero
-        emptyReadCount = 0
+        prepareNextReader()
+        feedFromCurrentReader()
     }
 
-    private func adjustedSampleBuffer(_ sample: CMSampleBuffer) -> CMSampleBuffer {
+    // MARK: - Preloaded Loop Reader（预加载循环读取器）
+
+    private func prepareNextReader() {
+        queue.async { [weak self] in
+            guard let self, isRunning else { return }
+
+            let nextURL = variantSelector?()
+            if let nextURL, nextURL != asset.url {
+                let newAsset = AVURLAsset(url: nextURL)
+                Task.detached { @Sendable [weak self] in
+                    guard let self else { return }
+                    guard let track = try? await newAsset.loadTracks(withMediaType: .video).first else {
+                        extLog("  [Renderer] 变体无视频轨道: \(nextURL.lastPathComponent)")
+                        return
+                    }
+                    nonisolated(unsafe) let loadedTrack = track
+                    queue.async { [weak self] in
+                        guard let self, isRunning else { return }
+                        installNextReader(asset: newAsset, track: loadedTrack)
+                    }
+                }
+            } else {
+                installNextReader(asset: asset, track: videoTrack)
+            }
+        }
+    }
+
+    /// 在渲染队列上构建 asset reader 并存储为预加载的 next reader。
+    /// 必须在 `queue` 上运行。
+    private func installNextReader(asset: AVURLAsset, track: AVAssetTrack) {
+        guard let reader = try? AVAssetReader(asset: asset) else {
+            extLog("  [Renderer] 无法创建 next reader")
+            return
+        }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        output.alwaysCopiesSampleData = false
+        reader.add(output)
+        nextReader = reader
+        nextOutput = output
+    }
+
+    /// 在循环边界处交换到预加载的 next reader。
+    /// 使用时间偏移实现无缝继续 — 无需 flush，无需重置 timebase。
+    private func swapToNextReader() {
+        renderer.stopRequestingMediaData()
+
+        // 推进偏移，使下一轮的 DTS/PTS 继续时间线
+        ptsOffset = lastEnqueuedEnd
+
+        if let nr = nextReader, let no = nextOutput {
+            if let nrAsset = nr.asset as? AVURLAsset, nrAsset.url != asset.url {
+                asset = nrAsset
+                videoTrack = no.track
+                extLog("  [Renderer] 已切换变体: \(nrAsset.url.lastPathComponent)")
+            }
+            currentReader = nr
+            currentOutput = no
+            nextReader = nil
+            nextOutput = nil
+        } else {
+            extLog("  [Renderer] Next reader 未就绪，同步创建")
+            guard let reader = try? AVAssetReader(asset: asset) else {
+                extLog("  [Renderer] 无法创建回退 reader")
+                return
+            }
+            let output = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+            output.alwaysCopiesSampleData = false
+            reader.add(output)
+            currentReader = reader
+            currentOutput = output
+        }
+
+        currentReader?.startReading()
+
+        prepareNextReader()
+        feedFromCurrentReader()
+    }
+
+    // MARK: - Playback Loop（播放循环）
+
+    private func feedFromCurrentReader() {
+        renderer.requestMediaDataWhenReady(on: queue) { [weak self] in
+            guard let self, isRunning else {
+                self?.renderer.stopRequestingMediaData()
+                return
+            }
+
+            // 不可恢复的失败 — 完全重置
+            // 异步调度：requestMediaDataWhenReady 不可重入
+            if renderer.status == .failed {
+                extLog("  [Renderer] 状态失败: \(renderer.error?.localizedDescription ?? "unknown")，恢复中")
+                renderer.stopRequestingMediaData()
+                queue.async { [weak self] in
+                    self?.recoverFromError()
+                }
+                return
+            }
+
+            // 解码器遇到不连续或错误 — flush 并继续供应
+            if renderer.requiresFlushToResumeDecoding {
+                renderer.flush()
+            }
+
+            while renderer.isReadyForMoreMediaData {
+                if let sample = currentOutput?.copyNextSampleBuffer() {
+                    let adjusted = offsetTimingForLoop(sample)
+
+                    // 跟踪最高结束时间（max 处理 B 帧重排序）
+                    // 某些容器会发出带有无效 PTS 的填充样本 — 跳过它们以防止
+                    // NaN 污染时间线偏移
+                    let pts = CMSampleBufferGetPresentationTimeStamp(adjusted)
+                    let dur = CMSampleBufferGetDuration(adjusted)
+                    if pts.isValid {
+                        let sampleEnd = dur.isValid && dur > .zero
+                            ? CMTimeAdd(pts, dur)
+                            : CMTimeAdd(pts, CMTime(value: 1, timescale: 60))
+                        if sampleEnd > lastEnqueuedEnd {
+                            lastEnqueuedEnd = sampleEnd
+                        }
+                    }
+
+                    renderer.enqueue(adjusted)
+                } else {
+                    // 异步调度：requestMediaDataWhenReady 不可重入
+                    renderer.stopRequestingMediaData()
+                    queue.async { [weak self] in
+                        self?.swapToNextReader()
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    /// 偏移样本的 DTS 和 PTS 以实现无缝循环。
+    /// 第一轮返回原始样本（无需复制）。
+    /// 后续轮创建轻量级副本并调整时间（共享底层数据缓冲区 — 仅时间元数据不同）。
+    private func offsetTimingForLoop(_ sample: CMSampleBuffer) -> CMSampleBuffer {
+        guard ptsOffset > .zero else { return sample }
+
         let pts = CMSampleBufferGetPresentationTimeStamp(sample)
         let dts = CMSampleBufferGetDecodeTimeStamp(sample)
-        let dur = effectiveDuration(for: sample)
+        let dur = CMSampleBufferGetDuration(sample)
+
         var timingInfo = CMSampleTimingInfo(
             duration: dur,
             presentationTimeStamp: pts.isValid ? CMTimeAdd(pts, ptsOffset) : pts,
             decodeTimeStamp: dts.isValid ? CMTimeAdd(dts, ptsOffset) : .invalid
         )
+
         var adjusted: CMSampleBuffer?
-        CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sample, sampleTimingEntryCount: 1, sampleTimingArray: &timingInfo, sampleBufferOut: &adjusted)
+        CMSampleBufferCreateCopyWithNewTiming(
+            allocator: nil,
+            sampleBuffer: sample,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timingInfo,
+            sampleBufferOut: &adjusted
+        )
+
         return adjusted ?? sample
     }
 
-    private func effectiveDuration(for sample: CMSampleBuffer) -> CMTime {
-        let duration = CMSampleBufferGetDuration(sample)
-        if duration.isValid && duration.isNumeric && CMTimeCompare(duration, .zero) > 0 {
-            return duration
-        }
-        if let frameDuration = cachedMinFrameDuration,
-           frameDuration.isValid, frameDuration.isNumeric, CMTimeCompare(frameDuration, .zero) > 0 {
-            return frameDuration
-        }
-        return CMTime(value: 1, timescale: 30)
+    /// 在解码器错误后从头重置并重新开始播放。
+    private func recoverFromError() {
+        recreatePlayback()
+        CMTimebaseSetRate(timebase, rate: isPaused ? 0.0 : 1.0)
     }
 
-    // MARK: - Still Frame
+    // MARK: - Still Frame（静帧）
 
     private func generateStillFrame() {
         let captureTime = CMTimebaseGetTime(timebase)
         let currentAsset = asset
+
         Task.detached(priority: .userInitiated) { [weak self] in
             let generator = AVAssetImageGenerator(asset: currentAsset)
             generator.requestedTimeToleranceBefore = .zero
             generator.requestedTimeToleranceAfter = .zero
             generator.appliesPreferredTrackTransform = true
-            guard let (cgImage, _) = try? await generator.image(at: captureTime) else { return }
+
+            guard let (cgImage, _) = try? await generator.image(at: captureTime) else {
+                extLog("  [Renderer] 静帧生成失败")
+                return
+            }
+
             DispatchQueue.main.async {
                 guard let self, self.isPaused else { return }
                 self.stillFrameLayer.contents = cgImage

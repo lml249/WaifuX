@@ -281,9 +281,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         window?.delegate = self
 
-        // ⚠️ 关键：立即显示窗口，不要等待
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        // 开机启动时不显示主窗口，仅后台运行（状态栏 + 动态壁纸自动应用）
+        let isLoginLaunch = UserDefaults.standard.bool(forKey: "launch_at_login")
+        if isLoginLaunch {
+            // 窗口已创建但保持隐藏，用户可通过 Dock 图标或状态栏菜单显示
+            // 动态壁纸恢复在 restoreAllDataAsync 中完成
+            // 设置激活策略为 .accessory（无 Dock 图标和菜单栏）
+            NSApp.setActivationPolicy(.accessory)
+        } else {
+            // ⚠️ 关键：立即显示窗口，不要等待
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         // ⚠️ 关键：让出主线程，让 SwiftUI 完成首次布局渲染
         // 所有数据恢复在下一个 run loop 异步执行
@@ -340,6 +349,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             PlaybackProgressCache.shared.restoreSavedData()
                             DownloadTaskService.shared.restoreSavedTasks()
                             WallpaperSchedulerService.shared.restoreSavedConfig()
+
+                            // 启动锁屏扩展 Socket IPC 服务端（仅 macOS 26+）
+                            if #available(macOS 26.0, *) {
+                                WallpaperExtensionSocketServer.shared.start()
+                                LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
+                            }
 
                             // 恢复动态壁纸（如果用户之前设置了）
                             VideoWallpaperManager.shared.restoreIfNeeded()
@@ -497,6 +512,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard !Task.isCancelled else { return }
             guard let window = self.window, !window.isVisible else { return }
             self.releaseForegroundResourcesForHiddenWindow(window)
+
+            // 窗口隐藏后确保锁屏帧推送不受影响
+            if #available(macOS 26.0, *) {
+                // 给系统一点时间稳定后做健康检查
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                WallpaperExtensionSocketServer.shared.performHealthCheck()
+            }
+
             self.delayedReleaseTask = nil
         }
     }
@@ -608,6 +631,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // 只清理动态壁纸窗口，不回退到旧静态壁纸
         VideoWallpaperManager.shared.prepareForAppTermination()
+
+        // 停掉锁屏推帧管线，避免 dispatch queue 上的无限循环阻止进程退出
+        if #available(macOS 26.0, *) {
+            WallpaperExtensionSocketServer.shared.clearDisplayVideos()
+            WallpaperExtensionSocketServer.shared.stop()
+        }
+
         WallpaperEngineXBridge.shared.prepareForAppTermination()
     }
 

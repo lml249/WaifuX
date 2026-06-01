@@ -261,9 +261,9 @@ final class WallpaperEngineXBridge: ObservableObject {
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         }
 
-        // macOS 26+：清除旧锁屏视频（wallpaper-wgpu 渲染的壁纸不支持动态锁屏）
+        // macOS 26+：清空旧的锁屏镜像帧源缓存（wallpaper-wgpu 渲染的壁纸不参与锁屏镜像推帧）
         if #available(macOS 26.0, *) {
-            LockScreenWallpaperService.shared.clearLockScreenVideo()
+            LockScreenWallpaperService.shared.clearMirroringSourceCache()
         }
 
         // 2. 终止旧进程

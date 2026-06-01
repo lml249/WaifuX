@@ -4,16 +4,16 @@ import Kingfisher
 // MARK: - 控制栏定时器管理器
 final class ControlsTimerManager: ObservableObject {
     var timer: Timer?
-    
+
     deinit {
         timer?.invalidate()
     }
-    
+
     func invalidate() {
         timer?.invalidate()
         timer = nil
     }
-    
+
     func schedule(interval: TimeInterval, action: @escaping @MainActor () -> Void) {
         invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { _ in
@@ -44,7 +44,7 @@ struct FullScreenWallpaperView: View {
     @State private var currentWallpaperIndex: Int = 0
     @State private var isLoadingMore = false
     @State private var preloadTask: Task<Void, Never>?
-    
+
     // 用于强制刷新图片加载的状态
     @State private var imageLoadId = UUID()
 
@@ -64,12 +64,12 @@ struct FullScreenWallpaperView: View {
 
     // 计算属性：当前壁纸
     var wallpaper: Wallpaper { currentWallpaper }
-    
+
     // MARK: - 本地文件检测
     private var isLocalFile: Bool {
         wallpaper.id.hasPrefix("local_")
     }
-    
+
     /// 是否已下载（包括网络下载和本地文件）
     private var isAlreadyDownloaded: Bool {
         isLocalFile || viewModel.isDownloaded(wallpaper)
@@ -381,7 +381,7 @@ struct FullScreenWallpaperView: View {
 
     private func cleanup() {
         controlsTimerManager.invalidate()
-        
+
         // 取消预加载任务
         preloadTask?.cancel()
         ForegroundPrefetchManager.shared.stop(namespace: prefetchNamespace)
@@ -444,7 +444,7 @@ struct FullScreenWallpaperView: View {
 
         // 设置数据源
         nextItemDataSource.setItems(viewModel.wallpapers, currentIndex: currentWallpaperIndex)
-        
+
         // 初始预加载检查
         triggerPreloadIfNeeded()
     }
@@ -453,7 +453,7 @@ struct FullScreenWallpaperView: View {
     private func triggerPreloadIfNeeded() {
         let threshold = 3 // 倒数第3张时开始预加载
         let remainingItems = viewModel.wallpapers.count - (currentWallpaperIndex + 1)
-        
+
         // 如果剩余项目少于阈值，且有更多页面，则触发预加载
         if remainingItems < threshold && viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
             preloadTask?.cancel()
@@ -471,7 +471,7 @@ struct FullScreenWallpaperView: View {
     private func navigateToNextWallpaper() {
         guard !isNavigating else { return }
         let nextIndex = currentWallpaperIndex + 1
-        
+
         // 情况1：下一张已经在当前列表中
         if nextIndex < viewModel.wallpapers.count {
             prepareSlideTransition(direction: .down)
@@ -480,16 +480,16 @@ struct FullScreenWallpaperView: View {
             triggerPreloadIfNeeded()
             return
         }
-        
+
         // 情况2：到达列表末尾，但有更多页面可加载
         if viewModel.hasMorePages && !viewModel.isLoading && !isLoadingMore {
             Task {
                 isLoadingMore = true
                 defer { isLoadingMore = false }
-                
+
                 print("[FullScreenWallpaperView] 加载更多壁纸...")
                 await viewModel.loadMore()
-                
+
                 // 加载完成后，尝试导航到下一张
                 if nextIndex < viewModel.wallpapers.count {
                     await MainActor.run {
@@ -500,7 +500,7 @@ struct FullScreenWallpaperView: View {
             }
             return
         }
-        
+
         // 情况3：没有更多数据了，循环到第一张
         if !viewModel.wallpapers.isEmpty && nextIndex >= viewModel.wallpapers.count {
             prepareSlideTransition(direction: .down)
@@ -511,14 +511,14 @@ struct FullScreenWallpaperView: View {
     private func navigateToPreviousWallpaper() {
         guard !isNavigating else { return }
         let prevIndex = currentWallpaperIndex - 1
-        
+
         // 情况1：上一张在列表中
         if prevIndex >= 0 {
             prepareSlideTransition(direction: .up)
             navigateToIndex(prevIndex)
             return
         }
-        
+
         // 情况2：已经是第一张，循环到最后一张
         if !viewModel.wallpapers.isEmpty {
             prepareSlideTransition(direction: .up)
@@ -528,7 +528,7 @@ struct FullScreenWallpaperView: View {
 
     private func navigateToIndex(_ index: Int) {
         guard index >= 0, index < viewModel.wallpapers.count else { return }
-        
+
         currentWallpaperIndex = index
         nextItemDataSource.moveToIndex(index)
         reloadWallpaper(viewModel.wallpapers[index])
@@ -540,7 +540,7 @@ struct FullScreenWallpaperView: View {
         loadError = nil
         imageScale = 1.0
         imageLoadId = UUID()  // 强制刷新图片视图
-        
+
         withAnimation(.easeInOut(duration: 0.3)) {
             // 更新当前壁纸
             currentWallpaper = newWallpaper
@@ -604,7 +604,7 @@ struct FullScreenWallpaperView: View {
         if isLocalFile {
             return
         }
-        
+
         Task {
             do {
                 try await viewModel.downloadWallpaper(wallpaper)
