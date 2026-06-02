@@ -250,8 +250,11 @@ struct MyLibraryContentView: View {
             SteamLoginSheet(isPresented: $showSteamLoginSheet)
                 .environmentObject(workshopSourceManager)
                 .onDisappear {
-                    // 登录成功后自动开始同步
+                    // 登录成功后立即弹出选择 Sheet（显示加载中），再开始获取数据
                     if workshopSourceManager.hasSteamProfileID {
+                        syncIsLoadingList = true
+                        syncSelectedIDs = []
+                        showSyncSelectionSheet = true
                         Task { await fetchSubscriptionList() }
                     }
                 }
@@ -2059,13 +2062,11 @@ struct MyLibraryContentView: View {
 
     /// 获取用户订阅列表（已过滤已下载），展示选择 Sheet
     private func fetchSubscriptionList() async {
-        syncIsLoadingList = true
-        syncSelectedIDs = []
-
         defer { syncIsLoadingList = false }
 
         let steamID = workshopSourceManager.steamProfileID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !steamID.isEmpty else {
+            showSyncSelectionSheet = false
             showSyncProfileSheet = true
             return
         }
@@ -2075,9 +2076,11 @@ struct MyLibraryContentView: View {
             syncSubscribedItems = allItems
             // 默认全选
             syncSelectedIDs = Set(allItems.map(\.id))
-            showSyncSelectionSheet = true
+            // showSyncSelectionSheet 已在 onDisappear 中设为 true，无需重复设置
         } catch {
             syncErrorMessage = error.localizedDescription
+            // 关闭加载中的选择 Sheet，然后显示错误弹窗
+            showSyncSelectionSheet = false
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 alert.messageText = "获取订阅列表失败"

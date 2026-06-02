@@ -371,6 +371,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                 LockScreenWallpaperService.shared.syncInstanceCatalogToSocketServer()
                             }
 
+                            // 恢复刘海隐藏设置（纯 UI 覆盖层，不依赖壁纸）
+                            let notchHidden = UserDefaults.standard.bool(forKey: "hide_notch")
+                            if notchHidden {
+                                NotchOverlayManager.shared.setEnabled(true)
+                            }
+
                             // 恢复动态壁纸（如果用户之前设置了）
                             VideoWallpaperManager.shared.restoreIfNeeded()
                             if !VideoWallpaperManager.shared.isVideoWallpaperActive {

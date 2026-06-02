@@ -31,6 +31,13 @@ class SettingsViewModel: ObservableObject {
             VideoWallpaperManager.shared.refreshGrainOverlay()
         }
     }
+    /// 隐藏刘海（菜单栏纯黑覆盖）
+    @Published var hideNotch = false {
+        didSet {
+            UserDefaults.standard.set(hideNotch, forKey: "hide_notch")
+            NotchOverlayManager.shared.setEnabled(hideNotch)
+        }
+    }
     @Published var pauseWhenOtherAppForeground = false { didSet { UserDefaults.standard.set(pauseWhenOtherAppForeground, forKey: "pause_when_other_app_foreground") } }
     @Published var pauseWhenFullscreenCovers = false { didSet { UserDefaults.standard.set(pauseWhenFullscreenCovers, forKey: "pause_when_fullscreen_covers") } }
     @Published var pauseOnBatteryPower = false { didSet { UserDefaults.standard.set(pauseOnBatteryPower, forKey: "pause_on_battery_power") } }
@@ -130,6 +137,7 @@ class SettingsViewModel: ObservableObject {
         grainTextureQuality = defaults.string(forKey: "grain_texture_quality") ?? "high"
         let savedGrainIntensity = defaults.double(forKey: "arc_grain_intensity")
         grainIntensity = savedGrainIntensity > 0 ? savedGrainIntensity : 0.5
+        hideNotch = defaults.bool(forKey: "hide_notch")
         pauseWhenOtherAppForeground = defaults.bool(forKey: "pause_when_other_app_foreground")
         pauseWhenFullscreenCovers = defaults.bool(forKey: "pause_when_fullscreen_covers")
         pauseOnBatteryPower = defaults.bool(forKey: "pause_on_battery_power")

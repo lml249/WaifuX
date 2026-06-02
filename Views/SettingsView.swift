@@ -449,6 +449,14 @@ private struct GeneralSettingsTab: View {
                 }
 
                 MacSettingsRow(
+                    title: t("hideNotch"),
+                    subtitle: t("hideNotchDesc"),
+                    showDivider: true
+                ) {
+                    MacToggle(isOn: $viewModel.hideNotch)
+                }
+
+                MacSettingsRow(
                     title: t("saveToDownloadsFolder"),
                     subtitle: nil,
                     showDivider: false

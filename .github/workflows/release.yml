@@ -96,8 +96,10 @@ jobs:
             OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
             clean build 2>&1 | tail -30
 
-          BUILT_APPEX=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" 2>/dev/null | head -1)
-          if [[ -n "$BUILT_APPEX" && -f "$BUILT_APPEX" ]]; then
+          BUILT_APPEX=$(find build ~/Library/Developer/Xcode/DerivedData \
+            \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
+            -type d -print 2>/dev/null | head -1)
+          if [[ -n "$BUILT_APPEX" && -d "$BUILT_APPEX" ]]; then
             cp -R "$BUILT_APPEX" ./WaifuXWallpaperExtension.appex
             echo "✅ 扩展签名成功"
             echo "=== 验证 entitlements ==="
@@ -184,8 +186,10 @@ jobs:
                   OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
                   clean build 2>&1 | tail -20
                 local built_appex
-                built_appex=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" 2>/dev/null | head -1)
-                if [[ -n "$built_appex" && -f "$built_appex" ]]; then
+                built_appex=$(find build ~/Library/Developer/Xcode/DerivedData \
+                  \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
+                  -type d -print 2>/dev/null | head -1)
+                if [[ -n "$built_appex" && -d "$built_appex" ]]; then
                   cp -R "$built_appex" "$f"
                   echo "  ✅ $(basename "$f") (xcodebuild signed)"
                 else
