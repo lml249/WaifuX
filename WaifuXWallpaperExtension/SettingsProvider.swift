@@ -1,7 +1,7 @@
 //  Settings provider for WallpaperAgent.
 //
 //  为每个显示器创建固定的锁屏实例设置项。
-//  用户在系统设置里手动为每块显示器选择一次实例，之后实例只接收对应显示器的推帧。
+//  用户在系统设置里手动为每块显示器选择一次实例，之后实例本地解码对应桌面视频。
 
 import AppKit
 import Foundation

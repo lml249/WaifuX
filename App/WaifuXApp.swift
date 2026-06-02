@@ -4,6 +4,7 @@ import AppIntents
 import Kingfisher
 import ExceptionHandling
 import WebKit
+import Darwin
 
 final class EdgeToEdgeHostingView<Content: View>: NSHostingView<Content> {
     private let edgeToEdgeLayoutGuide = NSLayoutGuide()
@@ -61,6 +62,11 @@ struct WaifuXApp {
     #endif
 
     static func main() {
+        // 全局忽略 SIGPIPE：AVFoundation 内部管道在快速切换视频壁纸时可能写入已关闭的 pipe，
+        // 若不加此保护会导致信号 13 (SIGPIPE) 传递到 NSEventThread 崩溃。
+        // 所有自定义 socket 已通过 SO_NOSIGPIPE 独立防护，全局忽略是安全的。
+        signal(SIGPIPE, SIG_IGN)
+
         // 配置 Kingfisher（高性能图片加载）
         configureKingfisher()
 
@@ -80,9 +86,9 @@ struct WaifuXApp {
 
     /// 配置 Kingfisher 高性能图片加载
     private static func configureKingfisher() {
-        // 内存缓存配置 - 降低到 50MB/80张，减少内存占用
-        ImageCache.default.memoryStorage.config.totalCostLimit = 50 * 1024 * 1024 // 50MB
-        ImageCache.default.memoryStorage.config.countLimit = 80
+        // 内存缓存配置 - 增大到 200MB/300张，避免滚动时缓存驱逐导致的重复解码
+        ImageCache.default.memoryStorage.config.totalCostLimit = 200 * 1024 * 1024 // 200MB
+        ImageCache.default.memoryStorage.config.countLimit = 300
 
         // 磁盘缓存配置
         ImageCache.default.diskStorage.config.sizeLimit = 500 * 1024 * 1024 // 500MB
@@ -97,8 +103,11 @@ struct WaifuXApp {
         configuration.timeoutIntervalForResource = 180
         downloader.sessionConfiguration = configuration
         downloader.downloadTimeout = 60.0
+        // ⚠️ 不设置全局 .backgroundDecode：
+        // macOS 上某些图片（16bpc、非 RGB 色彩空间等）在后台解码时 CGContext 创建会失败，
+        // 触发 "[Kingfisher] Image context cannot be created." 崩溃。
+        // macOS 14+ Core Graphics 已能高效处理离屏渲染，无需全局后台解码。
         KingfisherManager.shared.defaultOptions = [
-            .backgroundDecode,
             .retryStrategy(DelayRetryStrategy(maxRetryCount: 2, retryInterval: .accumulated(1.0))),
             .requestModifier(AnyModifier { request in
                 var request = request
@@ -316,6 +325,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 第1帧：基础设置
         DispatchQueue.main.async { [weak self] in
+            if #available(macOS 26.0, *) {
+                // ⚠️ 延迟到窗口显示后执行，避免启动卡死；在主线程执行避免后台线程调用
+                // Bundle/FileManager/NSWorkspace 等非线程安全 API 触发崩溃
+                self?.repairWallpaperExtensionRegistration()
+            }
+
             LocalizationService.shared.restoreSavedSettings()
             ThemeManager.shared.restoreSavedSettings()
 
@@ -513,13 +528,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let window = self.window, !window.isVisible else { return }
             self.releaseForegroundResourcesForHiddenWindow(window)
 
-            // 窗口隐藏后确保锁屏帧推送不受影响
-            if #available(macOS 26.0, *) {
-                // 给系统一点时间稳定后做健康检查
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                WallpaperExtensionSocketServer.shared.performHealthCheck()
-            }
-
             self.delayedReleaseTask = nil
         }
     }
@@ -632,8 +640,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 只清理动态壁纸窗口，不回退到旧静态壁纸
         VideoWallpaperManager.shared.prepareForAppTermination()
 
-        // 停掉锁屏推帧管线，避免 dispatch queue 上的无限循环阻止进程退出
+        // 通知系统托管的锁屏扩展释放自解码上下文，避免旧扩展进程常驻。
         if #available(macOS 26.0, *) {
+            WallpaperExtensionSocketServer.shared.notifyAppWillTerminate()
             WallpaperExtensionSocketServer.shared.clearDisplayVideos()
             WallpaperExtensionSocketServer.shared.stop()
         }
@@ -700,6 +709,225 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(windowMenuItem)
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @available(macOS 26.0, *)
+    private func repairWallpaperExtensionRegistration() {
+        // 第 1 步：在主线程捕获 Bundle 信息（macOS 26 后台访问 Bundle 会崩溃）
+        let appURL = Bundle.main.bundleURL
+        let extensionURL = appURL
+            .appendingPathComponent("Contents/PlugIns/WaifuXWallpaperExtension.appex", isDirectory: true)
+        let fm = FileManager.default
+
+        guard fm.fileExists(atPath: extensionURL.path) else {
+            print("[WaifuXApp] Wallpaper extension not found in current bundle: \(extensionURL.path)")
+            return
+        }
+
+        // 第 2 步：在主线程构建 stale 候选列表（FileManager 操作）
+        let currentAppURL = appURL.standardizedFileURL
+        let staleCandidates = computeStaleWallpaperExtensionCandidates(currentExtensionURL: extensionURL, currentAppURL: currentAppURL)
+
+        // 第 3 步：Process 系统调用派发到后台，不阻塞主线程
+        DispatchQueue.global(qos: .utility).async { [appURL, extensionURL, staleCandidates, currentAppURL] in
+            self.registerBundleWithLaunchServices(appURL)
+            self.registerBundleWithPlugInKit(extensionURL)
+
+            for candidate in staleCandidates {
+                self.runRegistrationTool("/usr/bin/pluginkit", arguments: ["-r", candidate.path], label: "pluginkit remove")
+                self.unregisterBundleWithLaunchServices(candidate)
+                if let hostAppURL = self.hostAppURL(forWallpaperExtensionURL: candidate) {
+                    self.unregisterBundleWithLaunchServices(hostAppURL)
+                }
+                print("[WaifuXApp] Removed stale wallpaper extension registration: \(candidate.path)")
+            }
+
+            self.terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: currentAppURL)
+
+            // NSWorkspace 必须在主线程
+            DispatchQueue.main.async {
+                self.terminateStaleWallpaperExtensionProcesses(currentAppURL: currentAppURL)
+            }
+        }
+    }
+
+    /// 在主线程计算需要清理的过期扩展列表（FileManager 枚举 + Bundle 路径比对）
+    private func computeStaleWallpaperExtensionCandidates(currentExtensionURL: URL, currentAppURL: URL) -> [URL] {
+        let candidates = wallpaperExtensionRegistrationCandidates(currentAppURL: currentAppURL)
+        return candidates.filter { candidate in
+            guard candidate.standardizedFileURL.path != currentExtensionURL.standardizedFileURL.path else {
+                return false
+            }
+            guard FileManager.default.fileExists(atPath: candidate.path) else {
+                return true
+            }
+            return isStaleWaifuXBuildPath(candidate)
+        }
+    }
+
+    private func registerBundleWithLaunchServices(_ url: URL) {
+        let tool = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return }
+        runRegistrationTool(tool, arguments: ["-f", url.path], label: "lsregister")
+    }
+
+    private func registerBundleWithPlugInKit(_ url: URL) {
+        runRegistrationTool("/usr/bin/pluginkit", arguments: ["-a", url.path], label: "pluginkit add")
+    }
+
+    private func wallpaperExtensionRegistrationCandidates(currentAppURL: URL) -> [URL] {
+        let searchRoots = [
+            URL(fileURLWithPath: "/private/tmp/WaifuXBuild", isDirectory: true),
+            URL(fileURLWithPath: "/private/tmp/WaifuXLockScreenBuild", isDirectory: true),
+            URL(fileURLWithPath: "/private/tmp/WaifuXDerivedData-mainthread-fix", isDirectory: true),
+            URL(fileURLWithPath: "/Volumes/mac/Developer", isDirectory: true),
+            URL(fileURLWithPath: "/Volumes/mac/CodeLibrary/Claude/WallHaven/build", isDirectory: true),
+            URL(fileURLWithPath: "/Applications", isDirectory: true)
+        ]
+
+        var result: [URL] = []
+        var seen = Set<String>()
+        for root in searchRoots where FileManager.default.fileExists(atPath: root.path) {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for case let url as URL in enumerator {
+                guard url.lastPathComponent == "WaifuXWallpaperExtension.appex" else { continue }
+                let standardized = url.standardizedFileURL
+                let path = standardized.path
+                guard seen.insert(path).inserted else { continue }
+                guard wallpaperExtensionBundleID(at: standardized) == "com.waifux.app.wallpaperextension" else {
+                    continue
+                }
+                if !path.hasPrefix(currentAppURL.path + "/") {
+                    result.append(standardized)
+                }
+            }
+        }
+        return result
+    }
+
+    private func unregisterBundleWithLaunchServices(_ url: URL) {
+        let tool = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return }
+        runRegistrationTool(tool, arguments: ["-u", url.path], label: "lsregister unregister")
+    }
+
+    private func hostAppURL(forWallpaperExtensionURL url: URL) -> URL? {
+        let plugInsURL = url.deletingLastPathComponent()
+        guard plugInsURL.lastPathComponent == "PlugIns" else { return nil }
+        let contentsURL = plugInsURL.deletingLastPathComponent()
+        guard contentsURL.lastPathComponent == "Contents" else { return nil }
+        let appURL = contentsURL.deletingLastPathComponent()
+        guard appURL.pathExtension == "app" else { return nil }
+        return appURL
+    }
+
+    private func wallpaperExtensionBundleID(at url: URL) -> String? {
+        // ⚠️ 只能在后台线程调用，不能使用 Bundle(url:)（非线程安全）
+        let infoURL = url.appendingPathComponent("Contents/Info.plist")
+        return (NSDictionary(contentsOf: infoURL) as? [String: Any])?["CFBundleIdentifier"] as? String
+    }
+
+    private func isStaleWaifuXBuildPath(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix("/private/tmp/") {
+            return true
+        }
+        if path.contains("/Build/Products/Debug/") || path.contains("/Build/Products/Release/") {
+            return true
+        }
+        return false
+    }
+
+    private func terminateStaleWallpaperExtensionProcesses(currentAppURL: URL) {
+        let currentPrefix = currentAppURL.standardizedFileURL.path + "/"
+        // ⚠️ NSWorkspace 只能在主线程访问
+        let runningApps = if Thread.isMainThread {
+            NSWorkspace.shared.runningApplications
+        } else {
+            DispatchQueue.main.sync { NSWorkspace.shared.runningApplications }
+        }
+        let staleApps = runningApps.compactMap { app -> (app: NSRunningApplication, path: String)? in
+            guard app.bundleIdentifier == "com.waifux.app.wallpaperextension",
+                  let executableURL = app.executableURL?.standardizedFileURL,
+                  !executableURL.path.hasPrefix(currentPrefix) else {
+                return nil
+            }
+            return (app, executableURL.path)
+        }
+        for stale in staleApps {
+            if stale.app.terminate() {
+                print("[WaifuXApp] Terminated stale wallpaper extension process: \(stale.path)")
+            } else {
+                print("[WaifuXApp] Failed to terminate stale wallpaper extension process: \(stale.path)")
+            }
+        }
+    }
+
+    private func terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: URL) {
+        let currentPrefix = currentAppURL.standardizedFileURL.path + "/"
+        let output = processOutput(
+            launchPath: "/bin/ps",
+            arguments: ["-axo", "pid=,command="]
+        )
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let firstSpace = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else { continue }
+
+            let pidText = trimmed[..<firstSpace].trimmingCharacters(in: .whitespaces)
+            let command = trimmed[firstSpace...].trimmingCharacters(in: .whitespaces)
+            guard let pid = Int32(pidText),
+                  command.contains("WaifuXWallpaperExtension.appex/Contents/MacOS/WaifuXWallpaperExtension"),
+                  !command.hasPrefix(currentPrefix) else {
+                continue
+            }
+
+            if kill(pid, SIGTERM) == 0 {
+                print("[WaifuXApp] Terminated stale wallpaper extension pid=\(pid): \(command)")
+            } else {
+                print("[WaifuXApp] Failed to terminate stale wallpaper extension pid=\(pid): errno=\(errno)")
+            }
+        }
+    }
+
+    private func runRegistrationTool(_ launchPath: String, arguments: [String], label: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                print("[WaifuXApp] \(label) exited with status \(process.terminationStatus): \(arguments.joined(separator: " "))")
+            }
+        } catch {
+            print("[WaifuXApp] \(label) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func processOutput(launchPath: String, arguments: [String]) -> String {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            print("[WaifuXApp] \(launchPath) failed: \(error.localizedDescription)")
+            return ""
+        }
     }
 
     private func updateActivationPolicy(showDockIcon: Bool) {

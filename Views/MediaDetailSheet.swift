@@ -975,22 +975,25 @@ struct MediaDetailSheet: View {
                 }
             }
             if !clearCachedArtifact, SceneOfflineBakeService.hasCachedArtifact(record: record, renderer: renderer) {
-                let artifact = record.sceneBakeArtifact!
-                let videoURL = URL(fileURLWithPath: artifact.videoPath)
-                _ = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
-                    forLocalVideo: videoURL,
-                    itemID: record.item.id
-                )
-                await MainActor.run {
-                    isBakingScene = false
-                    bakeProgress = 0
-                    if shouldAutoApplyAfterBake {
-                        applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
-                    } else {
-                        sceneBakeStatusFlash = t("sceneBake.cached")
+                if let artifact = record.sceneBakeArtifact {
+                    let videoURL = URL(fileURLWithPath: artifact.videoPath)
+                    _ = await VideoThumbnailCache.shared.sceneBakePosterJPEGFileURL(
+                        forLocalVideo: videoURL,
+                        itemID: record.item.id
+                    )
+                    await MainActor.run {
+                        isBakingScene = false
+                        bakeProgress = 0
+                        if shouldAutoApplyAfterBake {
+                            applyWorkshopVideoWallpaper(videoURL: videoURL, preferPosterFrameFromVideo: true)
+                        } else {
+                            sceneBakeStatusFlash = t("sceneBake.cached")
+                        }
                     }
+                    return
                 }
-                return
+                // 缓存记录不一致：hasCachedArtifact 返回 true 但 sceneBakeArtifact 为 nil，回退到重新烘焙
+                print("[MediaDetailSheet] WARN: hasCachedArtifact true but sceneBakeArtifact nil, falling back to re-bake")
             }
             do {
                 let artifact = try await SceneOfflineBakeService.bake(record: record, renderer: renderer) { progress in
@@ -1518,12 +1521,13 @@ struct MediaDetailSheet: View {
         return ""
     }
 
+    @MainActor
     private func loadDetailIfNeeded() async {
         let detail = await viewModel.ensureDetail(for: initialItem)
         let merged = mediaItemByMergingAuthorMetadata(detail, fallback: initialItem)
-        resolvedItem = itemWithLocalWorkshopVideo(merged)
+        let item = itemWithLocalWorkshopVideo(merged)
+        resolvedItem = item
         viewModel.recordViewed(resolvedItem)
-        // 来源数据已加载并排序完成
         withAnimation(.easeInOut(duration: 0.3)) {
             isSourcesReady = true
         }
@@ -1680,12 +1684,12 @@ struct MediaDetailSheet: View {
         }
     }
 
+    @MainActor
     private func loadDetailIfNeededFor(_ item: MediaItem) async {
         let detail = await viewModel.ensureDetail(for: item)
         let updated = itemWithLocalWorkshopVideo(mediaItemByMergingAuthorMetadata(detail, fallback: item))
         resolvedItem = updated
         viewModel.recordViewed(resolvedItem)
-        // 来源数据已加载并排序完成
         withAnimation(.easeInOut(duration: 0.3)) {
             isSourcesReady = true
         }
@@ -2879,16 +2883,55 @@ struct MediaDetailSheet: View {
             return
         }
 
+        let screens = NSScreen.screens
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+            let applyToDynamicLockScreen: (NSScreen?) -> Void = { selectedScreen in
+                applyingWallpaperStatusKey = "applyingWallpaper.static"
+                isSettingWallpaper = true
+                Task { @MainActor in
+                    defer { isSettingWallpaper = false }
+                    WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+                    VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly(for: selectedScreen)
+                    let targetScreens = selectedScreen.map { [$0] } ?? screens
+                    let displayIDs = targetScreens.compactMap { screen -> UInt32? in
+                        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+                    }
+                    do {
+                        try await LockScreenWallpaperService.shared.cacheStaticImageSource(imageURL: imageURL, displayIDs: displayIDs)
+                        WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
+                        print("[MediaDetailSheet] 🔒 动态锁屏已启用，已将 Workshop 静态图同步到 WaifuX 实例")
+                    } catch {
+                        errorMessage = Self.truncateErrorMessage(error.localizedDescription)
+                        showError = true
+                    }
+                }
+            }
+
+            if screens.count > 1 {
+                DisplaySelectorManager.shared.showSelector(
+                    title: t("setWallpaper"),
+                    message: t("multiDisplayDetected")
+                ) { selectedScreen in
+                    applyToDynamicLockScreen(selectedScreen)
+                }
+            } else {
+                applyToDynamicLockScreen(screens.first)
+            }
+            return
+        }
+
         // 停止视频层和 CLI，避免冲突
         VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
 
-        // macOS 26+：清空锁屏镜像帧源缓存
+        // macOS 26+：仅当用户未启用动态锁屏时才清空帧源缓存。
+        // 使用持久化设置 isLockScreenEnabled 而非 isLockScreenMirroringActive。
         if #available(macOS 26.0, *) {
-            LockScreenWallpaperService.shared.clearMirroringSourceCache()
+            if !VideoWallpaperManager.shared.isLockScreenEnabled {
+                LockScreenWallpaperService.shared.clearMirroringSourceCache()
+            }
         }
 
-        let screens = NSScreen.screens
         if screens.count > 1 {
             DisplaySelectorManager.shared.showSelector(
                 title: t("setWallpaper"),

@@ -107,9 +107,8 @@ struct MediaCardView: View {
         Group {
             if let animatedDisplayURL {
                 KFAnimatedImage.url(animatedDisplayURL)
-                    .memoryCacheExpiration(.expired)
+                    .memoryCacheExpiration(.seconds(60))
                     .diskCacheExpiration(.days(3))
-                    .cancelOnDisappear(true)
                     .fade(duration: 0.25)
                     .configure { view in
                         configureAnimatedGIFViewForAspectFill(view, autoPlay: true)
@@ -123,7 +122,7 @@ struct MediaCardView: View {
                     .setProcessor(DownsamplingImageProcessor(size: targetSize))
                     .backgroundDecode()
                     .cacheMemoryOnly(false)
-                    .cancelOnDisappear(true)
+                    .memoryCacheExpiration(.seconds(300))
                     .fade(duration: 0.25)
                     .placeholder { _ in Color.black.opacity(0.4) }
                     .resizable()

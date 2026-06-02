@@ -63,7 +63,7 @@ struct AnimeCardView: View {
             .setProcessor(DownsamplingImageProcessor(size: CGSize(width: targetWidth, height: targetHeight)))
             .backgroundDecode()
             .cacheMemoryOnly(false)
-            .cancelOnDisappear(true)
+            .memoryCacheExpiration(.seconds(300))
             .placeholder { Color.black.opacity(0.4) }
             .fade(duration: 0.25)
             .resizable()

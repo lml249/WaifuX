@@ -44,6 +44,7 @@ final class LockScreenWallpaperService {
     private let appGroupID = "group.com.waifux.app"
     private let prefsFileName = "waifux-wallpaper-prefs.json"
     private let videoDirName = "WallpaperVideos"
+    private let imageDirName = "WallpaperImages"
     private let displayInstancesFileName = "waifux-display-instances.json"
 
     private var sharedContainerURL: URL? {
@@ -62,7 +63,7 @@ final class LockScreenWallpaperService {
     /// - Parameters:
     ///   - videoURL: 本地视频文件路径（MP4/MOV）
     ///   - videoID: 壁纸唯一标识（用于区分不同壁纸）
-    func cacheMirroringSource(videoURL: URL, videoID: String) async throws {
+    func cacheMirroringSource(videoURL: URL, videoID: String, notify: Bool = true) async throws {
         guard isAvailable else {
             print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
             return
@@ -114,16 +115,118 @@ final class LockScreenWallpaperService {
 
         currentMirroringSourcePath = destURL.path
 
-        // 先更新显示器实例目录
-        syncInstanceCatalogToSocketServer()
+        // 先生成缩略图，再同步实例目录，确保封面路径在新目录中立即生效
+        generateThumbnail(for: destURL, videoID: videoID)
+        // 更新显示器实例目录（此时缩略图已就绪，posterThumbnailPath 能查到最新文件）
+        syncInstanceCatalogToSocketServer(notify: notify)
+        WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: videoID, videoURL: destURL)
 
         // 再通知 Extension 刷新（此时 SocketServer 已有最新数据）
-        notifyExtensionPrefsChanged()
-
-        // 生成缩略图
-        generateThumbnail(for: destURL, videoID: videoID)
+        if notify {
+            notifyExtensionPrefsChanged()
+        }
 
         print("[LockScreenWallpaper] ✅ 已更新锁屏镜像帧源缓存: \(destURL.lastPathComponent)")
+    }
+
+    /// 将静态图片写入共享容器，并绑定到每个显示器实例。
+    /// 静态壁纸不再退回系统锁屏选择写入；扩展直接渲染这里部署的图片。
+    func cacheStaticImageSource(imageURL: URL, displayIDs: [UInt32]) async throws {
+        guard isAvailable else {
+            print("[LockScreenWallpaper] 功能不可用（需 macOS 26+）")
+            return
+        }
+
+        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+            print("[LockScreenWallpaper] 动态锁屏已关闭，跳过静态图同步")
+            return
+        }
+
+        guard let container = sharedContainerURL else {
+            throw LockScreenError.appGroupNotAvailable
+        }
+
+        let imageData: Data
+        if imageURL.isFileURL {
+            guard FileManager.default.fileExists(atPath: imageURL.path) else {
+                throw LockScreenError.fileNotFound
+            }
+            imageData = try Data(contentsOf: imageURL)
+        } else {
+            let (data, _) = try await URLSession.shared.data(from: imageURL)
+            imageData = data
+        }
+
+        let imageDir = container.appendingPathComponent(imageDirName, isDirectory: true)
+        try FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
+
+        let ext = normalizedImageExtension(from: imageURL)
+        var lastPath: String?
+        for displayID in displayIDs {
+            let sourceID = Self.displayInstanceID(displayID)
+            let destURL = imageDir.appendingPathComponent("\(sourceID).\(ext)")
+            cleanupCachedImages(sourceID: sourceID, in: imageDir)
+            try imageData.write(to: destURL, options: .atomic)
+            writeThumbnail(imageData: imageData, thumbnailID: sourceID)
+            WallpaperExtensionSocketServer.shared.registerLocalDecodeVideo(videoID: sourceID, videoURL: destURL)
+            WallpaperExtensionSocketServer.shared.enqueueCommand(
+                IPCCommand(action: "switch_image", videoID: sourceID, displayID: displayID)
+            )
+            lastPath = destURL.path
+            print("[LockScreenWallpaper] 🖼️ 已部署静态图 display=\(displayID) source=\(destURL.lastPathComponent)")
+        }
+
+        if let lastPath {
+            let prefs = PrefsFile(
+                userPaused: false,
+                alwaysPauseDesktop: false,
+                currentVideoPath: nil,
+                currentImagePath: lastPath
+            )
+            let prefsURL = container.appendingPathComponent(prefsFileName)
+            let data = try JSONEncoder().encode(prefs)
+            try data.write(to: prefsURL, options: .atomic)
+            currentMirroringSourcePath = lastPath
+        }
+
+        syncInstanceCatalogToSocketServer()
+        notifyExtensionPrefsChanged()
+    }
+
+    /// 让已激活的锁屏实例切换到当前桌面视频。扩展侧本地解码该视频，不再等待 App 逐帧推送。
+    /// 让已激活的锁屏实例切换到当前桌面视频。扩展侧本地解码该视频，不再等待 App 逐帧推送。
+    /// - Parameter generation: 视频同步世代号，用于丢弃过期 Task 的命令。
+    func switchActiveInstancesToLocalDecode(videoURL: URL, videoID: String, displayIDs: [UInt32], generation: UInt64 = 0) async {
+        // 快速检查：如果世代已过期，跳过整个流程
+        guard generation == 0 || WallpaperExtensionSocketServer.isCurrentGeneration(generation) else {
+            print("[LockScreenWallpaper] ⏭️ switchActiveInstancesToLocalDecode 跳过过期世代 (gen=\(generation)) display=\(displayIDs)")
+            return
+        }
+
+        do {
+            try await cacheMirroringSource(videoURL: videoURL, videoID: videoID, notify: false)
+        } catch {
+            print("[LockScreenWallpaper] ❌ 本地解码视频缓存失败: \(error.localizedDescription)")
+            return
+        }
+
+        copyVideoThumbnailToDisplayThumbnails(videoID: videoID, displayIDs: displayIDs)
+        syncInstanceCatalogToSocketServer(notify: false)
+
+        // 再次检查世代（file I/O 期间可能又有新切换）
+        guard generation == 0 || WallpaperExtensionSocketServer.isCurrentGeneration(generation) else {
+            print("[LockScreenWallpaper] ⏭️ switchActiveInstancesToLocalDecode 跳过过期命令 (gen=\(generation)) display=\(displayIDs) video=\(videoID)")
+            return
+        }
+
+        for displayID in displayIDs {
+            WallpaperExtensionSocketServer.shared.enqueueCommand(
+                IPCCommand(action: "switch_video", videoID: videoID, displayID: displayID),
+                generation: generation
+            )
+        }
+        notifyExtensionPrefsChanged()
+        print("[LockScreenWallpaper] 🔁 已请求扩展自解码切换 display=\(displayIDs) video=\(videoID) gen=\(generation)")
     }
 
     /// 清空当前锁屏镜像帧源缓存。
@@ -136,9 +239,11 @@ final class LockScreenWallpaperService {
         // 清空视频目录
         let videoDir = container.appendingPathComponent(videoDirName, isDirectory: true)
         try? FileManager.default.removeItem(at: videoDir)
+        let imageDir = container.appendingPathComponent(imageDirName, isDirectory: true)
+        try? FileManager.default.removeItem(at: imageDir)
 
         // 更新偏好设置
-        let prefs = PrefsFile(userPaused: false, alwaysPauseDesktop: false, currentVideoPath: nil)
+        let prefs = PrefsFile(userPaused: false, alwaysPauseDesktop: false, currentVideoPath: nil, currentImagePath: nil)
         let prefsURL = container.appendingPathComponent(prefsFileName)
         if let data = try? JSONEncoder().encode(prefs) {
             try? data.write(to: prefsURL, options: .atomic)
@@ -314,18 +419,26 @@ final class LockScreenWallpaperService {
     func clearLockScreenInstances() {
         guard isAvailable else { return }
 
-        // 1. 清空视频缓存和偏好
+        // 1. 清空视频缓存和偏好（包含 clearDisplayVideos、notifyExtensionPrefsChanged）
         clearMirroringSourceCache()
 
-        // 2. 删除显示器实例列表
+        // 2. 清空 Socket 服务端所有注册状态
+        WallpaperExtensionSocketServer.shared.clearLocalDecodeVideos()
+        WallpaperExtensionSocketServer.shared.clearSurfaces()
+        WallpaperExtensionSocketServer.shared.updateVideos([])
+
+        // 3. 删除显示器实例列表文件
         if let url = displayInstancesURL {
             try? FileManager.default.removeItem(at: url)
         }
 
-        // 3. 清空 Socket 服务端可用实例
-        WallpaperExtensionSocketServer.shared.updateVideos([])
+        // 4. 重置 VideoWallpaperManager 的扩展活跃状态
+        VideoWallpaperManager.shared.clearExtensionState()
 
-        // 4. 通知扩展刷新
+        // 5. 自动关闭设置中的动态锁屏开关
+        UserDefaults.standard.set(false, forKey: "dynamic_lock_screen_enabled")
+
+        // 6. 再次通知扩展刷新（此时所有状态已清理完毕）
         notifyExtensionPrefsChanged()
 
         print("[LockScreenWallpaper] ✅ 已彻底清理锁屏实例")
@@ -341,16 +454,29 @@ final class LockScreenWallpaperService {
 
     private func posterThumbnailPath(for screen: NSScreen) -> String? {
         let thumbDir = sharedContainerURL?.appendingPathComponent("WallpaperCache/thumbnails")
-        let candidates = [
-            "display-\(screen.wallpaperScreenIdentifier).jpg",
-            "\(screen.wallpaperScreenIdentifier).jpg"
+        guard let thumbDir else { return nil }
+
+        // 1. 按显示器实例查找。文件名带版本，避免系统设置按相同 path 缓存旧预览。
+        let screenPrefixes = [
+            "display-\(screen.wallpaperScreenIdentifier)",
+            "\(screen.wallpaperScreenIdentifier)"
         ]
-        for name in candidates {
-            if let url = thumbDir?.appendingPathComponent(name),
-               FileManager.default.fileExists(atPath: url.path) {
-                return url.path
+        for prefix in screenPrefixes {
+            if let path = latestThumbnailPath(in: thumbDir, prefix: prefix) {
+                return path
             }
         }
+
+        // 2. 按当前桌面视频的 videoID 查找（generateThumbnail 使用 videoID 命名）
+        if let videoURL = VideoWallpaperManager.shared.videoURL(for: screen),
+           videoURL.isFileURL {
+            let videoID = videoURL.deletingPathExtension().lastPathComponent
+            let videoThumbURL = thumbDir.appendingPathComponent("\(videoID).jpg")
+            if FileManager.default.fileExists(atPath: videoThumbURL.path) {
+                return videoThumbURL.path
+            }
+        }
+
         return nil
     }
 
@@ -383,12 +509,121 @@ final class LockScreenWallpaperService {
         }
     }
 
+    private static func displayInstanceID(_ displayID: UInt32) -> String {
+        "display-\(displayID)"
+    }
+
+    private func normalizedImageExtension(from url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        if ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"].contains(ext) {
+            return ext == "jpeg" ? "jpg" : ext
+        }
+        return "jpg"
+    }
+
+    private func cleanupCachedImages(sourceID: String, in imageDir: URL) {
+        for ext in ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"] {
+            try? FileManager.default.removeItem(at: imageDir.appendingPathComponent("\(sourceID).\(ext)"))
+        }
+    }
+
+    private func thumbnailDirectory() -> URL? {
+        guard let container = sharedContainerURL else { return nil }
+        let thumbDir = container.appendingPathComponent("WallpaperCache/thumbnails")
+        try? FileManager.default.createDirectory(at: thumbDir, withIntermediateDirectories: true)
+        return thumbDir
+    }
+
+    private func writeThumbnail(imageData: Data, thumbnailID: String) {
+        guard let thumbDir = thumbnailDirectory(),
+              let image = NSImage(data: imageData),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let dest = CGImageDestinationCreateWithURL(
+                versionedThumbnailURL(prefix: thumbnailID, in: thumbDir) as CFURL,
+                "public.jpeg" as CFString,
+                1,
+                nil
+              ) else {
+            print("[LockScreenWallpaper] ⚠️ 静态图缩略图生成失败: \(thumbnailID)")
+            return
+        }
+        cleanupCachedThumbnails(prefix: thumbnailID, in: thumbDir)
+        CGImageDestinationAddImage(dest, cgImage, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        if CGImageDestinationFinalize(dest) {
+            print("[LockScreenWallpaper] ✅ 静态图缩略图已写入: \(thumbnailID)")
+        }
+    }
+
+    private func copyVideoThumbnailToDisplayThumbnails(videoID: String, displayIDs: [UInt32]) {
+        guard let thumbDir = thumbnailDirectory() else { return }
+        let sourceURL = thumbDir.appendingPathComponent("\(videoID).jpg")
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else { return }
+
+        for displayID in displayIDs {
+            let prefix = Self.displayInstanceID(displayID)
+            cleanupCachedThumbnails(prefix: prefix, in: thumbDir)
+            let destURL = versionedThumbnailURL(prefix: prefix, in: thumbDir)
+            do {
+                try FileManager.default.copyItem(at: sourceURL, to: destURL)
+                print("[LockScreenWallpaper] ✅ 已刷新显示器实例缩略图: \(destURL.lastPathComponent)")
+            } catch {
+                print("[LockScreenWallpaper] ⚠️ 显示器实例缩略图复制失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func versionedThumbnailURL(prefix: String, in thumbDir: URL) -> URL {
+        let milliseconds = Int(Date().timeIntervalSince1970 * 1000)
+        let suffix = UUID().uuidString.prefix(8)
+        return thumbDir.appendingPathComponent("\(prefix)-\(milliseconds)-\(suffix).jpg")
+    }
+
+    private func cleanupCachedThumbnails(prefix: String, in thumbDir: URL) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: thumbDir, includingPropertiesForKeys: nil) else {
+            return
+        }
+        for file in files where isThumbnail(file, matching: prefix) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    private func latestThumbnailPath(in thumbDir: URL, prefix: String) -> String? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: thumbDir,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else {
+            return nil
+        }
+        let matches = files.filter { isThumbnail($0, matching: prefix) }
+        let latest = matches.max { lhs, rhs in
+            let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if lhsDate == rhsDate {
+                return lhs.lastPathComponent < rhs.lastPathComponent
+            }
+            return lhsDate < rhsDate
+        }
+        return latest?.path
+    }
+
+    private func isThumbnail(_ url: URL, matching prefix: String) -> Bool {
+        guard url.pathExtension.lowercased() == "jpg" else { return false }
+        let name = url.deletingPathExtension().lastPathComponent
+        return name == prefix || name.hasPrefix("\(prefix)-")
+    }
+
     // MARK: - Socket IPC 集成
 
     /// 将当前显示器实例目录同步到 Socket IPC 服务端。
-    func syncInstanceCatalogToSocketServer() {
+    func syncInstanceCatalogToSocketServer(notify: Bool = true) {
         guard #available(macOS 26.0, *) else { return }
-        let instances = loadDisplayInstances()
+        guard UserDefaults.standard.object(forKey: "dynamic_lock_screen_enabled") as? Bool ?? true else {
+            print("[LockScreenWallpaper] syncInstanceCatalogToSocketServer: 动态锁屏已关闭，跳过")
+            return
+        }
+        // 始终使用 currentDisplayInstances() 获取最新缩略图路径，而非从缓存文件读取
+        let instances = currentDisplayInstances()
+        persistDisplayInstances(instances)
         let instanceInfos = instances.map { instance in
             IPCVideoInfo(
                 id: instance.id,
@@ -398,6 +633,9 @@ final class LockScreenWallpaperService {
             )
         }
         WallpaperExtensionSocketServer.shared.updateVideos(instanceInfos)
+        if notify {
+            notifyExtensionPrefsChanged()
+        }
         print("[LockScreenWallpaper] 📋 已同步 \(instanceInfos.count) 个显示器实例到 Socket 服务端")
     }
 
@@ -407,6 +645,7 @@ final class LockScreenWallpaperService {
         var userPaused: Bool = false
         var alwaysPauseDesktop: Bool = false
         var currentVideoPath: String?
+        var currentImagePath: String?
         /// Per-display pause: displayID 集合
         var pausedDisplayIDs: Set<UInt32>?
         /// Per-display mute: displayID 集合

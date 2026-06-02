@@ -11,6 +11,12 @@ struct WallpaperCardView: View {
 
     @Environment(\.arcIsLightMode) private var isLightMode
     @State private var isHovered = false
+    /// 缓存 coverImageURL 避免 body 重算
+    @State private var storedCoverImageURL: URL? = nil
+    /// 缓存 targetSize 避免 body 重算
+    @State private var storedTargetSize: CGSize? = nil
+    /// 跟踪 wallpaper id 以便在 wallpaper 变化时刷新缓存
+    @State private var lastWallpaperID: Wallpaper.ID? = nil
 
     private let bottomBarHeight: CGFloat = 46
     private let cornerRadius: CGFloat = 22
@@ -54,39 +60,22 @@ struct WallpaperCardView: View {
         }
     }
 
-    private var shouldPreferHighResolutionPreview: Bool {
+    /// 计算封面图 URL（静态方法，无捕获开销）
+    private static func computeCoverImageURL(wallpaper: Wallpaper) -> URL? {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let targetMaxEdge = max(cardWidth, imageHeight) * scale
-        let isExtremeAspect = effectiveAspectRatio < 0.7 || effectiveAspectRatio > 2.1
-        return isExtremeAspect || targetMaxEdge >= 900
-    }
+        let aspectRatio = min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
+        let isExtremeAspect = aspectRatio < 0.7 || aspectRatio > 2.1
+        let preferHighRes = isExtremeAspect || (scale >= 2)
 
-    private var coverImageURL: URL? {
         let candidates: [URL?]
-        if shouldPreferHighResolutionPreview {
+        if preferHighRes {
             if wallpaper.source == "4kwallpapers" {
-                // 4K 源的 large 已经是高清预览，original 可能是真正原图，列表里避免直接拉原图。
-                candidates = [
-                    wallpaper.thumbURL,
-                    wallpaper.originalThumbURL,
-                    wallpaper.fullImageURL,
-                    wallpaper.smallThumbURL
-                ]
+                candidates = [wallpaper.thumbURL, wallpaper.originalThumbURL, wallpaper.fullImageURL, wallpaper.smallThumbURL]
             } else {
-                candidates = [
-                    wallpaper.originalThumbURL,
-                    wallpaper.thumbURL,
-                    wallpaper.fullImageURL,
-                    wallpaper.smallThumbURL
-                ]
+                candidates = [wallpaper.originalThumbURL, wallpaper.thumbURL, wallpaper.fullImageURL, wallpaper.smallThumbURL]
             }
         } else {
-            candidates = [
-                wallpaper.thumbURL,
-                wallpaper.originalThumbURL,
-                wallpaper.smallThumbURL,
-                wallpaper.fullImageURL
-            ]
+            candidates = [wallpaper.thumbURL, wallpaper.originalThumbURL, wallpaper.smallThumbURL, wallpaper.fullImageURL]
         }
 
         var seen: Set<String> = []
@@ -99,8 +88,23 @@ struct WallpaperCardView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            // 背景 + 内容
+        // 缓存 coverImageURL 和 targetSize：当 wallpaper 变化时刷新
+        if lastWallpaperID != wallpaper.id {
+            lastWallpaperID = wallpaper.id
+            storedCoverImageURL = Self.computeCoverImageURL(wallpaper: wallpaper)
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            let targetWidth = cardWidth * scale
+            let targetHeight = (cardWidth / effectiveAspectRatio) * scale
+            let maxEdge: CGFloat = 1280
+            let reduction = max(targetWidth, targetHeight) > maxEdge
+                ? maxEdge / max(targetWidth, targetHeight) : 1
+            storedTargetSize = CGSize(
+                width: targetWidth * reduction,
+                height: targetHeight * reduction
+            )
+        }
+
+        return ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
                 coverImage
                     .frame(width: cardWidth, height: imageHeight)
@@ -111,15 +115,12 @@ struct WallpaperCardView: View {
             .background(Color(hex: "1A1D24").opacity(0.6))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
 
-            // 边框
             RoundedRectangle(cornerRadius: cornerRadius)
                 .stroke(borderColor, lineWidth: borderWidth)
 
-            // 左上角徽章
             topLeadingBadges
                 .padding(12)
 
-            // 右上角徽章
             topTrailingBadge
                 .padding(12)
         }
@@ -135,21 +136,16 @@ struct WallpaperCardView: View {
 
     @ViewBuilder
     private var coverImage: some View {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let targetWidth = cardWidth * scale
-        let targetHeight = imageHeight * scale
-        let maxEdge: CGFloat = 1280
-        let reduction = max(targetWidth, targetHeight) > maxEdge
-            ? maxEdge / max(targetWidth, targetHeight) : 1
-        let targetSize = CGSize(
-            width: targetWidth * reduction,
-            height: targetHeight * reduction
-        )
+        let url = storedCoverImageURL
+        let targetSize = storedTargetSize ?? CGSize(width: cardWidth * 2, height: imageHeight * 2)
+        let processor = DownsamplingImageProcessor(size: targetSize)
 
-        KFImage(coverImageURL)
-            .setProcessor(DownsamplingImageProcessor(size: targetSize))
+        KFImage(url)
+            .setProcessor(processor)
             .backgroundDecode()
-            .cancelOnDisappear(true)
+            .cacheOriginalImage()
+            .memoryCacheExpiration(.seconds(300))
+            .diskCacheExpiration(.days(7))
             .placeholder { Color.black.opacity(0.4) }
             .fade(duration: 0.25)
             .resizable()

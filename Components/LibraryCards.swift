@@ -187,7 +187,7 @@ public struct MediaVideoCard: View {
                         KFImage(listThumbnailURL)
                             .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                             .cacheMemoryOnly(false)
-                            .cancelOnDisappear(true)
+                            .memoryCacheExpiration(.seconds(300))
                             .fade(duration: 0.3)
                             .placeholder { _ in
                                 SkeletonCard(width: cardWidth, height: thumbnailHeight, cornerRadius: 0)
@@ -206,9 +206,8 @@ public struct MediaVideoCard: View {
 
                     if detectedGIF {
                         KFAnimatedImage.url(listThumbnailURL)
-                            .memoryCacheExpiration(.expired)
+                            .memoryCacheExpiration(.seconds(60))
                             .diskCacheExpiration(.days(3))
-                            .cancelOnDisappear(true)
                             .fade(duration: 0.3)
                             .configure { view in
                                 configureAnimatedGIFViewForAspectFill(

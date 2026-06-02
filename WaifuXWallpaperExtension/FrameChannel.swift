@@ -21,6 +21,9 @@ final class FrameChannel: @unchecked Sendable {
 
     private var sock: Int32 = -1
     private let queue = DispatchQueue(label: "frame-channel", qos: .userInitiated)
+    private let stateLock = NSLock()
+    private var isStarted = false
+    private var shouldRun = false
     typealias Callback = @Sendable (IOSurfaceID, CMTime, CMTime) -> Void
     private var callbacks: [UInt32: Callback] = [:]
     private let cbLock = OSAllocatedUnfairLock(initialState: [UInt32: Callback]())
@@ -42,31 +45,71 @@ final class FrameChannel: @unchecked Sendable {
 
     /// 打开持续帧通道，开始接收帧事件
     func start() {
+        stateLock.lock()
+        guard !isStarted else {
+            stateLock.unlock()
+            return
+        }
+        isStarted = true
+        shouldRun = true
+        stateLock.unlock()
+
         queue.async { [weak self] in
             guard let self else { return }
             var backoffMs = 100  // 初始 100ms
             let maxBackoffMs = 5000  // 最大 5s
-            while true {
-                let connected = connectAndReceive()
+            while self.isRunning {
+                let connected = self.connectAndReceive()
                 if connected {
                     // 连接成功后重置退避
                     backoffMs = 100
                 }
                 // 指数退避：100ms → 200ms → 400ms → ... → 5s
                 let delay = Double(min(backoffMs, maxBackoffMs)) / 1000.0
-                Thread.sleep(forTimeInterval: delay)
+                self.sleepWhileRunning(delay)
                 backoffMs = min(backoffMs * 2, maxBackoffMs)
             }
+            self.stateLock.lock()
+            self.isStarted = false
+            self.stateLock.unlock()
         }
+    }
+
+    /// 停止帧通道并打断阻塞中的 read/connect 循环。
+    func stop() {
+        stateLock.lock()
+        shouldRun = false
+        let fd = sock
+        stateLock.unlock()
+
+        cbLock.withLock { $0.removeAll() }
+        if fd >= 0 {
+            shutdown(fd, SHUT_RDWR)
+        }
+        extLog("[FrameChannel] 已停止")
     }
 
     /// 连接并持续读取帧事件；连接断开后返回，由调用者决定何时重连。
     private func connectAndReceive() -> Bool {
+        guard isRunning else { return false }
         guard let socketPath = socketPath() else { return false }
 
-        sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard sock >= 0 else { return false }
-        defer { close(sock); sock = -1 }
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        stateLock.lock()
+        guard shouldRun else {
+            stateLock.unlock()
+            close(fd)
+            return false
+        }
+        sock = fd
+        stateLock.unlock()
+        defer {
+            stateLock.lock()
+            if sock == fd { sock = -1 }
+            stateLock.unlock()
+            close(fd)
+        }
 
         // 连接
         var addr = sockaddr_un()
@@ -75,7 +118,7 @@ final class FrameChannel: @unchecked Sendable {
             Darwin.strncpy(UnsafeMutablePointer<CChar>(&addr.sun_path.0), src, MemoryLayout.size(ofValue: addr.sun_path))
         }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-        guard Darwin.connect(sock, UnsafeRawPointer(&addr).assumingMemoryBound(to: sockaddr.self), len) == 0 else {
+        guard Darwin.connect(fd, UnsafeRawPointer(&addr).assumingMemoryBound(to: sockaddr.self), len) == 0 else {
             return false
         }
         if !hasLoggedConnection {
@@ -86,16 +129,16 @@ final class FrameChannel: @unchecked Sendable {
         // 发送 subscribe 请求（包含 \0 结尾，确保服务端 String(cString:) 安全）
         let subMsg = "subscribe_frames"
         var msgLen = UInt32(subMsg.utf8.count + 1).bigEndian
-        write(sock, &msgLen, 4)
-        subMsg.withCString { write(sock, $0, subMsg.utf8.count + 1) }
+        write(fd, &msgLen, 4)
+        subMsg.withCString { write(fd, $0, subMsg.utf8.count + 1) }
 
         // 避免连接断开时收到 SIGPIPE 导致崩溃
         var noSigPipe: Int32 = 1
-        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
         // 持续读取帧事件包
         var header: UInt8 = 0
-        while read(sock, &header, 1) == 1 {
+        while isRunning && readFully(fd, into: &header, byteCount: 1) {
             guard header == 0x01 else { continue } // frame_ready
 
             var displayID: UInt32 = 0
@@ -104,11 +147,14 @@ final class FrameChannel: @unchecked Sendable {
             var ptsScale: UInt32 = 0
             var durVal: UInt32 = 0
 
-            guard read(sock, &displayID, 4) == 4,
-                  read(sock, &surfaceID, 4) == 4,
-                  read(sock, &ptsVal, 8) == 8,
-                  read(sock, &ptsScale, 4) == 4,
-                  read(sock, &durVal, 4) == 4 else { break }
+            guard readFully(fd, into: &displayID, byteCount: 4),
+                  readFully(fd, into: &surfaceID, byteCount: 4),
+                  readFully(fd, into: &ptsVal, byteCount: 8),
+                  readFully(fd, into: &ptsScale, byteCount: 4),
+                  readFully(fd, into: &durVal, byteCount: 4) else {
+                extLog("[FrameChannel] ⚠️ frame_ready 包读取不完整，准备重连")
+                break
+            }
 
             let display = UInt32(littleEndian: displayID)
             let surf = UInt32(littleEndian: surfaceID)
@@ -131,6 +177,40 @@ final class FrameChannel: @unchecked Sendable {
         }
 
         return false
+    }
+
+    private var isRunning: Bool {
+        stateLock.lock()
+        let running = shouldRun
+        stateLock.unlock()
+        return running
+    }
+
+    private func sleepWhileRunning(_ delay: TimeInterval) {
+        let step: TimeInterval = 0.1
+        var remaining = delay
+        while remaining > 0, isRunning {
+            let current = min(step, remaining)
+            Thread.sleep(forTimeInterval: current)
+            remaining -= current
+        }
+    }
+
+    private func readFully<T>(_ fd: Int32, into value: inout T, byteCount: Int) -> Bool {
+        withUnsafeMutableBytes(of: &value) { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return false }
+            var totalRead = 0
+            while totalRead < byteCount {
+                let n = read(fd, base + totalRead, byteCount - totalRead)
+                if n == 0 { return false }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                totalRead += n
+            }
+            return true
+        }
     }
 
     private func socketPath() -> String? {

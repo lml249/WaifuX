@@ -130,18 +130,12 @@ final class MediaExploreViewModel: ObservableObject {
             guard let self else { return }
             // 先递增 revision，触发 UI 立即使用 Set 索引做 O(1) 查询
             self.libraryContentRevision &+= 1
-            // 缓存重建通过 Task 延迟执行，不阻塞当前 RunLoop
-            self.rebuildLocalMediaCacheTask?.cancel()
-            self.rebuildLocalMediaCacheTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms 防抖
-                guard let self, !Task.isCancelled else { return }
-                self.rebuildLocalMediaCache()
-            }
+            self.scheduleLocalMediaCacheRebuild(delayNanoseconds: 100_000_000)
         }
         .store(in: &cancellables)
 
         // 初始重建一次缓存
-        rebuildLocalMediaCache()
+        scheduleLocalMediaCacheRebuild(delayNanoseconds: 0)
 
         // 监听网络状态变化
         networkMonitor.$status
@@ -266,59 +260,73 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     /// 重建本地媒体缓存（在 downloadRecords / favoriteRecords / scanRevision 变化时自动调用）
-    private func rebuildLocalMediaCache() {
+    private func scheduleLocalMediaCacheRebuild(delayNanoseconds: UInt64) {
+        rebuildLocalMediaCacheTask?.cancel()
+        rebuildLocalMediaCacheTask = Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled else { return }
+            await self.rebuildLocalMediaCache()
+        }
+    }
+
+    /// 主线程只取快照和发布结果；路径标准化、文件存在性检查和排序放到后台，避免上千条本地数据卡住 UI。
+    private func rebuildLocalMediaCache() async {
         let downloads = mediaLibrary.downloadedItems
         let locals = localScanner.getLocalMedia()
-
-        var result: [UnifiedLocalMedia] = []
-
-        // 添加下载记录（纯内存操作，快）
-        for record in downloads {
-            result.append(UnifiedLocalMedia(
-                id: record.item.id,
-                mediaItem: record.item,
-                localItem: nil,
-                downloadRecord: record,
-                fileURL: record.localFileURL,
-                isLocalFile: false
-            ))
-        }
-
-        // 添加扫描到的本地文件（排除已在下载记录中的，且文件必须实际存在）
-        // ⚡ 先通过 ID Set 快速排除，避免路径标准化和 fileExists 检查
         let downloadedIDs = mediaLibrary.downloadIDSetForRebuild
-        for item in locals {
-            guard !downloadedIDs.contains(item.id) else { continue }
-            // 再通过路径标准化精确排除
-            let itemPath = (item.fileURL.path as NSString).standardizingPath as String
-            let isAlreadyDownloaded = downloads.contains { record in
-                guard let recordPath = URL(string: record.localFilePath)?.path else { return false }
-                return (recordPath as NSString).standardizingPath as String == itemPath
-            }
-            guard !isAlreadyDownloaded else { continue }
-            guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
-            result.append(UnifiedLocalMedia(
-                id: item.id,
-                mediaItem: item.toMediaItem(),
-                localItem: item,
-                downloadRecord: nil,
-                fileURL: item.fileURL,
-                isLocalFile: true
-            ))
+
+        let localMediaPairs = locals.map { item in
+            (item, item.toMediaItem())
         }
 
-        // 按下载/创建时间排序
-        cachedAllLocalMedia = result.sorted { a, b in
-            let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
-            let dateB = b.downloadRecord?.downloadedAt ?? b.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
-            return dateA > dateB
-        }
+        let result = await Task.detached(priority: .utility) {
+            var result: [UnifiedLocalMedia] = downloads.map { record in
+                UnifiedLocalMedia(
+                    id: record.item.id,
+                    mediaItem: record.item,
+                    localItem: nil,
+                    downloadRecord: record,
+                    fileURL: record.localFileURL,
+                    isLocalFile: false
+                )
+            }
+
+            let downloadedPaths = Set(downloads.map {
+                (($0.localFilePath as NSString).standardizingPath as String)
+            })
+
+            for (item, mediaItem) in localMediaPairs {
+                guard !downloadedIDs.contains(item.id) else { continue }
+                let itemPath = (item.fileURL.path as NSString).standardizingPath as String
+                guard !downloadedPaths.contains(itemPath) else { continue }
+                guard FileManager.default.fileExists(atPath: item.fileURL.path) else { continue }
+                result.append(UnifiedLocalMedia(
+                    id: item.id,
+                    mediaItem: mediaItem,
+                    localItem: item,
+                    downloadRecord: nil,
+                    fileURL: item.fileURL,
+                    isLocalFile: true
+                ))
+            }
+
+            return result.sorted { a, b in
+                let dateA = a.downloadRecord?.downloadedAt ?? a.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
+                let dateB = b.downloadRecord?.downloadedAt ?? b.localItem?.createdAt.flatMap { parseISO8601Media($0) } ?? Date.distantPast
+                return dateA > dateB
+            }
+        }.value
+
+        guard !Task.isCancelled else { return }
+        cachedAllLocalMedia = result
     }
 
     /// 显式清理无效下载记录（文件不存在的记录），不应在 computed property 中自动调用
     func cleanupInvalidDownloadRecords() {
         mediaLibrary.cleanupInvalidDownloadRecords()
-        rebuildLocalMediaCache()
+        scheduleLocalMediaCacheRebuild(delayNanoseconds: 0)
     }
 
     var downloadSyncRecords: [MediaDownloadRecord] {
@@ -2032,6 +2040,11 @@ final class MediaExploreViewModel: ObservableObject {
         }
 
         let workshopID = String(item.id.dropFirst("workshop_".count))
+        AppLogger.info(.download, "downloadWorkshopWallpaper", metadata: [
+            "item.id": item.id,
+            "workshopID": workshopID,
+            "title": item.title
+        ])
         let task = downloadTaskService.addTask(workshopWallpaper: item)
         let taskID = task.id
         downloadTaskService.markDownloading(id: taskID)
@@ -2130,8 +2143,28 @@ final class MediaExploreViewModel: ObservableObject {
     /// - Returns: 未下载的订阅物品列表
     func fetchSubscribedItems(steamID: String) async throws -> [WorkshopWallpaper] {
         let subscribed = try await workshopService.fetchAllSubscriptions(steamID: steamID)
+
+        // 从下载记录中提取已下载的 workshop ID
         let alreadyDownloaded = downloadedWorkshopIDs
-        return subscribed.filter { !alreadyDownloaded.contains($0.id) }
+
+        // 同时扫描磁盘上已有的 workshop 目录，覆盖下载记录缺失或记录 ID 异常的情况
+        let fm = FileManager.default
+        let mediaURL = DownloadPathManager.shared.mediaFolderURL
+        var diskDownloadedIDs = Set<String>()
+        if let contents = try? fm.contentsOfDirectory(at: mediaURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+            for url in contents {
+                let name = url.lastPathComponent
+                guard name.hasPrefix("workshop_") else { continue }
+                let id = String(name.dropFirst("workshop_".count))
+                diskDownloadedIDs.insert(id)
+            }
+        }
+
+        return subscribed.filter { item in
+            guard !alreadyDownloaded.contains(item.id) else { return false }
+            guard !diskDownloadedIDs.contains(item.id) else { return false }
+            return true
+        }
     }
 
     /// 下载指定的 Workshop 物品列表
@@ -2163,9 +2196,24 @@ final class MediaExploreViewModel: ObservableObject {
         let totalSubscribed = subscribed.count
         AppLogger.info(.media, "syncSubscribedWorkshopItems: found \(totalSubscribed) subscribed items")
 
-        // 2. 过滤出未下载的
+        // 2. 过滤出未下载的（下载记录 + 磁盘目录双重检查）
         let alreadyDownloaded = downloadedWorkshopIDs
-        let toDownload = subscribed.filter { !alreadyDownloaded.contains($0.id) }
+        let fm = FileManager.default
+        let mediaURL = DownloadPathManager.shared.mediaFolderURL
+        var diskDownloadedIDs = Set<String>()
+        if let contents = try? fm.contentsOfDirectory(at: mediaURL, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+            for url in contents {
+                let name = url.lastPathComponent
+                guard name.hasPrefix("workshop_") else { continue }
+                let id = String(name.dropFirst("workshop_".count))
+                diskDownloadedIDs.insert(id)
+            }
+        }
+        let toDownload = subscribed.filter { item in
+            guard !alreadyDownloaded.contains(item.id) else { return false }
+            guard !diskDownloadedIDs.contains(item.id) else { return false }
+            return true
+        }
         AppLogger.info(.media, "syncSubscribedWorkshopItems: \(toDownload.count) new, \(alreadyDownloaded.count) already downloaded")
 
         // 3. 转换为 MediaItem 并排队下载

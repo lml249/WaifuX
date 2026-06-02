@@ -168,6 +168,8 @@ class SettingsViewModel: ObservableObject {
     /// 清理所有锁屏实例：清空视频缓存、显示器实例列表、推送管线
     func clearLockScreenInstances() {
         LockScreenWallpaperService.shared.clearLockScreenInstances()
+        // 同步本地开关状态（clearLockScreenInstances 已将 UserDefaults 置为 false）
+        dynamicLockScreenEnabled = false
     }
 
     /// 同步代理设置到 NetworkService
