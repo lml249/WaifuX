@@ -146,16 +146,38 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
             VideoLibrary.shared.scan()
             WallpaperPrefs.shared.observeChanges()
             observeLibraryChanges()
+            observeAppTermination()
             observeDisplaySleepWake()
             observeScreenLockState()
             PowerMonitor.shared.startMonitoring()
             observePowerStateChanges()
             observeSocketCommands()
-            FrameChannel.shared.start()
         } else {
             let err = String(cString: dlerror())
             extLog("INIT — dlopen failed: \(err)")
         }
+    }
+
+    private func observeAppTermination() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        let observer = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(
+            center,
+            observer,
+            { _, _, _, _, _ in
+                extLog("[Extension] App will terminate — releasing frame pipeline")
+                FrameChannel.shared.stop()
+                let removed = WallpaperState.shared.removeAllContexts()
+                WallpaperPrefs.shared.setActive(false)
+                extLog("[Extension] Released \(removed.count) active context(s), exiting extension process")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    exit(0)
+                }
+            },
+            "com.waifux.app.wallpaper.appWillTerminate" as CFString,
+            nil,
+            .deliverImmediately
+        )
     }
 
     // MARK: - SnapshotXPC Swizzle
@@ -256,69 +278,125 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
     /// 用户只需在系统设置初始化选择一次，之后 App 通过 socket 控制。
     private func observeSocketCommands() {
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            guard let socketPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
-                .appendingPathComponent("socket/extension.ipc").path
-            else { return }
+            Self.drainPendingSocketCommands(reason: "timer")
+        }
+        extLog("[Extension] Socket command polling started")
+    }
 
-            // 用轻量级 poll 请求检查是否有挂起命令
-            let req = IPCRequest(id: UUID().uuidString, method: "poll_commands", params: nil)
-            guard let data = try? JSONEncoder().encode(req) else { return }
+    static func drainPendingSocketCommands(reason: String) {
+        var handledCount = 0
+        for _ in 0..<16 {
+            guard pollAndHandleSocketCommand() else { break }
+            handledCount += 1
+        }
+        if handledCount > 0 {
+            extLog("[Commands] Drained \(handledCount) pending command(s), reason=\(reason)")
+        }
+    }
 
-            let sock = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard sock >= 0 else { return }
-            defer { close(sock) }
+    @discardableResult
+    private static func pollAndHandleSocketCommand() -> Bool {
+        guard let socketPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+            .appendingPathComponent("socket/extension.ipc").path
+        else { return false }
 
-            // 防止写入已断开的 socket 时触发 SIGPIPE
-            var noSigPipe: Int32 = 1
-            setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        let req = IPCRequest(id: UUID().uuidString, method: "poll_commands", params: nil)
+        guard let data = try? JSONEncoder().encode(req) else { return false }
 
-            var tv = timeval(tv_sec: 1, tv_usec: 0)
-            setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+        let sock = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
 
-            var addr = sockaddr_un()
-            addr.sun_family = sa_family_t(AF_UNIX)
-            socketPath.withCString { src in
-                Darwin.strncpy(UnsafeMutablePointer<CChar>(&addr.sun_path.0), src, MemoryLayout.size(ofValue: addr.sun_path))
-            }
-            let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-            guard Darwin.connect(sock, UnsafeRawPointer(&addr).assumingMemoryBound(to: sockaddr.self), len) == 0 else { return }
+        var noSigPipe: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
-            var reqLen = UInt32(data.count).bigEndian
-            guard write(sock, &reqLen, 4) == 4 else { return }
-            guard data.withUnsafeBytes({ write(sock, $0.baseAddress!, data.count) }) == data.count else { return }
+        var tv = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-            var respLen: UInt32 = 0
-            guard read(sock, &respLen, 4) == 4 else { return }
-            let payloadLen = Int(UInt32(bigEndian: respLen))
-            guard payloadLen > 0, payloadLen < 10_000 else { return }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        socketPath.withCString { src in
+            Darwin.strncpy(UnsafeMutablePointer<CChar>(&addr.sun_path.0), src, MemoryLayout.size(ofValue: addr.sun_path))
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        guard Darwin.connect(sock, UnsafeRawPointer(&addr).assumingMemoryBound(to: sockaddr.self), len) == 0 else { return false }
 
-            let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: payloadLen, alignment: 1)
-            defer { buf.deallocate() }
-            var total = 0
-            while total < payloadLen {
-                let n = read(sock, buf.baseAddress! + total, payloadLen - total)
-                guard n > 0 else { return }
-                total += n
-            }
-            let respData = Data(bytes: buf.baseAddress!, count: payloadLen)
+        var reqLen = UInt32(data.count).bigEndian
+        guard write(sock, &reqLen, 4) == 4 else { return false }
+        guard data.withUnsafeBytes({ write(sock, $0.baseAddress!, data.count) }) == data.count else { return false }
 
-            guard let resp = try? JSONDecoder().decode(IPCResponse.self, from: respData) else { return }
-            // poll_commands 的响应将命令 JSON 放在 videoPath 字段中
-            if let cmdJSON = resp.videoPath, let cmdData = cmdJSON.data(using: .utf8),
-               let cmd = try? JSONDecoder().decode(IPCCommand.self, from: cmdData) {
-                if cmd.action == "switch_video", let videoID = cmd.videoID, let displayID = cmd.displayID {
-                    extLog("[Commands] Socket switch_video: display=\(displayID) video=\(videoID)")
-                    if let path = UnixSocketClient.shared.fetchVideoPathSync(for: videoID) {
-                        let url = URL(fileURLWithPath: path)
-                        if FileManager.default.fileExists(atPath: path) {
-                            WallpaperState.shared.renderer(for: displayID)?.replaceVideo(with: url)
-                            extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到视频: \(videoID)")
+        var respLen: UInt32 = 0
+        guard read(sock, &respLen, 4) == 4 else { return false }
+        let payloadLen = Int(UInt32(bigEndian: respLen))
+        guard payloadLen > 0, payloadLen < 10_000 else { return false }
+
+        let buf = UnsafeMutableRawBufferPointer.allocate(byteCount: payloadLen, alignment: 1)
+        defer { buf.deallocate() }
+        var total = 0
+        while total < payloadLen {
+            let n = read(sock, buf.baseAddress! + total, payloadLen - total)
+            guard n > 0 else { return false }
+            total += n
+        }
+
+        let respData = Data(bytes: buf.baseAddress!, count: payloadLen)
+        guard let resp = try? JSONDecoder().decode(IPCResponse.self, from: respData),
+              let cmdJSON = resp.videoPath,
+              let cmdData = cmdJSON.data(using: .utf8),
+              let cmd = try? JSONDecoder().decode(IPCCommand.self, from: cmdData) else {
+            return false
+        }
+
+        handleSocketCommand(cmd)
+        return true
+    }
+
+    private static func handleSocketCommand(_ cmd: IPCCommand) {
+        if cmd.action == "switch_video", let videoID = cmd.videoID, let displayID = cmd.displayID {
+            extLog("[Commands] Socket switch_video: display=\(displayID) video=\(videoID)")
+            if let path = UnixSocketClient.shared.fetchVideoPathSync(for: videoID) {
+                let url = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: path) {
+                    WallpaperState.shared.cachedVideoURL = url
+                    WallpaperState.shared.cachedImageURL = nil
+                    if let renderer = WallpaperState.shared.renderer(for: displayID) {
+                        renderer.replaceVideo(with: url)
+                        _ = WallpaperState.shared.replaceContextRenderer(displayID: displayID, renderer: renderer, videoID: videoID)
+                        WallpaperPrefs.shared.updateCurrentVideo()
+                        if let active = WallpaperState.shared.activeContext(for: displayID) {
+                            WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, rootLayer: active.rootLayer)
+                        }
+                        extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到视频: \(videoID)")
+                    } else if let active = WallpaperState.shared.activeContext(for: displayID) {
+                        let rootLayer = active.rootLayer
+                        Task {
+                            do {
+                                rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+                                let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: url)
+                                let oldRenderer = WallpaperState.shared.replaceContextRenderer(displayID: displayID, renderer: renderer, videoID: videoID)
+                                oldRenderer?.stop()
+                                renderer.start()
+                                WallpaperPrefs.shared.updateCurrentVideo()
+                                WallpaperXPCHandler.writeSnapshotCacheIfPossible(videoURL: url, videoID: videoID, rootLayer: rootLayer)
+                                extLog("[Commands] ✅ 已从静态图切回视频: display=\(displayID) video=\(videoID)")
+                            } catch {
+                                extLog("[Commands] ❌ 从静态图切回视频失败: \(error.localizedDescription)")
+                            }
                         }
                     }
                 }
             }
+        } else if cmd.action == "switch_image", let sourceID = cmd.videoID, let displayID = cmd.displayID {
+            extLog("[Commands] Socket switch_image: display=\(displayID) source=\(sourceID)")
+            if let path = UnixSocketClient.shared.fetchVideoPathSync(for: sourceID) {
+                let url = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: path) {
+                    WallpaperState.shared.cachedImageURL = url
+                    WallpaperState.shared.cachedVideoURL = nil
+                    WallpaperXPCHandler.switchActiveContextToStaticImage(displayID: displayID, sourceID: sourceID, imageURL: url)
+                }
+            }
         }
-        extLog("[Extension] Socket command polling started")
     }
 
     // MARK: - Library Changes
@@ -333,6 +411,9 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                 VideoLibrary.shared.scan()
                 WallpaperState.shared.clearCaches()
                 extLog("[Extension] Library changed — re-scanned")
+                DispatchQueue.main.async {
+                    WaifuXWallpaperExtension.drainPendingSocketCommands(reason: "prefsChanged")
+                }
             },
             "com.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,

@@ -10,11 +10,13 @@
 
 @preconcurrency import AVFoundation
 import CoreMedia
+import CoreGraphics
 
 final class VideoRenderer: @unchecked Sendable {
     let displayLayer: AVSampleBufferDisplayLayer
     let timebase: CMTimebase
     private let renderer: AVSampleBufferVideoRenderer
+    private let backgroundFrameLayer: CALayer
     private let stillFrameLayer: CALayer
     private var asset: AVURLAsset
     private var videoTrack: AVAssetTrack
@@ -51,7 +53,6 @@ final class VideoRenderer: @unchecked Sendable {
         displayLayer.videoGravity = .resizeAspectFill
         displayLayer.frame = rootLayer.bounds
         displayLayer.contentsScale = rootLayer.contentsScale
-        rootLayer.addSublayer(displayLayer)
 
         return VideoRenderer(
             rootLayer: rootLayer,
@@ -66,7 +67,19 @@ final class VideoRenderer: @unchecked Sendable {
         self.renderer = displayLayer.sampleBufferRenderer
         self.asset = asset
         self.videoTrack = videoTrack
+        self.backgroundFrameLayer = CALayer()
         self.stillFrameLayer = CALayer()
+
+        backgroundFrameLayer.frame = rootLayer.bounds
+        backgroundFrameLayer.contentsGravity = .resizeAspectFill
+        backgroundFrameLayer.contentsScale = rootLayer.contentsScale
+        backgroundFrameLayer.opacity = 0
+        rootLayer.addSublayer(backgroundFrameLayer)
+
+        displayLayer.backgroundColor = CGColor(gray: 0, alpha: 0)
+        displayLayer.isOpaque = false
+        rootLayer.addSublayer(displayLayer)
+
         stillFrameLayer.frame = rootLayer.bounds
         stillFrameLayer.contentsGravity = .resizeAspectFill
         stillFrameLayer.contentsScale = rootLayer.contentsScale
@@ -79,6 +92,7 @@ final class VideoRenderer: @unchecked Sendable {
         CMTimebaseSetTime(timebase, time: .zero)
         CMTimebaseSetRate(timebase, rate: 0.0)
         displayLayer.controlTimebase = timebase
+        generateBackgroundFrame(for: asset)
     }
 
     // MARK: - Playback Control
@@ -161,6 +175,7 @@ final class VideoRenderer: @unchecked Sendable {
                 nextReader?.cancelReading()
                 asset = newAsset
                 videoTrack = track
+                generateBackgroundFrame(for: newAsset)
                 ptsOffset = .zero
                 lastEnqueuedEnd = .zero
                 CMTimebaseSetTime(timebase, time: .zero)
@@ -526,6 +541,27 @@ final class VideoRenderer: @unchecked Sendable {
     private func recoverFromError() {
         recreatePlayback()
         CMTimebaseSetRate(timebase, rate: isPaused ? 0.0 : 1.0)
+    }
+
+    // MARK: - Background Frame（底图）
+
+    private func generateBackgroundFrame(for sourceAsset: AVURLAsset) {
+        Task.detached(priority: .utility) { [weak self] in
+            let generator = AVAssetImageGenerator(asset: sourceAsset)
+            generator.appliesPreferredTrackTransform = true
+
+            guard let cgImage = try? await generator.image(at: .zero).image else {
+                extLog("  [Renderer] 底图封面生成失败")
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard let self, self.asset.url == sourceAsset.url else { return }
+                self.backgroundFrameLayer.contents = cgImage
+                self.backgroundFrameLayer.opacity = 1
+                extLog("  [Renderer] 底图封面已渲染: \(sourceAsset.url.lastPathComponent)")
+            }
+        }
     }
 
     // MARK: - Still Frame（静帧）

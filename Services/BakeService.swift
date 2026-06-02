@@ -1346,16 +1346,16 @@ final class BakeService: ObservableObject {
         }
         UserDefaults.standard.set(fileURL.path, forKey: cacheKey)
 
-        // ⚠️ 如果锁屏扩展已激活，跳过设置静态桌面壁纸，
+        // ⚠️ 动态锁屏启用时跳过设置静态桌面壁纸，
         // 避免覆盖用户在系统设置中手动选择的 WaifuX 锁屏实例。
         let shouldSkipForLockScreen: Bool = {
             if #available(macOS 26.0, *) {
-                return VideoWallpaperManager.shared.isLockScreenMirroringActive
+                return VideoWallpaperManager.shared.isLockScreenEnabled
             }
             return false
         }()
         guard !shouldSkipForLockScreen else {
-            print("[BakeService] 🔒 锁屏扩展已激活，跳过设置静态 fallback 壁纸以保护用户锁屏选择")
+            print("[BakeService] 🔒 动态锁屏已启用，跳过设置静态 fallback 壁纸以保护用户锁屏选择")
             return
         }
 

@@ -279,6 +279,9 @@ class WorkshopService: ObservableObject {
         if parsed.isEmpty {
             parsed = try parseSubscriptionPageHTML(doc)
         }
+        // HTML 解析可能因 CSS 选择器匹配到同一项的多个元素而产生重复，按 id 去重
+        var seenIDs = Set<String>()
+        parsed = parsed.filter { seenIDs.insert($0.id).inserted }
         do {
             parsed = try await enrichWithAPIDetails(parsed)
         } catch {
@@ -342,19 +345,35 @@ class WorkshopService: ObservableObject {
     /// - Returns: 所有已订阅壁纸
     func fetchAllSubscriptions(steamID: String) async throws -> [WorkshopWallpaper] {
         var allItems: [WorkshopWallpaper] = []
+        var seenIDs = Set<String>()
         var page = 1
         var hasMore = true
+        var emptyPageCount = 0
 
         while hasMore {
             let items = try await fetchSubscriptions(steamID: steamID, page: page)
-            allItems.append(contentsOf: items)
-            hasMore = items.count >= authorPageSize
+            for item in items {
+                if seenIDs.insert(item.id).inserted {
+                    allItems.append(item)
+                }
+            }
+            // Steam 订阅页面固定每页最多返回 10 条（忽略 numperpage），
+            // 不能用 authorPageSize(30) 来判断是否有下一页。
+            // 改用：如果当前页有数据就继续翻页，连续两页为空则停止。
+            if items.isEmpty {
+                emptyPageCount += 1
+                if emptyPageCount >= 2 {
+                    hasMore = false
+                }
+            } else {
+                emptyPageCount = 0
+            }
             page += 1
             // 避免无限循环，最多 50 页（1500 条）
             if page > 50 { break }
         }
 
-        AppLogger.info(.media, "fetchAllSubscriptions total: \(allItems.count) items across \(page - 1) pages")
+        AppLogger.info(.media, "fetchAllSubscriptions total: \(allItems.count) unique items across \(page - 1) pages")
         return allItems
     }
 
@@ -836,11 +855,26 @@ class WorkshopService: ObservableObject {
         var seenIDs = Set<String>()
 
         for container in containers {
-            // 从容器 ID 提取：Subscription{id}
             let containerID = try container.attr("id")
-            guard let id = containerID.components(separatedBy: "Subscription").last,
-                  !id.isEmpty, !seenIDs.contains(id) else { continue }
-            seenIDs.insert(id)
+
+            // Steam 页面为每个订阅项生成两个容器：
+            //   <div id="Subscription3579766653">   — 已订阅状态（可见）
+            //   <div id="Unsubscribed3579766653">   — 未订阅状态（隐藏，无预览图）
+            // 必须跳过 Unsubscribed 容器，否则会提取出 "scribed3579766653" 这样的错误 ID。
+            guard !containerID.hasPrefix("Unsubscribed") else { continue }
+
+            // 优先从容器内的详情链接 URL 提取 publishedfileid（最可靠）
+            var id: String?
+            if let link = try container.select("a[href*=\"/sharedfiles/filedetails/?id=\"]").first() {
+                let href = try link.attr("href")
+                id = href.components(separatedBy: "id=").last?.components(separatedBy: "&").first
+            }
+            // 降级：从容器 ID "Subscription{id}" 提取
+            if id == nil || id!.isEmpty {
+                id = containerID.components(separatedBy: "Subscription").last
+            }
+            guard let resolvedID = id, !resolvedID.isEmpty, !seenIDs.contains(resolvedID) else { continue }
+            seenIDs.insert(resolvedID)
 
             // 标题
             let titleEl = try container.select(".workshopItemTitle").first()
@@ -869,7 +903,7 @@ class WorkshopService: ObservableObject {
             let isAnimatedImage = previewSrc.lowercased().contains(".gif")
 
             wallpapers.append(WorkshopWallpaper(
-                id: id,
+                id: resolvedID,
                 title: title,
                 description: nil,
                 previewURL: previewURL,

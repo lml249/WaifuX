@@ -646,43 +646,43 @@ final class MediaLibraryService: ObservableObject {
     /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
     private static let persistQueue = DispatchQueue(label: "com.waifux.media.persist", qos: .utility)
 
+    private static func schedulePersist<Value: Encodable & Sendable>(
+        value: Value,
+        key: String,
+        assigningTo storage: inout DispatchWorkItem?
+    ) {
+        storage?.cancel()
+        let work = DispatchWorkItem(block: { @Sendable in
+            if let data = try? JSONEncoder().encode(value) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
+        })
+        storage = work
+        persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
     private func persistFavorites() {
-        persistFavoritesWork?.cancel()
-        // ⚡ 在主线程捕获数据副本，后台编码写入
-        let records = favoriteRecords
-        let key = favoriteRecordsKey
-        let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(records) else { return }
-            UserDefaults.standard.set(data, forKey: key)
-        }
-        persistFavoritesWork = work
-        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.schedulePersist(
+            value: favoriteRecords,
+            key: favoriteRecordsKey,
+            assigningTo: &persistFavoritesWork
+        )
     }
 
     func persistDownloads() {
-        persistDownloadsWork?.cancel()
-        // ⚡ 在主线程捕获数据副本，后台编码写入
-        let records = downloadRecords
-        let key = downloadRecordsKey
-        let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(records) else { return }
-            UserDefaults.standard.set(data, forKey: key)
-        }
-        persistDownloadsWork = work
-        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.schedulePersist(
+            value: downloadRecords,
+            key: downloadRecordsKey,
+            assigningTo: &persistDownloadsWork
+        )
     }
 
     private func persistRecents() {
-        persistRecentsWork?.cancel()
-        // ⚡ 在主线程捕获数据副本，后台编码写入
-        let items = recentItems
-        let key = recentsKey
-        let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(items) else { return }
-            UserDefaults.standard.set(data, forKey: key)
-        }
-        persistRecentsWork = work
-        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.schedulePersist(
+            value: recentItems,
+            key: recentsKey,
+            assigningTo: &persistRecentsWork
+        )
     }
 
     private func deduplicated(_ items: [MediaItem]) -> [MediaItem] {
@@ -1221,30 +1221,35 @@ final class WallpaperLibraryService: ObservableObject {
     /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
     private static let persistQueue = DispatchQueue(label: "com.waifux.wallpaper.persist", qos: .utility)
 
+    private static func schedulePersist<Value: Encodable & Sendable>(
+        value: Value,
+        key: String,
+        assigningTo storage: inout DispatchWorkItem?
+    ) {
+        storage?.cancel()
+        let work = DispatchWorkItem(block: { @Sendable in
+            if let data = try? JSONEncoder().encode(value) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
+        })
+        storage = work
+        persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
     private func persistFavorites() {
-        persistFavoritesWork?.cancel()
-        // ⚡ 在主线程捕获数据副本，后台编码写入
-        let records = favoriteRecords
-        let key = favoriteRecordsKey
-        let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(records) else { return }
-            UserDefaults.standard.set(data, forKey: key)
-        }
-        persistFavoritesWork = work
-        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.schedulePersist(
+            value: favoriteRecords,
+            key: favoriteRecordsKey,
+            assigningTo: &persistFavoritesWork
+        )
     }
 
     func persistDownloads() {
-        persistDownloadsWork?.cancel()
-        // ⚡ 在主线程捕获数据副本，后台编码写入
-        let records = downloadRecords
-        let key = downloadRecordsKey
-        let work = DispatchWorkItem {
-            guard let data = try? JSONEncoder().encode(records) else { return }
-            UserDefaults.standard.set(data, forKey: key)
-        }
-        persistDownloadsWork = work
-        Self.persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        Self.schedulePersist(
+            value: downloadRecords,
+            key: downloadRecordsKey,
+            assigningTo: &persistDownloadsWork
+        )
     }
 
     private func deduplicated(_ records: [WallpaperFavoriteRecord]) -> [WallpaperFavoriteRecord] {

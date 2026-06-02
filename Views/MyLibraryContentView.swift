@@ -934,7 +934,7 @@ struct MyLibraryContentView: View {
         VStack(spacing: 20) {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .font(.system(size: 32))
-                .foregroundStyle(LiquidGlassColors.secondaryViolet)
+                .foregroundStyle(Color.accentColor)
 
             Text("同步 Steam 订阅")
                 .font(.system(size: 18, weight: .bold))
@@ -986,11 +986,11 @@ struct MyLibraryContentView: View {
                 .padding(.vertical, 8)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(LiquidGlassColors.secondaryViolet.opacity(0.5))
+                        .fill(Color.accentColor.opacity(0.5))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(LiquidGlassColors.secondaryViolet.opacity(0.3), lineWidth: 1)
+                        .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
                 )
                 .disabled(syncProfileInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -1031,7 +1031,7 @@ struct MyLibraryContentView: View {
                     }
                 }
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(LiquidGlassColors.secondaryViolet)
+                .foregroundStyle(Color.accentColor)
                 .buttonStyle(.plain)
                 .pointingHandCursor()
             }
@@ -1130,13 +1130,13 @@ struct MyLibraryContentView: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(syncSelectedIDs.isEmpty
                                   ? Color.white.opacity(0.05)
-                                  : LiquidGlassColors.secondaryViolet.opacity(0.5))
+                                  : Color.accentColor.opacity(0.5))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(syncSelectedIDs.isEmpty
                                     ? Color.white.opacity(0.05)
-                                    : LiquidGlassColors.secondaryViolet.opacity(0.3), lineWidth: 1)
+                                    : Color.accentColor.opacity(0.3), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
@@ -1170,7 +1170,7 @@ struct MyLibraryContentView: View {
                 Image(systemName: syncSelectedIDs.contains(item.id) ? "checkmark.square.fill" : "square")
                     .font(.system(size: 18))
                     .foregroundStyle(syncSelectedIDs.contains(item.id)
-                                     ? LiquidGlassColors.secondaryViolet
+                                     ? Color.accentColor
                                      : .white.opacity(0.3))
 
                 // 预览图
@@ -1203,10 +1203,10 @@ struct MyLibraryContentView: View {
                     HStack(spacing: 6) {
                         Text(item.type.rawValue.capitalized)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(LiquidGlassColors.secondaryViolet.opacity(0.7))
+                            .foregroundStyle(Color.accentColor.opacity(0.7))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(LiquidGlassColors.secondaryViolet.opacity(0.15))
+                            .background(Color.accentColor.opacity(0.15))
                             .cornerRadius(3)
                         if let subs = item.subscriptions {
                             Text("\(formatStat(subs)) 订阅")

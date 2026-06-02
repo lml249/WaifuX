@@ -28,6 +28,7 @@ final class WallpaperState: Sendable {
         var cachedThumbnailURL: URL?
         var cacheDirectoryURL: URL?
         var cachedVideoURL: URL?
+        var cachedImageURL: URL?
         var currentVideoID: String? = UserDefaults.standard.string(forKey: WallpaperState.selectedVideoKey)
         var presentationMode: String = "active"
         var activityState: String = "active"
@@ -62,6 +63,7 @@ final class WallpaperState: Sendable {
     func clearCaches() {
         lock.withLock { state in
             state.cachedVideoURL = nil
+            state.cachedImageURL = nil
             state.cachedThumbnailURL = nil
         }
     }
@@ -136,6 +138,29 @@ final class WallpaperState: Sendable {
     func renderer(for displayID: UInt32) -> VideoRenderer? {
         lock.withLock {
             $0.activeContexts.values.first(where: { $0.displayID == displayID })?.renderer
+        }
+    }
+
+    func activeContext(for displayID: UInt32) -> ActiveWallpaper? {
+        lock.withLock {
+            $0.activeContexts.values.first(where: { $0.displayID == displayID })
+        }
+    }
+
+    func replaceContextRenderer(displayID: UInt32, renderer: VideoRenderer?, videoID: String?) -> VideoRenderer? {
+        lock.withLock { state in
+            guard let pair = state.activeContexts.first(where: { $0.value.displayID == displayID }) else {
+                return nil
+            }
+            let old = pair.value
+            state.activeContexts[pair.key] = ActiveWallpaper(
+                caContext: old.caContext,
+                rootLayer: old.rootLayer,
+                renderer: renderer,
+                displayID: old.displayID,
+                videoID: videoID ?? old.videoID
+            )
+            return old.renderer
         }
     }
 
@@ -214,6 +239,11 @@ final class WallpaperState: Sendable {
     var cachedVideoURL: URL? {
         get { lock.withLock { $0.cachedVideoURL } }
         set { lock.withLock { $0.cachedVideoURL = newValue } }
+    }
+
+    var cachedImageURL: URL? {
+        get { lock.withLock { $0.cachedImageURL } }
+        set { lock.withLock { $0.cachedImageURL = newValue } }
     }
 
     var currentVideoID: String? {

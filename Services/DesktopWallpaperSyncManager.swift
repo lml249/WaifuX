@@ -214,6 +214,12 @@ final class DesktopWallpaperSyncManager {
         let workspace = NSWorkspace.shared
         let currentScreens = NSScreen.screens
         relinkScreenStateForCurrentDisplays()
+        let shouldSkipStaticDesktopWrites: Bool = {
+            if #available(macOS 26.0, *) {
+                return videoManager.isLockScreenEnabled
+            }
+            return false
+        }()
 
         // 1. 对每个当前屏幕，优先同步该屏幕自己的壁纸状态
         for screen in currentScreens {
@@ -224,16 +230,21 @@ final class DesktopWallpaperSyncManager {
             if videoManager.hasActiveWallpaper(on: screen),
                let posterURL = videoManager.posterURL(for: screen),
                videoManager.isVideoWallpaperActive {
-                do {
-                    // 使用 "充满屏幕" 缩放模式，与初始设置保持一致
-                    let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
-                        .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
-                        .allowClipping: true
-                    ]
-                    try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
-                    print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
-                } catch {
-                    print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync poster for screen \(screen.localizedName): \(error)")
+                // ⚠️ 动态锁屏启用时跳过 poster 同步，避免触发 setDesktopImageURL 导致系统重置扩展选择
+                if shouldSkipStaticDesktopWrites {
+                    print("[DesktopWallpaperSyncManager] [\(source)] 🔒 动态锁屏已启用，跳过 poster 同步 for screen \(screen.localizedName)")
+                } else {
+                    do {
+                        // 使用 "充满屏幕" 缩放模式，与初始设置保持一致
+                        let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
+                            .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
+                            .allowClipping: true
+                        ]
+                        try workspace.setDesktopImageURLForAllSpaces(posterURL, for: screen, options: fillOptions)
+                        print("[DesktopWallpaperSyncManager] [\(source)] Synced video poster for screen \(screen.localizedName)")
+                    } catch {
+                        print("[DesktopWallpaperSyncManager] [\(source)] Failed to sync poster for screen \(screen.localizedName): \(error)")
+                    }
                 }
                 continue
             }
@@ -246,6 +257,11 @@ final class DesktopWallpaperSyncManager {
             // 跳过 wallpaper-wgpu 渲染的临时 capture 路径（应用重启后不存在）
             if url.path.contains("wallpaper-wgpu-capture") || url.path.contains("wallpaperengine-cli-capture") {
                 print("[DesktopWallpaperSyncManager] [\(source)] Skipping wallpaper-wgpu capture path for screen \(screen.localizedName)")
+                continue
+            }
+
+            if shouldSkipStaticDesktopWrites {
+                print("[DesktopWallpaperSyncManager] [\(source)] 🔒 动态锁屏已启用，跳过静态壁纸同步 for screen \(screen.localizedName)")
                 continue
             }
 

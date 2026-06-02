@@ -95,10 +95,8 @@ struct LoopingVideoBackgroundView: NSViewRepresentable {
                 forName: .AVPlayerItemNewAccessLogEntry,
                 object: item,
                 queue: .main
-            ) { @Sendable [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.onReady?()
-                }
+            ) { [weak self] _ in
+                self?.onReady?()
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in

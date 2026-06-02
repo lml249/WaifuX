@@ -14,6 +14,7 @@ import Foundation
 import os
 
 private let appLog = OSLog(subsystem: "com.waifux.app", category: "ExtensionIPC")
+private let appWillTerminateNotificationName = "com.waifux.app.wallpaper.appWillTerminate"
 
 // MARK: - IPC 协议类型（与服务端兼容）
 
@@ -43,7 +44,7 @@ struct IPCResponse: Codable {
 }
 
 /// App 推送给扩展的命令。
-/// 在“显示器实例 + 每屏推帧”的模型下，命令只作为兼容旧逻辑的回退。
+/// 在“显示器实例 + 扩展本地解码”的模型下，命令用于热切换当前视频。
 struct IPCCommand: Codable {
     let action: String
     let videoID: String?
@@ -82,14 +83,65 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 显示器 → 当前桌面帧源（由 VideoWallpaperManager 同步）
     private var displayVideoMap: [UInt32: (videoID: String, videoURL: URL)] = [:]
     private let videoMapLock = OSAllocatedUnfairLock(initialState: [UInt32: (videoID: String, videoURL: URL)]())
+    private let localDecodeVideoLock = OSAllocatedUnfairLock(initialState: [String: URL]())
 
     private init() {}
 
+    /// 同步视频部署世代号。每调用一次 syncAllDisplayVideosToExtension 递增，
+    /// 用于防止旧 Task 的 cacheMirroringSource/enqueueCommand 覆盖新 Task 的状态。
+    private nonisolated(unsafe) static var _videoSyncGeneration: UInt64 = 0
+    private static let genLock = OSAllocatedUnfairLock(initialState: UInt64(0))
+
+    /// 获取当前世代号并递增，返回新世代号。
+    static func nextVideoSyncGeneration() -> UInt64 {
+        genLock.withLock { gen in
+            gen &+= 1
+            _videoSyncGeneration = gen
+            return gen
+        }
+    }
+
+    /// 检查世代号是否匹配当前最新世代。
+    static func isCurrentGeneration(_ generation: UInt64) -> Bool {
+        genLock.withLock { $0 } == generation
+    }
+
     /// App 调用此方法推送切换壁纸命令。
-    /// 当前模型下仅作为兼容旧逻辑的回退；主路径应依赖 per-display frame pushing。
-    func enqueueCommand(_ command: IPCCommand) {
+    /// 当前主路径是扩展本地解码，命令用于让扩展热切换到新的共享容器视频。
+    /// - Parameter generation: 视频同步世代号，0 表示不检查（兼容旧调用方）。
+    func enqueueCommand(_ command: IPCCommand, generation: UInt64 = 0) {
+        // 世代号不匹配说明来自旧 Task，丢弃
+        if generation != 0, !Self.isCurrentGeneration(generation) {
+            os_log(.debug, log: appLog, "丢弃过期命令 generation=%llu", generation)
+            return
+        }
         cmdLock.withLock { $0.append(command) }
-        os_log(.info, log: appLog, "入队命令: %@ display=%d", command.action, command.displayID ?? 0)
+        os_log(.info, log: appLog, "入队命令: %@ display=%d gen=%llu", command.action, command.displayID ?? 0, generation)
+    }
+
+    /// 清空所有挂起命令。
+    func clearCommands() {
+        cmdLock.withLock { $0.removeAll() }
+        os_log(.info, log: appLog, "已清空所有挂起命令")
+    }
+
+    /// 注册扩展本地解码可直接读取的视频路径。
+    func registerLocalDecodeVideo(videoID: String, videoURL: URL) {
+        localDecodeVideoLock.withLock { $0[videoID] = videoURL }
+        os_log(.info, log: appLog, "注册本地解码视频: %{public}@ path=%{public}@", videoID, videoURL.path)
+    }
+
+    /// 清空所有本地解码视频注册。清理锁屏实例时调用，防止扩展通过 get_video_path 获取已删除的视频路径。
+    func clearLocalDecodeVideos() {
+        localDecodeVideoLock.withLock { $0.removeAll() }
+        os_log(.info, log: appLog, "已清空所有本地解码视频注册")
+    }
+
+    /// 清空所有已注册的 IOSurface（锁屏实例清理时调用）。
+    /// 扩展会在此后的 acquire 中重新注册 surface。
+    func clearSurfaces() {
+        surfLock.withLock { $0.removeAll() }
+        os_log(.info, log: appLog, "已清空所有已注册 IOSurface")
     }
 
     /// 更新可用锁屏实例列表。
@@ -97,7 +149,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         availableVideos = videos
     }
 
-    /// 注册显示器当前的桌面帧源。当 surface 就绪时自动启动推帧。
+    /// 兼容旧帧推送管线的显示器视频映射。自解码主链路不再主动注册或启动该映射。
     func registerDisplayVideo(displayID: UInt32, videoID: String, videoURL: URL) {
         videoMapLock.withLock { $0[displayID] = (videoID, videoURL) }
         // 重置该 display 的重试计数：新视频意味着新一轮尝试
@@ -135,9 +187,24 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         pendingRetries.removeAll()
         retryCounts.removeAll()
         retryLock.unlock()
+        // 清空挂起命令，防止旧 Task 入队的过期命令在扩展 poll 时被处理
+        clearCommands()
         DispatchQueue.main.async {
             LockScreenFramePusher.shared.stopAll()
         }
+    }
+
+    /// 通知系统托管的 Wallpaper Extension：主 App 正在退出，请释放管线并结束旧进程。
+    func notifyAppWillTerminate() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterPostNotification(
+            center,
+            CFNotificationName(appWillTerminateNotificationName as CFString),
+            nil,
+            nil,
+            true
+        )
+        os_log(.info, log: appLog, "已广播 App 即将退出通知")
     }
 
     /// 检查扩展是否已有活跃的渲染管线（任何显示器）。
@@ -149,6 +216,12 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 检查指定显示器是否有活跃管线。
     func hasActivePipeline(for displayID: UInt32) -> Bool {
         surfLock.withLock { $0[displayID] != nil }
+    }
+
+    /// 扩展是否已注册本地解码视频（自解码模式下扩展自身解码播放）。
+    /// 只要有任何注册记录就说明扩展已连接并正常工作，即使 surface 可能因时序未注册。
+    var hasLocalDecodeVideos: Bool {
+        localDecodeVideoLock.withLock { !$0.isEmpty }
     }
 
     /// 健康检查：确保所有已注册 surface + video 的显示器都有活跃的帧推送会话。
@@ -311,6 +384,13 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
     /// 停止监听。主 App 退出时调用。
     func stop() {
         isRunning = false
+        fcLock.withLock { clients in
+            for fd in clients {
+                shutdown(fd, SHUT_RDWR)
+                close(fd)
+            }
+            clients.removeAll()
+        }
         if let sockURL = socketURL {
             try? FileManager.default.removeItem(at: sockURL)
         }
@@ -338,6 +418,11 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
         case "get_video_path":
             guard let videoID = request.params?["videoID"] else {
                 response = .init(id: request.id, videos: nil, videoPath: nil, error: "缺少 videoID")
+                break
+            }
+            if let url = localDecodeVideoLock.withLock({ $0[videoID] }),
+               FileManager.default.fileExists(atPath: url.path) {
+                response = .init(id: request.id, videos: nil, videoPath: url.path, error: nil)
                 break
             }
             guard let video = availableVideos.first(where: { $0.id == videoID }) else {
@@ -372,31 +457,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
                 if isNew {
                     os_log(.info, log: appLog, "注册 surfaces: display=%d [%d, %d]", did, id1, id2)
                 }
-                // 重置重试计数：新 surface 到来意味着扩展重新激活，给 retry 一个全新周期
-                retryLock.lock()
-                retryCounts.removeValue(forKey: did)
-                pendingRetries[did]?.cancel()
-                pendingRetries.removeValue(forKey: did)
-                retryLock.unlock()
-                // surface 就绪 → 如有对应视频则自动启动帧推送
-                // 扩展传了 videoID 但 videoMap 可能未注册 → 从 availableVideos 自动关联
-                let videoID = request.params?["videoID"]
-                if videoMapLock.withLock({ $0[did] }) == nil, let vid = videoID,
-                   let video = availableVideos.first(where: { $0.id == vid }) {
-                    let linkedPath = copyVideoToSharedContainer(videoPath: video.videoPath, videoID: vid)
-                    if let path = linkedPath {
-                        videoMapLock.withLock { $0[did] = (vid, URL(fileURLWithPath: path)) }
-                        os_log(.info, log: appLog, "🔗 根据扩展注册自动关联视频 display=%d video=%{public}@", did, vid)
-                    }
-                }
-                startPusherIfNeeded(displayID: did)
-                let videoReady = videoMapLock.withLock { $0[did] != nil }
-                if !videoReady {
-                    os_log(.info, log: appLog, "📡 surfaces 已注册 display=%d，等待 video 就绪后自动启动帧推送", did)
-                } else {
-                    os_log(.info, log: appLog, "✅ surfaces + video 均已就绪 display=%d，启动帧推送", did)
-                }
-                // 始终返回成功：扩展保持 surface 存活等待帧推送，3s 首帧超时兜底
+                os_log(.info, log: appLog, "register_surfaces: 自解码模式下仅确认 surface display=%d", did)
                 response = .init(id: request.id, videos: nil, videoPath: nil, error: nil)
             } else {
                 response = .init(id: request.id, videos: nil, videoPath: nil, error: "invalid_params")
@@ -405,14 +466,13 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
         case "poll_commands":
             // 扩展轮询挂起命令
-            let cmds = cmdLock.withLock {
-                let copy = $0
-                $0.removeAll()
-                return copy
+            let cmd = cmdLock.withLock { commands -> IPCCommand? in
+                guard !commands.isEmpty else { return nil }
+                return commands.removeFirst()
             }
             // 响应体复用 videoPath 字段传输 JSON 编码的命令
             // 简单场景：最多返回一个命令
-            if let cmd = cmds.first, let cmdData = try? JSONEncoder().encode(cmd) {
+            if let cmd, let cmdData = try? JSONEncoder().encode(cmd) {
                 let cmdStr = String(data: cmdData, encoding: .utf8)
                 response = .init(id: request.id, videos: nil, videoPath: cmdStr, error: nil)
             } else {
@@ -504,13 +564,29 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
                 return
             }
             clients.removeAll { fd in
-                let written = packetData.withUnsafeBytes { write(fd, $0.baseAddress!, $0.count) }
-                let failed = written != packetData.count
+                let failed = !writeFully(fd, data: packetData)
                 if failed {
-                    os_log(.error, log: appLog, "推送帧失败 fd=%d written=%d expected=%d errno=%d", fd, written, packetData.count, errno)
+                    os_log(.error, log: appLog, "推送帧失败 fd=%d expected=%d errno=%d", fd, packetData.count, errno)
                 }
                 return failed
             }
+        }
+    }
+
+    private func writeFully(_ fd: Int32, data: Data) -> Bool {
+        data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return false }
+            var totalWritten = 0
+            while totalWritten < ptr.count {
+                let n = write(fd, base + totalWritten, ptr.count - totalWritten)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                if n == 0 { return false }
+                totalWritten += n
+            }
+            return true
         }
     }
 
@@ -534,9 +610,6 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
 
     /// 处理帧通道订阅：保持连接打开，持续推送帧事件
     private func handleFrameChannel(client: Int32) {
-        var flags = fcntl(client, F_GETFL, 0)
-        fcntl(client, F_SETFL, flags | O_NONBLOCK)
-
         // 防止写入已断开的 socket 时触发 SIGPIPE 导致 App 崩溃
         var noSigPipe: Int32 = 1
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))

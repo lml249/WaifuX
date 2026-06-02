@@ -261,9 +261,14 @@ final class WallpaperEngineXBridge: ObservableObject {
             VideoWallpaperManager.shared.stopNativeVideoWallpaperOnly()
         }
 
-        // macOS 26+：清空旧的锁屏镜像帧源缓存（wallpaper-wgpu 渲染的壁纸不参与锁屏镜像推帧）
+        // macOS 26+：清空旧的锁屏镜像帧源缓存。
+        // wallpaper-wgpu 渲染的壁纸不参与锁屏镜像推帧，但若用户已在设置中启用
+        // 动态锁屏，则不应清除其缓存，否则锁屏会退化回静态壁纸。
+        // 使用持久化设置 isLockScreenEnabled 而非 isLockScreenMirroringActive。
         if #available(macOS 26.0, *) {
-            LockScreenWallpaperService.shared.clearMirroringSourceCache()
+            if !VideoWallpaperManager.shared.isLockScreenEnabled {
+                LockScreenWallpaperService.shared.clearMirroringSourceCache()
+            }
         }
 
         // 2. 终止旧进程
@@ -1055,6 +1060,11 @@ final class WallpaperEngineXBridge: ObservableObject {
 
         // 标记已缓存
         UserDefaults.standard.set(fileURL.path, forKey: cacheKey)
+
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+            print("[WallpaperEngineXBridge] 🔒 动态锁屏已启用，跳过静态 fallback 壁纸设置以保护用户锁屏选择")
+            return false
+        }
 
         // 设为静态桌面壁纸（锁屏会跟随使用此壁纸）
         let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
@@ -2143,6 +2153,11 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
 
     private func applyCaptureAsDesktopWallpaper() {
         guard FileManager.default.fileExists(atPath: webPrimaryCapturePath) else { return }
+        if #available(macOS 26.0, *), VideoWallpaperManager.shared.isLockScreenEnabled {
+            print("[WebRendererBridge] 🔒 动态锁屏已启用，跳过 Web 捕获静态桌面写入")
+            return
+        }
+
         desktopCaptureSlot = 1 - desktopCaptureSlot
         let dstPath = desktopCaptureSlot == 0 ? webDeskCapturePath0 : webDeskCapturePath1
         let src = URL(fileURLWithPath: webPrimaryCapturePath)

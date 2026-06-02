@@ -171,7 +171,7 @@ struct GuessYouLikeCardView: View {
     private var coverImage: some View {
         if let url = URL(string: item.imageURL), !item.imageURL.isEmpty {
             KFImage(url)
-                .cancelOnDisappear(true)
+                .memoryCacheExpiration(.seconds(300))
                 .placeholder { Color.black.opacity(0.3) }
                 .fade(duration: 0.2)
                 .resizable()

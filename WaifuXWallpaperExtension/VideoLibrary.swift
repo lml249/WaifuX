@@ -70,10 +70,6 @@ final class VideoLibrary: Sendable {
 
     /// 获取视频文件 URL（通过 ID）
     func videoURL(for id: String) -> URL? {
-        if let cached = WallpaperState.shared.cachedVideoURL,
-           FileManager.default.fileExists(atPath: cached.path) {
-            return cached
-        }
         if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
             let videoDir = container.appendingPathComponent("WallpaperVideos")
             let candidates = ["\(id).mp4", "\(id).mov", "\(id).m4v"]
@@ -174,7 +170,8 @@ final class VideoLibrary: Sendable {
 // MARK: - 查找函数
 
 func findVideoURL(videoID: String? = nil) -> URL? {
-    if let cached = WallpaperState.shared.cachedVideoURL,
+    if videoID == nil,
+       let cached = WallpaperState.shared.cachedVideoURL,
        FileManager.default.fileExists(atPath: cached.path) {
         return cached
     }
@@ -214,6 +211,42 @@ func findVideoURL(videoID: String? = nil) -> URL? {
     return nil
 }
 
+func findImageURL(sourceID: String? = nil) -> URL? {
+    if sourceID == nil,
+       let cached = WallpaperState.shared.cachedImageURL,
+       FileManager.default.fileExists(atPath: cached.path) {
+        return cached
+    }
+
+    if let sourceID, !sourceID.isEmpty {
+        if let path = UnixSocketClient.shared.fetchVideoPathSync(for: sourceID) {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                WallpaperState.shared.cachedImageURL = url
+                return url
+            }
+        }
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+            let imageDir = container.appendingPathComponent("WallpaperImages")
+            for ext in ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"] {
+                let url = imageDir.appendingPathComponent("\(sourceID).\(ext)")
+                if FileManager.default.fileExists(atPath: url.path) {
+                    WallpaperState.shared.cachedImageURL = url
+                    return url
+                }
+            }
+        }
+    }
+
+    if sourceID == nil,
+       let mirrored = currentMirroringImageURL() {
+        WallpaperState.shared.cachedImageURL = mirrored
+        return mirrored
+    }
+
+    return nil
+}
+
 private func currentMirroringSourceURL() -> URL? {
     struct MirroringPrefs: Decodable {
         let currentVideoPath: String?
@@ -233,6 +266,30 @@ private func currentMirroringSourceURL() -> URL? {
     let url = URL(fileURLWithPath: path)
     guard FileManager.default.fileExists(atPath: url.path) else {
         extLog("[VideoLibrary] ⚠️ prefs currentVideoPath 不存在: \(path)")
+        return nil
+    }
+    return url
+}
+
+private func currentMirroringImageURL() -> URL? {
+    struct MirroringPrefs: Decodable {
+        let currentImagePath: String?
+    }
+
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+        return nil
+    }
+    let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+    guard let data = try? Data(contentsOf: prefsURL),
+          let prefs = try? JSONDecoder().decode(MirroringPrefs.self, from: data),
+          let path = prefs.currentImagePath,
+          !path.isEmpty else {
+        return nil
+    }
+
+    let url = URL(fileURLWithPath: path)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        extLog("[VideoLibrary] ⚠️ prefs currentImagePath 不存在: \(path)")
         return nil
     }
     return url

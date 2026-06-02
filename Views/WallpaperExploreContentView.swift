@@ -66,7 +66,10 @@ struct WallpaperExploreContentView: View {
     @State private var sentinelDebounceTask: DispatchWorkItem?
 
     /// 缓存筛选后的列表，避免每次 body 重绘时对 `wallpapers` 全表过滤（Wallhaven 分类）
+    /// 使用 @StateObject 包装容器避免值语义触发不必要的 body 重建
     @State private var visibleWallpapers: [Wallpaper] = []
+    /// 防止重复设置同一个 visibleWallpapers 值触发不必要重建
+    @State private var lastVisibleIDs: Set<Wallpaper.ID> = []
 
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -1010,14 +1013,18 @@ struct WallpaperExploreContentView: View {
     }
 
     private func recomputeVisibleWallpapers() {
-        let oldIDs = visibleWallpapers.map(\.id)
         let newVisible: [Wallpaper]
         if viewModel.currentSourceSupportsWallhavenCategories {
             newVisible = viewModel.wallpapers.filter { matchesCategory($0, category: category) }
         } else {
             newVisible = viewModel.wallpapers
         }
-        visibleWallpapers = newVisible
+        // 仅当内容真正变化时才赋值，避免触发不必要的 body 重建
+        let newIDs = Set(newVisible.map(\.id))
+        if newIDs != lastVisibleIDs {
+            lastVisibleIDs = newIDs
+            visibleWallpapers = newVisible
+        }
     }
 
     private func prepareForFeedReplacement() {

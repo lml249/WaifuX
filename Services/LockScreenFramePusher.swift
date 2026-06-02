@@ -19,8 +19,15 @@ final class LockScreenFramePusher {
     func startPushing(displayID: UInt32, videoURL: URL, surfaceIDs: [IOSurfaceID]) {
         let oldSession = sessionsLock.withLock { sessions -> Session? in
             let old = sessions[displayID]
+            if old?.matches(videoURL: videoURL, surfaceIDs: surfaceIDs) == true {
+                return nil
+            }
             sessions.removeValue(forKey: displayID)
             return old
+        }
+        if oldSession == nil, isPushing(displayID: displayID) {
+            os_log(.debug, log: Session.sessionLog, "[FramePusher] 已在推送，跳过重复启动 display=%{public}u video=%{public}@", displayID, videoURL.lastPathComponent)
+            return
         }
         oldSession?.stop()
         let session = Session(displayID: displayID, videoURL: videoURL, surfaceIDs: surfaceIDs)
@@ -79,6 +86,10 @@ extension LockScreenFramePusher {
             self.displayID = displayID
             self.videoURL = videoURL
             self.surfaceIDs = surfaceIDs
+        }
+
+        fileprivate func matches(videoURL: URL, surfaceIDs: [IOSurfaceID]) -> Bool {
+            self.videoURL == videoURL && self.surfaceIDs == surfaceIDs && isRunning
         }
 
         fileprivate func start() {

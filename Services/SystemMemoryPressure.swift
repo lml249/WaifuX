@@ -24,9 +24,9 @@ final class ForegroundPrefetchManager {
             urls: urls,
             options: options,
             completionHandler: { [weak self] _, _, _ in
-            Task { @MainActor in
-                self?.finish(token)
-            }
+                DispatchQueue.main.async {
+                    self?.finish(token)
+                }
         })
 
         activePrefetchers[token] = prefetcher
