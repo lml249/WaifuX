@@ -368,8 +368,12 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                         }
                         extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到视频: \(videoID)")
                     } else if let active = WallpaperState.shared.activeContext(for: displayID) {
-                        let rootLayer = active.rootLayer
-                        Task {
+                        // handleSocketCommand 始终在主线程调用，rootLayer 在此之后
+                        // 不会被其他线程修改，使用 nonisolated(unsafe) 绕过严格的 Sendable 检查。
+                        nonisolated(unsafe) let rootLayer = active.rootLayer
+                        // ⚠️ 必须 @MainActor：AVSampleBufferDisplayLayer 的创建和添加到 rootLayer
+                        // 需要在主线程执行，否则视频不会动画（displayLayer 无帧输出）。
+                        Task { @MainActor in
                             do {
                                 rootLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
                                 let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: url)

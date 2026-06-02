@@ -406,6 +406,64 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         wallpaperIDString: String?,
         doReply: @escaping @Sendable (String) -> Void
     ) async {
+        // 先读取 App 写入的共享 prefs，确定上次设置的壁纸类型。
+        // findImageURL(sourceID:) 会通过 Socket 查 localDecodeVideoLock 中残留的旧注册，
+        // 导致切换壁纸后扩展冷启动仍然渲染旧内容。直接读 prefs 才能反映 App 的最后意图。
+        if let videoURL = prefsVideoURL() {
+            do {
+                let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: videoURL)
+                let activeCtx = ActiveWallpaper(
+                    caContext: caContext,
+                    rootLayer: rootLayer,
+                    renderer: renderer,
+                    displayID: displayID,
+                    videoID: instanceID
+                )
+                let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
+                existing?.renderer?.stop()
+                renderer.start()
+                writeSnapshotCacheIfPossible(videoURL: videoURL, videoID: instanceID, rootLayer: rootLayer)
+                WallpaperPrefs.shared.setActive(true)
+                extLog("  [Acquire] ✅ 本地回退渲染已启动 display=\(displayID) video=\(videoURL.lastPathComponent)")
+                doReply("local video fallback")
+            } catch {
+                extLog("  [Acquire] ❌ 本地回退视频渲染失败: \(error.localizedDescription)")
+                // 视频播放失败，尝试回退到 prefs 中指定的静态图
+                if let imageURL = prefsImageURL() {
+                    renderStaticImage(
+                        imageURL: imageURL,
+                        displayID: displayID,
+                        instanceID: instanceID,
+                        rootLayer: rootLayer,
+                        caContext: caContext,
+                        contextId: contextId,
+                        wallpaperIDString: wallpaperIDString,
+                        doReply: doReply
+                    )
+                } else {
+                    WallpaperPrefs.shared.setActive(true)
+                    doReply("video failed, no image fallback")
+                }
+            }
+            return
+        }
+
+        // prefs 中 currentVideoPath 未设置 → 检查静态图
+        if let imageURL = prefsImageURL() {
+            renderStaticImage(
+                imageURL: imageURL,
+                displayID: displayID,
+                instanceID: instanceID,
+                rootLayer: rootLayer,
+                caContext: caContext,
+                contextId: contextId,
+                wallpaperIDString: wallpaperIDString,
+                doReply: doReply
+            )
+            return
+        }
+
+        // prefs 无有效设置 → 最后的回退：查 findImageURL（兼容旧状态）
         if let imageURL = findImageURL(sourceID: instanceID) {
             renderStaticImage(
                 imageURL: imageURL,
@@ -420,34 +478,55 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        guard let videoURL = findVideoURL(videoID: instanceID) ?? findVideoURL() else {
-            extLog("  [Acquire] ❌ 本地回退失败：未找到可播放视频")
-            WallpaperPrefs.shared.setActive(true)
-            doReply("fallback no video")
-            return
-        }
+        extLog("  [Acquire] ❌ 本地回退失败：未找到可播放视频或图片")
+        WallpaperPrefs.shared.setActive(true)
+        doReply("fallback no resource")
+    }
 
-        do {
-            let renderer = try await VideoRenderer.create(rootLayer: rootLayer, videoURL: videoURL)
-            let activeCtx = ActiveWallpaper(
-                caContext: caContext,
-                rootLayer: rootLayer,
-                renderer: renderer,
-                displayID: displayID,
-                videoID: instanceID
-            )
-            let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
-            existing?.renderer?.stop()
-            renderer.start()
-            writeSnapshotCacheIfPossible(videoURL: videoURL, videoID: instanceID, rootLayer: rootLayer)
-            WallpaperPrefs.shared.setActive(true)
-            extLog("  [Acquire] ✅ 本地回退渲染已启动 display=\(displayID) video=\(videoURL.lastPathComponent)")
-            doReply("local video fallback")
-        } catch {
-            extLog("  [Acquire] ❌ 本地回退渲染失败: \(error.localizedDescription)")
-            WallpaperPrefs.shared.setActive(true)
-            doReply("fallback failed")
+    /// 从共享 prefs 读取 currentVideoPath，返回可播放的视频 URL，或 nil。
+    private static func prefsVideoURL() -> URL? {
+        struct MirroringPrefs: Decodable {
+            let currentVideoPath: String?
         }
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+            return nil
+        }
+        let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+        guard let data = try? Data(contentsOf: prefsURL),
+              let prefs = try? JSONDecoder().decode(MirroringPrefs.self, from: data),
+              let path = prefs.currentVideoPath,
+              !path.isEmpty else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            extLog("[startLocalVideoFallback] ⚠️ prefs currentVideoPath 不存在: \(path)")
+            return nil
+        }
+        return url
+    }
+
+    /// 从共享 prefs 读取 currentImagePath，返回可显示的图片 URL，或 nil。
+    private static func prefsImageURL() -> URL? {
+        struct MirroringPrefs: Decodable {
+            let currentImagePath: String?
+        }
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+            return nil
+        }
+        let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
+        guard let data = try? Data(contentsOf: prefsURL),
+              let prefs = try? JSONDecoder().decode(MirroringPrefs.self, from: data),
+              let path = prefs.currentImagePath,
+              !path.isEmpty else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            extLog("[startLocalVideoFallback] ⚠️ prefs currentImagePath 不存在: \(path)")
+            return nil
+        }
+        return url
     }
 
     static func writeSnapshotCacheIfPossible(videoURL: URL, videoID: String, rootLayer: CALayer) {
