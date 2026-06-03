@@ -49,12 +49,17 @@ class AnimeViewModel: ObservableObject {
     private var preloadedTotal: Int = 0
     private var isPreloaded = false
 
+    /// 递增计数器，用于防止旧请求的结果覆盖新请求
+    private var fetchGeneration = 0
+
     // Bangumi 服务
     private let bangumiService = BangumiService.shared
 
     // MARK: - 初始化
 
     func loadInitialData() async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
         isLoading = true
         defer { isLoading = false }
 
@@ -87,6 +92,12 @@ class AnimeViewModel: ObservableObject {
         self.availableRules = rules
         print("[AnimeViewModel] 详情页可用规则: \(self.availableRules.count) 个")
 
+        // 如果在加载规则期间用户触发了新的搜索/标签/分类切换，跳过本次加载
+        guard gen == fetchGeneration else {
+            print("[AnimeViewModel] loadInitialData skipped (superseded by newer action)")
+            return
+        }
+
         // 加载列表页数据 (使用 Bangumi)
         await fetchPopular()
     }
@@ -94,6 +105,9 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 搜索 (使用 Bangumi)
 
     func search() async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
+
         guard !searchText.isEmpty else {
             await fetchPopular()
             return
@@ -117,15 +131,18 @@ class AnimeViewModel: ObservableObject {
                 offset: 0
             )
 
-            await MainActor.run {
-                self.animeItems = items.map { $0.toAnimeSearchResult() }
-                self.featuredItem = self.animeItems.first
-                // 修复：基于总数判断是否还有更多页
-                let totalCount = total ?? 0
-                let loadedCount = self.animeItems.count
-                self.hasMorePages = loadedCount < totalCount
-                print("[AnimeViewModel] Search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
+            guard gen == fetchGeneration else {
+                print("[AnimeViewModel] Search discarded (stale gen=\(gen))")
+                return
             }
+
+            self.animeItems = items.map { $0.toAnimeSearchResult() }
+            self.featuredItem = self.animeItems.first
+            // 修复：基于总数判断是否还有更多页
+            let totalCount = total ?? 0
+            let loadedCount = self.animeItems.count
+            self.hasMorePages = loadedCount < totalCount
+            print("[AnimeViewModel] Search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
 
             print("[AnimeViewModel] Bangumi search found \(items.count) results for '\(searchText)'")
         } catch {
@@ -140,7 +157,9 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 按标签搜索 (使用中文标签名)
 
     func searchByTagName(_ tagName: String) async {
-        print("[AnimeViewModel] Starting tag search for: \(tagName)")
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
+        print("[AnimeViewModel] Starting tag search for: \(tagName) (gen=\(gen))")
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -159,18 +178,21 @@ class AnimeViewModel: ObservableObject {
                 offset: 0
             )
 
+            guard gen == fetchGeneration else {
+                print("[AnimeViewModel] Tag search discarded (stale gen=\(gen), current=\(fetchGeneration))")
+                return
+            }
+
             print("[AnimeViewModel] API returned \(items.count) items for tag '\(tagName)'")
 
-            await MainActor.run {
-                let newItems = items.map { $0.toAnimeSearchResult() }
-                self.animeItems = newItems
-                self.featuredItem = newItems.first
-                // 修复：基于总数判断是否还有更多页
-                let totalCount = total ?? 0
-                let loadedCount = newItems.count
-                self.hasMorePages = loadedCount < totalCount
-                print("[AnimeViewModel] Tag search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
-            }
+            let newItems = items.map { $0.toAnimeSearchResult() }
+            self.animeItems = newItems
+            self.featuredItem = newItems.first
+            // 修复：基于总数判断是否还有更多页
+            let totalCount = total ?? 0
+            let loadedCount = newItems.count
+            self.hasMorePages = loadedCount < totalCount
+            print("[AnimeViewModel] Tag search loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
         } catch {
             print("[AnimeViewModel] Bangumi tag search failed: \(error)")
             errorMessage = error.localizedDescription
@@ -183,6 +205,8 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 获取热门 (使用 Bangumi)
 
     func fetchPopular(keyword: AnimeHotTag? = nil) async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -200,15 +224,18 @@ class AnimeViewModel: ObservableObject {
                 offset: 0
             )
 
-            await MainActor.run {
-                self.animeItems = items.map { $0.toAnimeSearchResult() }
-                self.featuredItem = self.animeItems.first
-                // 修复：基于总数判断是否还有更多页
-                let totalCount = total ?? 0
-                let loadedCount = self.animeItems.count
-                self.hasMorePages = loadedCount < totalCount
-                print("[AnimeViewModel] Bangumi trending loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
+            guard gen == fetchGeneration else {
+                print("[AnimeViewModel] fetchPopular discarded (stale gen=\(gen))")
+                return
             }
+
+            self.animeItems = items.map { $0.toAnimeSearchResult() }
+            self.featuredItem = self.animeItems.first
+            // 修复：基于总数判断是否还有更多页
+            let totalCount = total ?? 0
+            let loadedCount = self.animeItems.count
+            self.hasMorePages = loadedCount < totalCount
+            print("[AnimeViewModel] Bangumi trending loaded \(loadedCount) items, total: \(totalCount), hasMorePages: \(self.hasMorePages)")
         } catch {
             print("[AnimeViewModel] Bangumi trending failed: \(error)")
             errorMessage = error.localizedDescription
@@ -218,6 +245,8 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 按分类获取
 
     func fetchByCategory(_ category: AnimeCategory) async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
         selectedCategory = category
 
         switch category {
@@ -235,6 +264,8 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 获取高分动漫
 
     private func fetchTopRated() async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -252,20 +283,23 @@ class AnimeViewModel: ObservableObject {
                 offset: 0
             )
 
+            guard gen == fetchGeneration else {
+                print("[AnimeViewModel] fetchTopRated discarded (stale gen=\(gen))")
+                return
+            }
+
             // 过滤并排序获取高评分动漫
             let sortedItems = items
                 .filter { ($0.rating?.score ?? 0) > 0 }
                 .sorted { ($0.rating?.score ?? 0) > ($1.rating?.score ?? 0) }
                 .prefix(pageSize)  // 只取前 pageSize 个
 
-            await MainActor.run {
-                self.animeItems = Array(sortedItems).map { $0.toAnimeSearchResult() }
-                self.featuredItem = self.animeItems.first
-                // 修复：基于总数判断是否还有更多页
-                let totalCount = total ?? 0
-                let loadedCount = self.animeItems.count
-                self.hasMorePages = loadedCount < totalCount
-            }
+            self.animeItems = Array(sortedItems).map { $0.toAnimeSearchResult() }
+            self.featuredItem = self.animeItems.first
+            // 修复：基于总数判断是否还有更多页
+            let totalCount = total ?? 0
+            let loadedCount = self.animeItems.count
+            self.hasMorePages = loadedCount < totalCount
 
             print("[AnimeViewModel] Top rated loaded \(sortedItems.count) items, hasMorePages: \(self.hasMorePages)")
         } catch {
@@ -277,6 +311,8 @@ class AnimeViewModel: ObservableObject {
     // MARK: - 获取新番
 
     private func fetchNewArrivals() async {
+        let gen = fetchGeneration + 1
+        fetchGeneration = gen
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -297,14 +333,17 @@ class AnimeViewModel: ObservableObject {
                 offset: 0
             )
 
-            await MainActor.run {
-                self.animeItems = items.map { $0.toAnimeSearchResult() }
-                self.featuredItem = self.animeItems.first
-                // 修复：基于总数判断是否还有更多页
-                let totalCount = total ?? 0
-                let loadedCount = self.animeItems.count
-                self.hasMorePages = loadedCount < totalCount
+            guard gen == fetchGeneration else {
+                print("[AnimeViewModel] fetchNewArrivals discarded (stale gen=\(gen))")
+                return
             }
+
+            self.animeItems = items.map { $0.toAnimeSearchResult() }
+            self.featuredItem = self.animeItems.first
+            // 修复：基于总数判断是否还有更多页
+            let totalCount = total ?? 0
+            let loadedCount = self.animeItems.count
+            self.hasMorePages = loadedCount < totalCount
 
             print("[AnimeViewModel] New arrivals loaded \(items.count) items, hasMorePages: \(self.hasMorePages)")
         } catch {

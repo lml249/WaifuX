@@ -107,27 +107,38 @@ jobs:
                   echo "=== 证书列表 ==="
                   security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
-                  # 用 xcodebuild + Developer ID 手动签名扩展
-                  echo "🔨 签名扩展..."
-                  xcodebuild -project WaifuX.xcodeproj \
+                  # 先无签名构建扩展，再用 codesign 写入应用组 entitlement。
+                  # Developer ID + App Groups 交给 Xcode 签名会要求 provisioning profile。
+                  echo "🔨 构建扩展..."
+                  EXT_ENTITLEMENTS="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
+                  EXT_BUILD_LOG="$RUNNER_TEMP/extension-build.log"
+                  if ! xcodebuild -project WaifuX.xcodeproj \
                     -target WaifuXWallpaperExtension \
                     -configuration Release \
-                    CODE_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" \
-                    DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-                    CODE_SIGN_STYLE=Manual \
-                    ENABLE_HARDENED_RUNTIME=YES \
-                    OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
-                    clean build 2>&1 | tail -30
+                    CODE_SIGNING_ALLOWED=NO \
+                    clean build > "$EXT_BUILD_LOG" 2>&1; then
+                    tail -80 "$EXT_BUILD_LOG"
+                    exit 1
+                  fi
+                  tail -30 "$EXT_BUILD_LOG"
 
                   # 找到签名后的 .appex 并复制到仓库根目录
                   BUILT_APPEX=$(find build ~/Library/Developer/Xcode/DerivedData \
                     \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
                     -type d -print 2>/dev/null | head -1)
                   if [[ -n "$BUILT_APPEX" && -d "$BUILT_APPEX" ]]; then
+                    echo "🔏 签名扩展..."
+                    codesign --force --timestamp --options runtime --entitlements "$EXT_ENTITLEMENTS" -s "$APPLE_SIGNING_IDENTITY" "$BUILT_APPEX"
+                    rm -rf ./WaifuXWallpaperExtension.appex
                     cp -R "$BUILT_APPEX" ./WaifuXWallpaperExtension.appex
                     echo "✅ 扩展签名成功"
                     echo "=== 验证 entitlements ==="
-                    codesign -d --entitlements - ./WaifuXWallpaperExtension.appex 2>/dev/null | head -20
+                    ENT_CHECK=$(codesign -d --entitlements - ./WaifuXWallpaperExtension.appex 2>/dev/null || true)
+                    echo "$ENT_CHECK" | head -20
+                    if ! echo "$ENT_CHECK" | grep -q "com.apple.security.application-groups"; then
+                      echo "❌ 预签名扩展缺少 application-groups entitlement"
+                      exit 1
+                    fi
                   else
                     echo "❌ xcodebuild 未产出 .appex"
                     exit 1
@@ -204,33 +215,36 @@ jobs:
                     # 若不存在则尝试 xcodebuild 重新签名。
                     if [[ "$f" == *.appex ]]; then
                       local pre_signed="WaifuXWallpaperExtension.appex"
-                      if [[ -f "$pre_signed" ]]; then
+                      if [[ -d "$pre_signed" ]]; then
                         echo "  Using pre-signed extension: $pre_signed"
+                        rm -rf "$f"
                         cp -R "$pre_signed" "$f"
                         echo "  ✅ $(basename "$f") (pre-signed)"
                       else
                         echo "  Signing extension via xcodebuild: $(basename "$f")"
-                        xcodebuild -project WaifuX.xcodeproj \
+                        local ext_entitlements="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
+                        local ext_build_log="$RUNNER_TEMP/embedded-extension-build.log"
+                        if ! xcodebuild -project WaifuX.xcodeproj \
                           -target WaifuXWallpaperExtension \
                           -configuration Release \
-                          CODE_SIGN_IDENTITY="${{ vars.APPLE_SIGNING_IDENTITY }}" \
-                          DEVELOPMENT_TEAM="${{ vars.APPLE_TEAM_ID }}" \
-                          CODE_SIGN_ENTITLEMENTS="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements" \
-                          ENABLE_HARDENED_RUNTIME=YES \
-                          CODE_SIGN_STYLE=Manual \
-                          OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
-                          clean build 2>&1 | tail -20
+                          CODE_SIGNING_ALLOWED=NO \
+                          clean build > "$ext_build_log" 2>&1; then
+                          tail -80 "$ext_build_log"
+                          exit 1
+                        fi
+                        tail -20 "$ext_build_log"
                         local built_appex
                         built_appex=$(find build ~/Library/Developer/Xcode/DerivedData \
                           \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
                           -type d -print 2>/dev/null | head -1)
                         if [[ -n "$built_appex" && -d "$built_appex" ]]; then
+                          rm -rf "$f"
                           cp -R "$built_appex" "$f"
+                          codesign --force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp --entitlements "$ext_entitlements" "$f"
                           echo "  ✅ $(basename "$f") (xcodebuild signed)"
                         else
                           echo "  ⚠️ xcodebuild did not produce .appex, falling back to codesign"
                           local SIGN_ARGS=(--force --sign "${{ vars.APPLE_SIGNING_IDENTITY }}" --options=runtime --timestamp)
-                          local ext_entitlements="WaifuXWallpaperExtension/WaifuXWallpaperExtension.entitlements"
                           if [[ -f "$ext_entitlements" ]]; then
                             SIGN_ARGS+=(--entitlements "$ext_entitlements")
                           fi

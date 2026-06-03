@@ -241,8 +241,8 @@ sign_exported_app() {
         codesign --force --options runtime --entitlements "$renderer_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
         codesign --force -s "$identity" "$code_path" 2>/dev/null || true
     elif [[ "$code_path" == *.appex ]]; then
-      # macOS 26: codesign --entitlements 对 .appex 不再生效。
-      # 优先使用仓库中预签名的 .appex（本地 xcodebuild 签名后提交）。
+      # Xcode 直接签带 App Groups 的 Developer ID 扩展会要求 provisioning profile。
+      # 因此优先使用 CI 预签名 .appex；缺失时先无签名构建，再用 codesign 写入 entitlements。
       local pre_signed="$PROJECT_DIR/WaifuXWallpaperExtension.appex"
       if [[ -d "$pre_signed" ]]; then
         echo "  使用预签名扩展: $(basename "$pre_signed")"
@@ -251,15 +251,16 @@ sign_exported_app() {
         echo "  ✅ $(basename "$code_path") (预签名)"
       elif [[ "$identity" != "-" ]]; then
         echo "  签名扩展 (xcodebuild): $(basename "$code_path")"
-        xcodebuild -project "$PROJECT_DIR/WaifuX.xcodeproj" \
+        local extension_build_log="$BUILD_DIR/extension-build.log"
+        if ! xcodebuild -project "$PROJECT_DIR/WaifuX.xcodeproj" \
           -target WaifuXWallpaperExtension \
           -configuration Release \
-          CODE_SIGN_IDENTITY="$identity" \
-          CODE_SIGN_ENTITLEMENTS="$extension_entitlements" \
-          ENABLE_HARDENED_RUNTIME=YES \
-          CODE_SIGN_STYLE=Manual \
-          OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
-          clean build 2>&1 | tail -20
+          CODE_SIGNING_ALLOWED=NO \
+          clean build > "$extension_build_log" 2>&1; then
+          tail -80 "$extension_build_log"
+          return 1
+        fi
+        tail -20 "$extension_build_log"
         local built_appex
         built_appex=$(find "$PROJECT_DIR/build" ~/Library/Developer/Xcode/DerivedData \
           \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
@@ -267,6 +268,8 @@ sign_exported_app() {
         if [[ -n "$built_appex" && -d "$built_appex" ]]; then
           rm -rf "$code_path"
           cp -R "$built_appex" "$code_path"
+          codesign --force --timestamp=none --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path" 2>/dev/null || \
+            codesign --force --options runtime --entitlements "$extension_entitlements" -s "$identity" "$code_path"
           echo "  ✅ $(basename "$code_path") (xcodebuild)"
         else
           echo "  ⚠️ xcodebuild 未产出 .appex，回退到 codesign"

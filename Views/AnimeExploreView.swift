@@ -559,6 +559,10 @@ struct AnimeExploreView: View {
             searchText = ""
             viewModel.searchText = ""
         }
+        // 确保 isTagSearchActive 被清理，防止 onChange(of: searchText) 未触发时标志位泄漏
+        DispatchQueue.main.async { [self] in
+            isTagSearchActive = false
+        }
         Task {
             await viewModel.fetchByCategory(category)
             await MainActor.run {
@@ -568,22 +572,23 @@ struct AnimeExploreView: View {
     }
 
     private func selectHotTag(_ tag: AnimeHotTag) {
+        // 与 selectCategory 一致：点击已选中的标签不做任何事，避免开关逻辑导致意外「清空」
+        guard selectedHotTag != tag else { return }
         prepareForFeedReplacement()
         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            let newTag = selectedHotTag == tag ? nil : tag
-            selectedHotTag = newTag
+            selectedHotTag = tag
             selectedCategory = .all
             isTagSearchActive = true
             searchTask?.cancel()
             searchText = ""
             viewModel.searchText = ""
         }
+        // 确保 isTagSearchActive 被清理，防止 onChange(of: searchText) 未触发时标志位泄漏
+        DispatchQueue.main.async { [self] in
+            isTagSearchActive = false
+        }
         Task {
-            if let tagToSearch = selectedHotTag {
-                await viewModel.searchByTagName(tagToSearch.displayName)
-            } else {
-                await viewModel.fetchPopular()
-            }
+            await viewModel.searchByTagName(tag.displayName)
             await MainActor.run {
                 syncAtmosphereIfNeeded()
             }
@@ -664,6 +669,7 @@ struct AnimeExploreView: View {
         selectedHotTag = nil
         selectedCategory = .all
         selectedSort = .newest
+        isTagSearchActive = false
         lastSyncedFirstAnimeID = nil
         loadMoreFailed = false
         viewModel.searchText = ""
