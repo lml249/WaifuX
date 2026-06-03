@@ -1,13 +1,15 @@
 import SwiftUI
 
 struct NewFolderSheet: View {
+    var title: String = t("new.folder")
+    var confirmTitle: String = t("create")
     @Binding var folderName: String
     let onConfirm: () -> Void
     let onCancel: () -> Void
     
     var body: some View {
         VStack(spacing: 20) {
-            Text(t("new.folder"))
+            Text(title)
                 .font(.system(size: 18, weight: .bold))
                 .foregroundStyle(.white)
             
@@ -22,7 +24,7 @@ struct NewFolderSheet: View {
                 Button(t("cancel"), action: onCancel)
                     .buttonStyle(.borderless)
                 
-                Button(t("create"), action: onConfirm)
+                Button(confirmTitle, action: onConfirm)
                     .buttonStyle(.borderedProminent)
                     .disabled(folderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

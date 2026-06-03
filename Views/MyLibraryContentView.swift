@@ -9,6 +9,7 @@ struct MyLibraryContentView: View {
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
     @ObservedObject private var folderStore = LibraryFolderStore.shared
+    @ObservedObject private var gridOrderStore = LibraryGridOrderStore.shared
     @ObservedObject private var folderLockService = FolderLockService.shared
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
@@ -57,6 +58,8 @@ struct MyLibraryContentView: View {
     // 新建文件夹
     @State private var showNewFolderSheet = false
     @State private var newFolderName = ""
+    @State private var renamingFolder: LibraryFolder?
+    @State private var renameFolderName = ""
 
     // 同步 Steam 订阅
     @State private var isSyncingSubscriptions = false
@@ -204,6 +207,10 @@ struct MyLibraryContentView: View {
         .onReceive(folderStore.$mediaFolders) { _ in
             updateMediaItems()
         }
+        .onReceive(gridOrderStore.$revision) { _ in
+            updateWallpaperItems()
+            updateMediaItems()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .appShouldReleaseForegroundMemory)) { _ in
             releaseForegroundMemory()
         }
@@ -238,6 +245,26 @@ struct MyLibraryContentView: View {
                 onCancel: {
                     newFolderName = ""
                     showNewFolderSheet = false
+                }
+            )
+        }
+        .sheet(item: $renamingFolder) { folder in
+            NewFolderSheet(
+                title: t("folder.rename"),
+                confirmTitle: t("rename"),
+                folderName: $renameFolderName,
+                onConfirm: {
+                    let name = renameFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty else { return }
+                    folderStore.renameFolder(id: folder.id, contentType: folder.contentType, newName: name)
+                    renameFolderName = ""
+                    renamingFolder = nil
+                    updateWallpaperItems()
+                    updateMediaItems()
+                },
+                onCancel: {
+                    renameFolderName = ""
+                    renamingFolder = nil
                 }
             )
         }
@@ -409,19 +436,27 @@ struct MyLibraryContentView: View {
                 batchDeleteToolbar(count: wallpaperItems.count + currentWallpaperFolders.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    // 文件夹
-                    ForEach(currentWallpaperFolders) { folder in
-                        wallpaperFolderCard(folder: folder, config: config)
-                    }
-                    // 壁纸卡片
-                    ForEach(wallpaperItems) { item in
-                        wallpaperGridItem(item: item, config: config)
-                            .onAppear {
-                                preloadNearbyWallpapers(around: item, config: config)
+                    ForEach(orderedWallpaperGridItems) { entry in
+                        wallpaperGridEntry(entry, config: config)
+                            .dropDestination(for: String.self) { strings, _ in
+                                handleGridReorderDrop(strings, before: entry.id)
                             }
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func wallpaperGridEntry(_ entry: LibraryGridEntry<AnyWallpaperItem>, config: LibraryGridConfig) -> some View {
+        switch entry {
+        case .folder(let folder):
+            wallpaperFolderCard(folder: folder, config: config)
+        case .item(let item):
+            wallpaperGridItem(item: item, config: config)
+                .onAppear {
+                    preloadNearbyWallpapers(around: item, config: config)
+                }
         }
     }
 
@@ -435,14 +470,20 @@ struct MyLibraryContentView: View {
             cardWidth: config.cardWidth,
             isEditing: isEditing,
             isUnlocked: isUnlocked,
+            dragPayload: dragPayload(for: "folder_\(folder.id)"),
             onTap: { handleFolderTap(folder) },
             onDrop: { ids in moveWallpapersToFolder(ids: ids, folderID: folder.id) },
             onDisband: {
                 folderStore.deleteFolder(id: folder.id, contentType: .wallpaper)
+                gridOrderStore.removeIDs(["folder_\(folder.id)"], from: currentGridOrderScope)
                 updateWallpaperItems()
             },
+            onRename: { startRenamingFolder(folder) },
             onToggleLock: {
                 folderStore.toggleFolderLock(id: folder.id, contentType: .wallpaper)
+            },
+            onRelock: {
+                folderLockService.lockFolder(folder.id)
             }
         )
     }
@@ -466,6 +507,7 @@ struct MyLibraryContentView: View {
     }
 
     private func moveWallpapersToFolder(ids: [String], folderID: String) {
+        gridOrderStore.removeIDs(Set(ids), from: currentGridOrderScope)
         for id in ids {
             folderStore.moveWallpaperToFolder(wallpaperID: id, folderID: folderID)
         }
@@ -505,6 +547,12 @@ struct MyLibraryContentView: View {
             wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX < $0.wallpaper.dimensionY }
         }
         refreshWallpaperFolderDisplay()
+    }
+
+    private var orderedWallpaperGridItems: [LibraryGridEntry<AnyWallpaperItem>] {
+        let entries = currentWallpaperFolders.map { LibraryGridEntry<AnyWallpaperItem>.folder($0) }
+            + wallpaperItems.map { LibraryGridEntry<AnyWallpaperItem>.item($0) }
+        return orderedGridEntries(entries)
     }
 
     private var currentWallpaperFolders: [LibraryFolder] {
@@ -549,6 +597,31 @@ struct MyLibraryContentView: View {
         refreshMediaFolderDisplay()
     }
 
+    private var orderedMediaGridItems: [LibraryGridEntry<AnyMediaItem>] {
+        let entries = currentMediaFolders.map { LibraryGridEntry<AnyMediaItem>.folder($0) }
+            + mediaItems.map { LibraryGridEntry<AnyMediaItem>.item($0) }
+        return orderedGridEntries(entries)
+    }
+
+    private func orderedGridEntries<Item>(_ entries: [LibraryGridEntry<Item>]) -> [LibraryGridEntry<Item>] {
+        let orderedIDs = gridOrderStore.orderedIDs(for: entries.map(\.id), scope: currentGridOrderScope)
+        let entryByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        return orderedIDs.compactMap { entryByID[$0] }
+    }
+
+    private var currentGridOrderScope: LibraryGridOrderScope {
+        LibraryGridOrderScope(
+            content: selectedContentType == .wallpaper ? .wallpaper : .media,
+            collection: selectedSubTab == .favorites ? .favorites : .downloads,
+            parentFolderID: selectedContentType == .wallpaper ? currentWallpaperFolderID : currentMediaFolderID
+        )
+    }
+
+    private func startRenamingFolder(_ folder: LibraryFolder) {
+        renameFolderName = folder.name
+        renamingFolder = folder
+    }
+
     @ViewBuilder
     private func wallpaperGridItem(item: AnyWallpaperItem, config: LibraryGridConfig) -> some View {
         let card = WallpaperEditCard(
@@ -565,6 +638,7 @@ struct MyLibraryContentView: View {
         .contextMenu {
             if currentWallpaperFolderID != nil {
                 Button {
+                    gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
                     folderStore.moveWallpaperToFolder(wallpaperID: item.id, folderID: nil)
                     updateWallpaperItems()
                 } label: {
@@ -607,19 +681,27 @@ struct MyLibraryContentView: View {
                 batchDeleteToolbar(count: mediaItems.count + currentMediaFolders.count)
 
                 LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    // 文件夹
-                    ForEach(currentMediaFolders) { folder in
-                        mediaFolderCard(folder: folder, config: config)
-                    }
-                    // 媒体卡片
-                    ForEach(mediaItems) { item in
-                        mediaGridItem(item: item, config: config)
-                            .onAppear {
-                                preloadNearbyMedia(around: item, config: config)
+                    ForEach(orderedMediaGridItems) { entry in
+                        mediaGridEntry(entry, config: config)
+                            .dropDestination(for: String.self) { strings, _ in
+                                handleGridReorderDrop(strings, before: entry.id)
                             }
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func mediaGridEntry(_ entry: LibraryGridEntry<AnyMediaItem>, config: LibraryGridConfig) -> some View {
+        switch entry {
+        case .folder(let folder):
+            mediaFolderCard(folder: folder, config: config)
+        case .item(let item):
+            mediaGridItem(item: item, config: config)
+                .onAppear {
+                    preloadNearbyMedia(around: item, config: config)
+                }
         }
     }
 
@@ -633,14 +715,20 @@ struct MyLibraryContentView: View {
             cardWidth: config.cardWidth,
             isEditing: isEditing,
             isUnlocked: isUnlocked,
+            dragPayload: dragPayload(for: "folder_\(folder.id)"),
             onTap: { handleFolderTap(folder) },
             onDrop: { ids in moveMediasToFolder(ids: ids, folderID: folder.id) },
             onDisband: {
                 folderStore.deleteFolder(id: folder.id, contentType: .media)
+                gridOrderStore.removeIDs(["folder_\(folder.id)"], from: currentGridOrderScope)
                 updateMediaItems()
             },
+            onRename: { startRenamingFolder(folder) },
             onToggleLock: {
                 folderStore.toggleFolderLock(id: folder.id, contentType: .media)
+            },
+            onRelock: {
+                folderLockService.lockFolder(folder.id)
             }
         )
     }
@@ -664,6 +752,7 @@ struct MyLibraryContentView: View {
     }
 
     private func moveMediasToFolder(ids: [String], folderID: String) {
+        gridOrderStore.removeIDs(Set(ids), from: currentGridOrderScope)
         for id in ids {
             folderStore.moveMediaToFolder(mediaID: id, folderID: folderID)
         }
@@ -697,6 +786,7 @@ struct MyLibraryContentView: View {
         .contextMenu {
             if currentMediaFolderID != nil {
                 Button {
+                    gridOrderStore.removeIDs([item.id], from: currentGridOrderScope)
                     folderStore.moveMediaToFolder(mediaID: item.id, folderID: nil)
                     updateMediaItems()
                 } label: {
@@ -709,7 +799,6 @@ struct MyLibraryContentView: View {
 
     private func dragPayload(for itemID: String) -> String {
         let selectedMovableIDs = selectedItems
-            .filter { !$0.hasPrefix("folder_") }
             .filter { currentItemIDs.contains($0) }
 
         guard selectedItems.contains(itemID), !selectedMovableIDs.isEmpty else {
@@ -717,6 +806,40 @@ struct MyLibraryContentView: View {
         }
 
         return "waifux:items:\(selectedMovableIDs.sorted().joined(separator: "\n"))"
+    }
+
+    private func handleGridReorderDrop(_ payloads: [String], before targetID: String) -> Bool {
+        let movingIDs = uniqueIDs(payloads.flatMap(parseDropPayload))
+            .filter { currentItemIDs.contains($0) }
+        guard !movingIDs.isEmpty else { return false }
+
+        gridOrderStore.reorder(
+            moving: movingIDs,
+            before: targetID,
+            availableIDs: currentItemIDs,
+            scope: currentGridOrderScope
+        )
+        updateWallpaperItems()
+        updateMediaItems()
+        return true
+    }
+
+    private func parseDropPayload(_ payload: String) -> [String] {
+        if payload.hasPrefix("waifux:items:") {
+            return String(payload.dropFirst(13))
+                .split(separator: "\n")
+                .map(String.init)
+                .filter { !$0.isEmpty }
+        }
+        if payload.hasPrefix("waifux:item:") {
+            return [String(payload.dropFirst(12))]
+        }
+        return []
+    }
+
+    private func uniqueIDs(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        return ids.filter { seen.insert($0).inserted }
     }
 
     // MARK: - Image Preloading
@@ -1692,19 +1815,16 @@ struct MyLibraryContentView: View {
     private var currentItemIDs: [String] {
         switch selectedContentType {
         case .wallpaper:
-            let folderIDs = currentWallpaperFolders.map { "folder_\($0.id)" }
-            let itemIDs = wallpaperItems.map(\.id)
-            return folderIDs + itemIDs
+            return orderedWallpaperGridItems.map(\.id)
         case .video:
-            let folderIDs = currentMediaFolders.map { "folder_\($0.id)" }
-            let itemIDs = currentMediaItems.map(\.id)
-            return folderIDs + itemIDs
+            return orderedMediaGridItems.map(\.id)
         case .anime:
             return currentAnimeItems.map(\.id)
         }
     }
 
     private func deleteSelectedItems() {
+        let removedOrderIDs = selectedItems
         // 分离文件夹 ID 和普通项目 ID
         let folderIDs = selectedItems.filter { $0.hasPrefix("folder_") }
         let itemIDs = selectedItems.filter { !$0.hasPrefix("folder_") }
@@ -1761,6 +1881,9 @@ struct MyLibraryContentView: View {
             Task {
                 await loadAnimeFavorites()
             }
+        }
+        if selectedContentType != .anime {
+            gridOrderStore.removeIDs(removedOrderIDs, from: currentGridOrderScope)
         }
         selectedItems.removeAll()
         isEditing = false
@@ -2692,6 +2815,20 @@ private struct AnyMediaItem: Identifiable {
         }
 
         return true
+    }
+}
+
+private enum LibraryGridEntry<Item: Identifiable>: Identifiable where Item.ID == String {
+    case folder(LibraryFolder)
+    case item(Item)
+
+    var id: String {
+        switch self {
+        case .folder(let folder):
+            return "folder_\(folder.id)"
+        case .item(let item):
+            return item.id
+        }
     }
 }
 

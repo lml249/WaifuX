@@ -65,10 +65,13 @@ struct LibraryFolderCard: View {
     let isEditing: Bool
     /// 文件夹是否已解锁（仅加密模式下有效）
     let isUnlocked: Bool
+    let dragPayload: String
     let onTap: () -> Void
     let onDrop: ([String]) -> Void
     let onDisband: () -> Void
+    let onRename: () -> Void
     let onToggleLock: (() -> Void)?
+    let onRelock: (() -> Void)?
 
     @State private var isHovered = false
     @State private var isDropTarget = false
@@ -93,15 +96,17 @@ struct LibraryFolderCard: View {
                         imageURLs: previewURLs,
                         size: CGSize(width: cardWidth, height: thumbnailHeight)
                     )
+                    .blur(radius: isLockedAndHidden ? 18 : 0)
+                    .scaleEffect(isLockedAndHidden ? 1.06 : 1)
+                    .saturation(isLockedAndHidden ? 0.82 : 1)
+                    .brightness(isLockedAndHidden ? -0.04 : 0)
 
-                    // 加密锁定覆盖层（厚毛玻璃）
                     if isLockedAndHidden {
                         LockedFolderOverlay(isUnlocked: false, iconSize: 28)
                     }
 
-                    // 加密文件夹解锁后，左下角显示锁定按钮可手动重新上锁
-                    if folder.isLocked && isUnlocked, let onToggleLock {
-                        unlockLockButton(onToggleLock: onToggleLock)
+                    if folder.isLocked && isUnlocked, let onRelock {
+                        relockButton(onRelock: onRelock)
                     }
                 }
                 .frame(width: cardWidth, height: thumbnailHeight)
@@ -110,18 +115,11 @@ struct LibraryFolderCard: View {
                 // 信息区域（与 WallpaperEditCard 完全一致的结构和高度）
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
-                        HStack(spacing: 6) {
-                            // 加密文件夹显示锁图标
-                            if folder.isLocked {
-                                FolderLockBadge(isLocked: true, isUnlocked: isUnlocked)
-                            }
-
-                            Text(folder.name)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.9))
-                                .lineLimit(1)
-                                .layoutPriority(1)
-                        }
+                        Text(folder.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(1)
+                            .layoutPriority(1)
 
                         Spacer(minLength: 12)
 
@@ -154,12 +152,23 @@ struct LibraryFolderCard: View {
         }
         .buttonStyle(.plain)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .draggable(dragPayload)
         .animation(.easeOut(duration: 0.16), value: isHovered)
         .animation(.easeInOut(duration: 0.15), value: isDropTarget)
         .throttledHover(interval: 0.05) { hovering in
             isHovered = hovering
         }
         .contextMenu {
+            Button(action: onRename) {
+                Label(t("folder.rename"), systemImage: "pencil")
+            }
+            if folder.isLocked, isUnlocked, let onRelock {
+                Button {
+                    onRelock()
+                } label: {
+                    Label(t("folder.relock"), systemImage: "lock.fill")
+                }
+            }
             if let onToggleLock {
                 Button {
                     onToggleLock()
@@ -200,15 +209,15 @@ struct LibraryFolderCard: View {
         }
     }
 
-    /// 加密文件夹解锁后左下角的锁定按钮
-    private func unlockLockButton(onToggleLock: @escaping () -> Void) -> some View {
+    /// 加密文件夹解锁后，允许只重新锁定本次会话，不改变加密配置。
+    private func relockButton(onRelock: @escaping () -> Void) -> some View {
         VStack {
             Spacer()
             HStack {
                 Button {
-                    onToggleLock()
+                    onRelock()
                 } label: {
-                    Image(systemName: "lock.open.fill")
+                    Image(systemName: "lock.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
                         .padding(8)
@@ -222,7 +231,7 @@ struct LibraryFolderCard: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .help("锁定文件夹")
+                .help(t("folder.relock"))
 
                 Spacer()
             }

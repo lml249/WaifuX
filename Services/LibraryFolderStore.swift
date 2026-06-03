@@ -159,3 +159,84 @@ final class LibraryFolderStore: ObservableObject {
         }
     }
 }
+
+// MARK: - 本地库网格排序
+
+enum LibraryGridContentKind: String, Codable, Hashable {
+    case wallpaper
+    case media
+}
+
+enum LibraryGridCollectionKind: String, Codable, Hashable {
+    case favorites
+    case downloads
+}
+
+struct LibraryGridOrderScope: Hashable {
+    let content: LibraryGridContentKind
+    let collection: LibraryGridCollectionKind
+    let parentFolderID: String?
+
+    var storageKey: String {
+        [
+            content.rawValue,
+            collection.rawValue,
+            parentFolderID ?? "root"
+        ].joined(separator: ".")
+    }
+}
+
+@MainActor
+final class LibraryGridOrderStore: ObservableObject {
+    static let shared = LibraryGridOrderStore()
+
+    @Published private(set) var revision = 0
+
+    private let defaults = UserDefaults.standard
+    private let orderKey = "library_grid_order_v1"
+    private var orders: [String: [String]] = [:]
+
+    private init() {
+        if let data = defaults.data(forKey: orderKey),
+           let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            orders = decoded
+        }
+    }
+
+    func orderedIDs(for ids: [String], scope: LibraryGridOrderScope) -> [String] {
+        let available = Set(ids)
+        let saved = orders[scope.storageKey] ?? []
+        let orderedSaved = saved.filter { available.contains($0) }
+        let newIDs = ids.filter { !orderedSaved.contains($0) }
+        return orderedSaved + newIDs
+    }
+
+    func reorder(moving movingIDs: [String], before targetID: String, availableIDs: [String], scope: LibraryGridOrderScope) {
+        let available = Set(availableIDs)
+        let moving = movingIDs.filter { available.contains($0) }
+        guard !moving.isEmpty, available.contains(targetID), !moving.contains(targetID) else { return }
+
+        var next = orderedIDs(for: availableIDs, scope: scope)
+        next.removeAll { moving.contains($0) }
+
+        let insertIndex = next.firstIndex(of: targetID) ?? next.endIndex
+        next.insert(contentsOf: moving, at: insertIndex)
+
+        orders[scope.storageKey] = next
+        persist()
+    }
+
+    func removeIDs(_ ids: Set<String>, from scope: LibraryGridOrderScope) {
+        guard !ids.isEmpty, var saved = orders[scope.storageKey] else { return }
+        saved.removeAll { ids.contains($0) }
+        orders[scope.storageKey] = saved
+        persist()
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(orders) {
+            defaults.set(data, forKey: orderKey)
+        }
+        revision += 1
+    }
+}
