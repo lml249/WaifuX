@@ -3,6 +3,7 @@ import AppKit
 import AVFoundation
 import CoreGraphics
 import QuartzCore
+import CoreAudio
 
 @MainActor
 final class VideoWallpaperManager: ObservableObject {
@@ -150,6 +151,12 @@ final class VideoWallpaperManager: ObservableObject {
     private let automaticSwitchTransitionDuration: TimeInterval = 0.28
     private let automaticSwitchReadyTimeout: TimeInterval = 1.2
 
+    // MARK: - 音频设备管理
+
+    /// 缓存 Built-in Speaker（或非蓝牙输出设备）的 UID，
+    /// 用于静音时将 AVPlayer 音频强制路由到此设备，防止 macOS 因检测到本 App 的音频会话而自动连接 AirPods。
+    private var cachedBuiltInOutputDeviceUID: String? = nil
+
     /// 持久化预览图存储目录（避免被系统清理）
     /// 注意：放在 WallHaven 目录下，与 Cache 分开，避免被清理缓存误删
     private var persistedPosterDirectory: URL {
@@ -278,23 +285,118 @@ final class VideoWallpaperManager: ObservableObject {
 
     // MARK: - Audio Session Management
 
-    /// AVAudioSession 是 iOS API，在 macOS 上不可用。
-    /// macOS 的音频混合由系统自动管理，无需 App 干预。
-    /// 此处保留空方法占位，便于未来切换到 CoreAudio 方案。
+    /// 获取系统 Built-in Speaker（或第一个非蓝牙输出设备）的 UID。
+    /// 用于静音时通过 `AVPlayer.audioOutputDeviceUniqueID` 将音频强制路由到该设备，
+    /// 使 macOS 不会因检测到本 App 的音频会话而自动连接 AirPods 等蓝牙设备。
+    private func findBuiltInOutputDeviceUID() -> String? {
+        if let cached = cachedBuiltInOutputDeviceUID { return cached }
 
-    /// 配置音频会话（macOS 无操作）
+        var propertySize: UInt32 = 0
+        var devicesProperty = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &devicesProperty,
+            0, nil,
+            &propertySize
+        ) == noErr, propertySize > 0 else { return nil }
+
+        let deviceCount = Int(propertySize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &devicesProperty,
+            0, nil,
+            &propertySize, &deviceIDs
+        ) == noErr else { return nil }
+
+        for deviceID in deviceIDs {
+            guard deviceID != kAudioObjectUnknown else { continue }
+
+            // 确保设备有输出能力
+            var outputStreamProperty = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var outputStreamSize: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(
+                deviceID,
+                &outputStreamProperty,
+                0, nil,
+                &outputStreamSize
+            ) == noErr, outputStreamSize > 0 else { continue }
+
+            // 获取设备 UID（CFStringRef）
+            var uidProperty = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceUID,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var uidRef: Unmanaged<CFString>?
+            var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            guard AudioObjectGetPropertyData(
+                deviceID,
+                &uidProperty,
+                0, nil,
+                &uidSize, &uidRef
+            ) == noErr, let retainedUID = uidRef?.takeRetainedValue() as String? else { continue }
+
+            let uid = retainedUID
+
+            // 优先选择 Built-In Speaker（非蓝牙设备）
+            if uid.localizedCaseInsensitiveContains("built") || uid.localizedCaseInsensitiveContains("speaker") {
+                cachedBuiltInOutputDeviceUID = uid
+                return uid
+            }
+
+            // 兜底：跳过蓝牙设备，选择第一个可用输出设备
+            if !uid.localizedCaseInsensitiveContains("bluetooth")
+                && !uid.localizedCaseInsensitiveContains("airpods")
+                && !uid.localizedCaseInsensitiveContains("beats") {
+                if cachedBuiltInOutputDeviceUID == nil {
+                    cachedBuiltInOutputDeviceUID = uid
+                }
+            }
+        }
+
+        return cachedBuiltInOutputDeviceUID
+    }
+
+    /// 配置音频会话：初始化时缓存 Built-in Speaker UID。
     private func configureAudioSession() {
-        // macOS: 系统自动管理音频路由与混合
+        // 预缓存内置扬声器 UID，便于后续静音时快速使用
+        _ = findBuiltInOutputDeviceUID()
     }
 
-    /// 根据静音状态更新音频（macOS 无操作）
+    /// 根据静音状态更新每个 AVPlayer 的音频输出设备路由：
+    /// - 静音时：将所有 AVPlayer 的音频强制路由到 Built-in Speaker（非蓝牙设备），
+    ///   使 macOS 不会因本 App 的音频会话而自动连接蓝牙耳机。
+    /// - 取消静音时：恢复为系统默认输出设备（`audioOutputDeviceUniqueID = nil`）。
     private func updateAudioSession() {
-        // macOS: 无需显式激活/停用会话
+        guard hasActiveVideoWallpaper else { return }
+
+        if isMuted {
+            let builtInUID = findBuiltInOutputDeviceUID()
+            for player in players.values {
+                player.audioOutputDeviceUniqueID = builtInUID
+            }
+        } else {
+            for player in players.values {
+                player.audioOutputDeviceUniqueID = nil
+            }
+        }
     }
 
-    /// 停用音频会话（macOS 无操作）
+    /// 停用音频会话：恢复所有 AVPlayer 的音频输出为系统默认，清理缓存。
     private func deactivateAudioSession() {
-        // macOS: 无需显式停用
+        for player in players.values {
+            player.audioOutputDeviceUniqueID = nil
+        }
     }
 
     // MARK: - macOS 26+ Extension State Monitoring
@@ -833,6 +935,8 @@ final class VideoWallpaperManager: ObservableObject {
             videoTargetScreenIDs = []
             videoTargetScreenFingerprints = []
             WallpaperEngineXBridge.shared.ensureStoppedForNonCLIWallpaper()
+            // 最后一块屏停止 → 停用音频会话，释放音频设备，防止 macOS 因本 App 残留音频会话而自动连接蓝牙设备
+            deactivateAudioSession()
         } else {
             lastAppliedScreenConfigurations = currentTargetScreenConfigurations()
         }
@@ -929,6 +1033,8 @@ final class VideoWallpaperManager: ObservableObject {
                     LockScreenWallpaperService.shared.clearMirroringSourceCache()
                 }
             }
+            // 停止所有本机视频壁纸 → 停用音频会话，释放音频设备，防止 macOS 因本 App 残留音频会话而自动连接蓝牙设备
+            deactivateAudioSession()
             return
         }
 
@@ -955,6 +1061,8 @@ final class VideoWallpaperManager: ObservableObject {
                 videoTargetScreenIDs = []
                 videoTargetScreenFingerprints = []
                 defaults.removeObject(forKey: stateKey)
+                // 最后一块屏停止 → 停用音频会话，释放音频设备，防止 macOS 因本 App 残留音频会话而自动连接蓝牙设备
+                deactivateAudioSession()
             }
             syncCurrentVideoURL()
             return

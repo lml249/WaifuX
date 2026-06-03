@@ -100,7 +100,7 @@ struct KonachanPuritySelection: OptionSet, Sendable {
 enum KonachanSorting: String, CaseIterable, Sendable {
     case dateAdded = "id"          // 默认按 ID（新旧）
     case score = "score"           // 高分排序
-    case favcount = "favcount"     // 收藏数排序
+    case tagcount = "tagcount" // 标签数排序
     case landscape = "landscape"   // 横屏优先
     case portrait = "portrait"     // 竖屏优先
     case random = "random"         // 随机
@@ -199,7 +199,7 @@ extension KonachanPost {
 
         return Wallpaper(
             id: "konachan-\(id)",
-            url: "https://konachan.com/post/show/\(id)",
+            url: "https://konachan.net/post/show/\(id)",
             shortUrl: nil,
             views: 0,
             favorites: score ?? 0,

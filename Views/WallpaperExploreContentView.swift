@@ -43,7 +43,8 @@ struct WallpaperExploreContentView: View {
     @State private var fourKSorting: FourKSortingOption = .latest
     @State private var konachanSorting: KonachanSorting = .dateAdded
     @State private var konachanCategory: KonachanService.KonachanCategory?
-    @State private var konachanHotTag: KonachanService.HotTag?
+    @State private var konachanHotTagName: String? = nil
+    @State private var konachanDynamicHotTags: [KonachanTag] = []
     @State private var hotTag: HotTag?
     @State private var searchText = ""
     @State private var isLoadingMore = false
@@ -390,21 +391,21 @@ struct WallpaperExploreContentView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(arcSettings.secondaryText.opacity(0.65))
 
-                ForEach(KonachanService.hotTags) { tag in
+                ForEach(konachanDynamicHotTags) { tag in
                     TagChip(
-                        title: tag.name,
-                        isSelected: konachanHotTag?.id == tag.id
+                        title: KonachanService.displayName(for: tag.name),
+                        isSelected: konachanHotTagName == tag.name
                     ) {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            if konachanHotTag?.id == tag.id {
-                                konachanHotTag = nil
+                            if konachanHotTagName == tag.name {
+                                konachanHotTagName = nil
                                 searchText = ""
                                 viewModel.searchQuery = ""
                             } else {
-                                konachanHotTag = tag
+                                konachanHotTagName = tag.name
                                 konachanCategory = nil
-                                searchText = tag.query
-                                viewModel.searchQuery = tag.query
+                                searchText = tag.name
+                                viewModel.searchQuery = tag.name
                             }
                             reloadData()
                         }
@@ -433,7 +434,7 @@ struct WallpaperExploreContentView: View {
                                 viewModel.searchQuery = ""
                             } else {
                                 konachanCategory = cat
-                                konachanHotTag = nil
+                                konachanHotTagName = nil
                                 searchText = cat.query
                                 viewModel.searchQuery = cat.query
                             }
@@ -488,20 +489,39 @@ struct WallpaperExploreContentView: View {
 
     private var searchRow: some View {
         HStack(spacing: 12) {
-            ExploreSearchBar(
-                text: $searchText,
-                placeholder: t("search.placeholder"),
-                tint: exploreAtmosphere.tint.primary,
-                onSubmit: submitSearch,
-                onClear: { searchText = ""; translationBridge.reset(); submitSearch() },
-                translatedText: translationBridge.translatedText,
-                isTranslating: translationBridge.isTranslating,
-                onDismissTranslation: {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        translationBridge.dismiss()
+            if WallpaperSourceManager.shared.activeSource == .konachan {
+                KonachanTagSearchField(
+                    text: $searchText,
+                    placeholder: t("search.placeholder"),
+                    tint: exploreAtmosphere.tint.primary,
+                    onSubmit: { tagName in
+                        hotTag = nil
+                        viewModel.searchQuery = tagName
+                        reloadData()
+                    },
+                    onClear: {
+                        searchText = ""
+                        viewModel.searchQuery = ""
+                        translationBridge.reset()
+                        reloadData()
                     }
-                }
-            )
+                )
+            } else {
+                ExploreSearchBar(
+                    text: $searchText,
+                    placeholder: t("search.placeholder"),
+                    tint: exploreAtmosphere.tint.primary,
+                    onSubmit: submitSearch,
+                    onClear: { searchText = ""; translationBridge.reset(); submitSearch() },
+                    translatedText: translationBridge.translatedText,
+                    isTranslating: translationBridge.isTranslating,
+                    onDismissTranslation: {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                            translationBridge.dismiss()
+                        }
+                    }
+                )
+            }
 
             WorkshopURLInputButton(tint: exploreAtmosphere.tint.primary) {
                 showWallpaperURLSheet = true
@@ -908,8 +928,9 @@ struct WallpaperExploreContentView: View {
         fourKCategory = nil
         konachanSorting = .dateAdded
         konachanCategory = nil
-        konachanHotTag = nil
+        konachanHotTagName = nil
         category = .all
+        loadKonachanHotTags()
         // 数据源切换时必须清空旧数据，避免新旧源内容混在一起显示
         viewModel.wallpapers.removeAll()
         reloadData()
@@ -968,6 +989,20 @@ struct WallpaperExploreContentView: View {
         AppLogger.info(.wallpaper, "Konachan 排序方式变化", metadata: ["排序": konachanSorting.rawValue])
         viewModel.selectedKonachanSorting = konachanSorting
         reloadData()
+    }
+
+    private func loadKonachanHotTags() {
+        guard WallpaperSourceManager.shared.activeSource == .konachan else { return }
+        Task {
+            do {
+                let tags = try await KonachanService.shared.fetchHotTags(limit: 6)
+                await MainActor.run {
+                    self.konachanDynamicHotTags = tags
+                }
+            } catch {
+                print("[KonachanHotTags] failed: \(error)")
+            }
+        }
     }
 
     private func triggerLoadMore() {
@@ -1540,7 +1575,7 @@ extension KonachanSorting: SortOptionProtocol {
         switch self {
         case .dateAdded: return t("sort.latest")
         case .score: return t("sort.toplist")
-        case .favcount: return t("sort.likes")
+        case .tagcount: return "Tags"
         case .landscape: return "Landscape"
         case .portrait: return "Portrait"
         case .random: return t("sort.random")

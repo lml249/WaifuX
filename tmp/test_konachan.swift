@@ -121,3 +121,125 @@ func runRequest(_ endpoint: Endpoint) async {
 for endpoint in endpoints {
     await runRequest(endpoint)
 }
+
+print("\n=== konachan.net pagination probe ===")
+for page in 1...8 {
+    let url = URL(string: "https://konachan.net/post.json?limit=24&page=\(page)&tags=rating%3As")!
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 20
+    request.setValue("WaifuX/1.0 KonachanAPIProbe", forHTTPHeaderField: "User-Agent")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    do {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        let posts = try JSONDecoder().decode([KonachanProbePost].self, from: data)
+        print("page=\(page) http=\(status) count=\(posts.count) first=\(posts.first?.id ?? -1) last=\(posts.last?.id ?? -1)")
+    } catch {
+        print("page=\(page) failed: \(error)")
+    }
+}
+
+struct KonachanProbePost: Decodable {
+    let id: Int
+}
+
+struct KonachanProbeTag: Decodable {
+    let id: Int
+    let name: String
+    let count: Int
+    let type: Int?
+}
+
+func makeKonachanNetURL(path: String, items: [URLQueryItem]) -> URL {
+    var components = URLComponents(string: "https://konachan.net")!
+    components.path = path
+    components.queryItems = items
+    return components.url!
+}
+
+func fetchJSON<T: Decodable>(_ type: T.Type, url: URL) async throws -> (Int, T) {
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 20
+    request.setValue("WaifuX/1.0 KonachanAPIProbe", forHTTPHeaderField: "User-Agent")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let (data, response) = try await URLSession.shared.data(for: request)
+    let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+    return (status, try JSONDecoder().decode(T.self, from: data))
+}
+
+let categoryQueries = [
+    "genshin_impact",
+    "honkai_star_rail",
+    "zenless_zone_zero",
+    "fate_grand_order",
+    "touhou",
+    "blue_archive",
+    "azur_lane",
+    "vocaloid",
+    "landscape",
+    "cyberpunk"
+]
+
+let hotTagQueries = [
+    "1girl",
+    "long_hair",
+    "school_uniform",
+    "swimsuit",
+    "glasses",
+    "smile"
+]
+
+print("\n=== konachan.net preset tag probe ===")
+for query in categoryQueries + hotTagQueries {
+    let postURL = makeKonachanNetURL(path: "/post.json", items: [
+        URLQueryItem(name: "limit", value: "1"),
+        URLQueryItem(name: "page", value: "1"),
+        URLQueryItem(name: "tags", value: "\(query) rating:s")
+    ])
+    let tagURL = makeKonachanNetURL(path: "/tag.json", items: [
+        URLQueryItem(name: "limit", value: "5"),
+        URLQueryItem(name: "page", value: "1"),
+        URLQueryItem(name: "name", value: query)
+    ])
+
+    do {
+        let (postStatus, posts) = try await fetchJSON([KonachanProbePost].self, url: postURL)
+        let (tagStatus, tags) = try await fetchJSON([KonachanProbeTag].self, url: tagURL)
+        let tagSummary = tags.map { "\($0.name)(\($0.count))" }.joined(separator: ", ")
+        print("query=\(query) posts_http=\(postStatus) posts=\(posts.count) tag_http=\(tagStatus) tags=[\(tagSummary)]")
+    } catch {
+        print("query=\(query) failed: \(error)")
+    }
+}
+
+print("\n=== konachan.net sorting probe ===")
+for order in ["score", "favcount", "landscape", "portrait", "random", "mpixels"] {
+    let url = makeKonachanNetURL(path: "/post.json", items: [
+        URLQueryItem(name: "limit", value: "3"),
+        URLQueryItem(name: "page", value: "1"),
+        URLQueryItem(name: "tags", value: "rating:s order:\(order)")
+    ])
+    do {
+        let (status, posts) = try await fetchJSON([KonachanProbePost].self, url: url)
+        print("order:\(order) http=\(status) count=\(posts.count) ids=\(posts.map { String($0.id) }.joined(separator: ","))")
+    } catch {
+        print("order:\(order) failed: \(error)")
+    }
+}
+
+print("\n=== konachan.net rating probe ===")
+for rating in ["s", "q", "e"] {
+    let url = makeKonachanNetURL(path: "/post.json", items: [
+        URLQueryItem(name: "limit", value: "3"),
+        URLQueryItem(name: "page", value: "1"),
+        URLQueryItem(name: "tags", value: "rating:\(rating)")
+    ])
+    do {
+        let (status, posts) = try await fetchJSON([KonachanProbePost].self, url: url)
+        print("rating:\(rating) http=\(status) count=\(posts.count) ids=\(posts.map { String($0.id) }.joined(separator: ","))")
+    } catch {
+        print("rating:\(rating) failed: \(error)")
+    }
+}

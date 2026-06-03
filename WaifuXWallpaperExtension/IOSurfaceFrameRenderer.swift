@@ -56,7 +56,7 @@ final class IOSurfaceFrameRenderer: @unchecked Sendable {
     /// 创建帧渲染器并预分配 IOSurface
     static func create(displayID: UInt32, rootLayer: CALayer, width: Int, height: Int) -> IOSurfaceFrameRenderer {
         let displayLayer = AVSampleBufferDisplayLayer()
-        displayLayer.videoGravity = .resizeAspectFill
+        displayLayer.videoGravity = .resize  // frame 已匹配显示尺寸，直接拉伸填满
         displayLayer.frame = rootLayer.bounds
         displayLayer.contentsScale = rootLayer.contentsScale
         rootLayer.addSublayer(displayLayer)

@@ -31,8 +31,7 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 预加载支持
     private var preloadTask: Task<Void, Never>?
-    private var preloadedWallpapers: [Wallpaper] = []
-    private var preloadedPage: Int = 0
+    private var preloadedResponse: WallpaperSearchResponse?
 
     // MARK: - 防抖搜索
     private var debounceTask: Task<Void, Never>?
@@ -527,8 +526,7 @@ class WallpaperViewModel: ObservableObject {
 
         // 重置预加载状态
         preloadTask?.cancel()
-        preloadedWallpapers = []
-        preloadedPage = 0
+        preloadedResponse = nil
 
         // 创建新的搜索任务
         searchTask = Task {
@@ -646,20 +644,12 @@ class WallpaperViewModel: ObservableObject {
                 let results: WallpaperSearchResponse
 
                 // 检查是否有预加载的数据
-                if preloadedPage == nextPage && !preloadedWallpapers.isEmpty {
-                    results = WallpaperSearchResponse(
-                        meta: .init(
-                            query: searchQuery,
-                            currentPage: nextPage,
-                            perPage: .int(24),
-                            total: preloadedWallpapers.count,
-                            lastPage: preloadedWallpapers.count >= 24 ? nextPage + 10 : nextPage,
-                            seed: currentRandomSeed
-                        ),
-                        data: preloadedWallpapers
-                    )
+                if let cached = preloadedResponse,
+                   cached.meta.currentPage == nextPage,
+                   !cached.data.isEmpty {
+                    results = cached
                     // 清空预加载数据
-                    preloadedWallpapers = []
+                    preloadedResponse = nil
                 } else {
                     // 正常加载
                     results = try await fetchWallpapers(query: searchQuery, page: nextPage)
@@ -714,9 +704,8 @@ class WallpaperViewModel: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // 存储预加载的数据
-                preloadedPage = nextPageToPreload
-                preloadedWallpapers = results.data
+                // 存储完整响应，避免丢失不同数据源自己的 perPage / lastPage 判断。
+                preloadedResponse = results
             } catch {
                 // 预加载失败静默忽略
             }
@@ -732,8 +721,7 @@ class WallpaperViewModel: ObservableObject {
         loadMoreTask?.cancel()
         debounceTask?.cancel()
         preloadTask?.cancel()
-        preloadedWallpapers.removeAll()
-        preloadedPage = 0
+        preloadedResponse = nil
         // 裁剪列表：仅保留最近 2 页（~48 条）
         if wallpapers.count > 48 {
             wallpapers = Array(wallpapers.suffix(48))
@@ -770,8 +758,7 @@ class WallpaperViewModel: ObservableObject {
         hasMorePages = true
         currentPage = 1
         currentRandomSeed = nil
-        preloadedWallpapers.removeAll()
-        preloadedPage = 0
+        preloadedResponse = nil
     }
 
     // MARK: - 图片预加载

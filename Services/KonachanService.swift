@@ -15,7 +15,8 @@ actor KonachanService {
     private let networkService = NetworkService.shared
 
     /// 基础 URL
-    private let baseURL = "https://konachan.com"
+    private let primaryBaseURL = "https://konachan.net"
+    private let fallbackBaseURL = "https://konachan.com"
 
     /// 请求限速：两次请求之间至少间隔的时间
     private let minimumRequestInterval: TimeInterval = 0.5
@@ -62,11 +63,23 @@ actor KonachanService {
             tags.append(sorting.orderTag)
         }
 
-        let tagsParam = tags.joined(separator: " ")
-
-        let urlString = "\(baseURL)/post.json?limit=\(perPage)&page=\(page)&tags=\(tagsParam.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
-
-        guard let url = URL(string: urlString) else {
+        guard let primaryURL = buildURL(
+            baseURL: primaryBaseURL,
+            path: "/post.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(perPage)"),
+                URLQueryItem(name: "page", value: "\(page)"),
+                URLQueryItem(name: "tags", value: tags.joined(separator: " "))
+            ]
+        ), let fallbackURL = buildURL(
+            baseURL: fallbackBaseURL,
+            path: "/post.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(perPage)"),
+                URLQueryItem(name: "page", value: "\(page)"),
+                URLQueryItem(name: "tags", value: tags.joined(separator: " "))
+            ]
+        ) else {
             throw NetworkError.invalidResponse
         }
 
@@ -75,7 +88,8 @@ actor KonachanService {
 
         let posts: [KonachanPost] = try await fetchWithFallback(
             [KonachanPost].self,
-            from: url
+            primaryURL: primaryURL,
+            fallbackURL: fallbackURL
         )
 
         // 映射为 Wallpaper
@@ -142,10 +156,23 @@ actor KonachanService {
             return []
         }
 
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let urlString = "\(baseURL)/tag.json?limit=\(limit)&page=1&name=\(encoded)"
-
-        guard let url = URL(string: urlString) else {
+        guard let primaryURL = buildURL(
+            baseURL: primaryBaseURL,
+            path: "/tag.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(limit)"),
+                URLQueryItem(name: "page", value: "1"),
+                URLQueryItem(name: "name", value: query)
+            ]
+        ), let fallbackURL = buildURL(
+            baseURL: fallbackBaseURL,
+            path: "/tag.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(limit)"),
+                URLQueryItem(name: "page", value: "1"),
+                URLQueryItem(name: "name", value: query)
+            ]
+        ) else {
             throw NetworkError.invalidResponse
         }
 
@@ -153,13 +180,45 @@ actor KonachanService {
 
         let tags: [KonachanTag] = try await fetchWithFallback(
             [KonachanTag].self,
-            from: url
+            primaryURL: primaryURL,
+            fallbackURL: fallbackURL
         )
 
         // 按 count 降序排序，热门标签在前
         return tags.sorted { $0.count > $1.count }
     }
 
+    /// 获取热门标签（按使用次数降序，仅 General 类型）
+    /// - Parameter limit: 返回数量，默认 6
+    func fetchHotTags(limit: Int = 6) async throws -> [KonachanTag] {
+        guard let primaryURL = buildURL(
+            baseURL: primaryBaseURL,
+            path: "/tag.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(limit)"),
+                URLQueryItem(name: "page", value: "1"),
+                URLQueryItem(name: "order", value: "count"),
+                URLQueryItem(name: "type", value: "0")
+            ]
+        ), let fallbackURL = buildURL(
+            baseURL: fallbackBaseURL,
+            path: "/tag.json",
+            queryItems: [
+                URLQueryItem(name: "limit", value: "\(limit)"),
+                URLQueryItem(name: "page", value: "1"),
+                URLQueryItem(name: "order", value: "count"),
+                URLQueryItem(name: "type", value: "0")
+            ]
+        ) else {
+            throw NetworkError.invalidResponse
+        }
+        await enforceRateLimit()
+        return try await fetchWithFallback(
+            [KonachanTag].self,
+            primaryURL: primaryURL,
+            fallbackURL: fallbackURL
+        )
+    }
     // MARK: - Private
 
     /// 默认请求头 — 使用真实 Safari UA + Referer 避免 403
@@ -201,28 +260,34 @@ actor KonachanService {
         lastRequestTime = Date()
     }
 
-    /// 带伪装和回退的请求方法：先使用浏览器伪装请求，403 时换简化头重试
+    private func buildURL(baseURL: String, path: String, queryItems: [URLQueryItem]) -> URL? {
+        guard var components = URLComponents(string: baseURL) else {
+            return nil
+        }
+        components.path = path
+        components.queryItems = queryItems
+        return components.url
+    }
+
+    /// 带域名回退的请求方法：优先使用 konachan.net，失败时再尝试 konachan.com。
     private func fetchWithFallback<T: Decodable & Sendable>(
         _ type: T.Type,
-        from url: URL
+        primaryURL: URL,
+        fallbackURL: URL
     ) async throws -> T {
         do {
             return try await networkService.fetch(
                 T.self,
-                from: url,
+                from: primaryURL,
                 headers: defaultHeaders
             )
-        } catch let error as NetworkError {
-            if case .httpError(403) = error {
-                // 403 时使用备用头重试一次
-                print("[KonachanService] 403 received, retrying with fallback headers...")
-                return try await networkService.fetch(
-                    T.self,
-                    from: url,
-                    headers: fallbackHeaders
-                )
-            }
-            throw error
+        } catch {
+            print("[KonachanService] Primary API failed (\(primaryURL.host ?? "unknown")): \(error). Retrying fallback...")
+            return try await networkService.fetch(
+                T.self,
+                from: fallbackURL,
+                headers: defaultHeaders
+            )
         }
     }
 }
@@ -241,12 +306,12 @@ extension KonachanService {
         var icon: String {
             switch id {
             case "genshin": return "sparkles"
-            case "hsr": return "star.fill"
+            case "honkai": return "star.fill"
             case "zzz": return "bolt.fill"
             case "fgo": return "shield.fill"
             case "touhou": return "cloud.fill"
             case "blue_archive": return "book.fill"
-            case "azur_lane": return "anchor.fill"
+            case "azur_lane": return "ferry.fill"
             case "vocaloid": return "music.mic"
             case "landscape": return "mountain.2.fill"
             case "cyberpunk": return "cpu.fill"
@@ -258,7 +323,7 @@ extension KonachanService {
         var accentColors: [String] {
             switch id {
             case "genshin": return ["4FC3F7", "29B6F6"]
-            case "hsr": return ["CE93D8", "AB47BC"]
+            case "honkai": return ["CE93D8", "AB47BC"]
             case "zzz": return ["FFE082", "FFA726"]
             case "fgo": return ["EF5350", "C62828"]
             case "touhou": return ["81D4FA", "4FC3F7"]
@@ -275,30 +340,58 @@ extension KonachanService {
     /// 分类列表（≈ 10 个，类似 4K 源的分类）
     static let categories: [KonachanCategory] = [
         KonachanCategory(id: "genshin", name: "原神", query: "genshin_impact"),
-        KonachanCategory(id: "hsr", name: "星穹铁道", query: "honkai_star_rail"),
+        KonachanCategory(id: "honkai", name: "崩坏", query: "honkai_impact"),
         KonachanCategory(id: "zzz", name: "绝区零", query: "zenless_zone_zero"),
-        KonachanCategory(id: "fgo", name: "Fate", query: "fate_grand_order"),
+        KonachanCategory(id: "fgo", name: "Fate", query: "fate_(series)"),
         KonachanCategory(id: "touhou", name: "东方", query: "touhou"),
         KonachanCategory(id: "blue_archive", name: "蔚蓝档案", query: "blue_archive"),
         KonachanCategory(id: "azur_lane", name: "碧蓝航线", query: "azur_lane"),
         KonachanCategory(id: "vocaloid", name: "VOCALOID", query: "vocaloid"),
         KonachanCategory(id: "landscape", name: "风景", query: "landscape"),
-        KonachanCategory(id: "cyberpunk", name: "赛博朋克", query: "cyberpunk"),
+        KonachanCategory(id: "cyberpunk", name: "赛博朋克", query: "cyberpunk_2077"),
     ]
 
-    /// 热门标签（仅少数，不换行展示）
-    struct HotTag: Identifiable, Hashable {
-        let id: String
-        let name: String
-        let query: String
+    /// 标签名 → 中文显示名映射。未收录的标签自动将下划线替换为空格。
+    private static let tagDisplayNames: [String: String] = [
+        "long_hair": "长发",
+        "blush": "脸红",
+        "short_hair": "短发",
+        "thighhighs": "过膝袜",
+        "brown_hair": "棕发",
+        "blonde_hair": "金发",
+        "black_hair": "黑发",
+        "blue_eyes": "蓝眼",
+        "red_eyes": "红眼",
+        "twintails": "双马尾",
+        "dress": "连衣裙",
+        "animal_ears": "兽耳",
+        "skirt": "短裙",
+        "school_uniform": "制服",
+        "swimsuit": "泳装",
+        "glasses": "眼镜",
+        "smile": "微笑",
+        "weapon": "武器",
+        "wings": "翅膀",
+        "hat": "帽子",
+        "sky": "天空",
+        "clouds": "云",
+        "water": "水",
+        "night": "夜晚",
+        "rain": "雨",
+        "snow": "雪",
+        "building": "建筑",
+        "city": "城市",
+        "tree": "树",
+        "maid": "女仆",
+        "bikini": "比基尼",
+        "kimono": "和服",
+        "armor": "铠甲",
+        "headphones": "耳机",
+    ]
+
+    /// 获取标签的中文显示名
+    static func displayName(for tagName: String) -> String {
+        if let localized = tagDisplayNames[tagName] { return localized }
+        return tagName.replacingOccurrences(of: "_", with: " ")
     }
-
-    static let hotTags: [HotTag] = [
-        HotTag(id: "1girl", name: "少女", query: "1girl"),
-        HotTag(id: "long_hair", name: "长发", query: "long_hair"),
-        HotTag(id: "uniform", name: "制服", query: "school_uniform"),
-        HotTag(id: "swimsuit", name: "泳装", query: "swimsuit"),
-        HotTag(id: "glasses", name: "眼镜", query: "glasses"),
-        HotTag(id: "smile", name: "微笑", query: "smile"),
-    ]
 }

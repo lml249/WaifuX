@@ -123,6 +123,7 @@
 		8A8ED8229FA48E7F289F409A /* LibraryFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED321504BADDC0FCBA8515DB /* LibraryFolder.swift */; };
 		8B2DB13A3F14D6F4C6FC1744 /* KonachanModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9827C9AD0A31F5C1ADB95A7 /* KonachanModels.swift */; };
 		8BD71B61A3E07060DA16E6C0 /* AnimePortraitCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DDF91A608069837E8FF492 /* AnimePortraitCard.swift */; };
+		8C9D0E1F2A3B4C5D6E7F8A9B /* KonachanTagSearchField.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0E1F2A3B4C5D6E7F8A9B0C1 /* KonachanTagSearchField.swift */; };
 		8D2BD782AB1A4774207D5804 /* GuessYouLikeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91E6D95488469530050E4E91 /* GuessYouLikeViewModel.swift */; };
 		8D578500A676505D3EC9AB41 /* ArcBackgroundPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34088609B67C582BB4C80973 /* ArcBackgroundPanel.swift */; };
 		90DBCEBC49179263DCEDD8BF /* KonachanService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC7191D30E898DA37452A716 /* KonachanService.swift */; };
@@ -358,6 +359,7 @@
 		8ED35D3E2C6C3E7FC268D73C /* WallpaperEngineEmbeddedAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperEngineEmbeddedAssets.swift; sourceTree = "<group>"; };
 		8FF6005F8F505439E1DD6D6C /* LiquidGlassAudioVisualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassAudioVisualizer.swift; sourceTree = "<group>"; };
 		90887F64FCF64F7B1EDB9EDD /* SearchOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchOverlay.swift; sourceTree = "<group>"; };
+		D0E1F2A3B4C5D6E7F8A9B0C1 /* KonachanTagSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanTagSearchField.swift; sourceTree = "<group>"; };
 		916B2F6262D12AA99FF3B356 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		91E6D95488469530050E4E91 /* GuessYouLikeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeViewModel.swift; sourceTree = "<group>"; };
 		92360DB7D61D511F712E8CC6 /* DownloadError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadError.swift; sourceTree = "<group>"; };
@@ -562,6 +564,7 @@
 				D52E421AB7EE59F2ADC29ACA /* LiquidGlassNextItemToast.swift */,
 				BF7159115AD04C7CD5E4B85F /* LiquidGlassWallpaperCard.swift */,
 				B5C2E52744F0A62D47BE4B8B /* LoadingAnimations.swift */,
+				D0E1F2A3B4C5D6E7F8A9B0C1 /* KonachanTagSearchField.swift */,
 				E219ECEDE83361BD4C64D581 /* LoopingVideoBackgroundView.swift */,
 				DACDF1F5659B23034A3076C7 /* MediaCardView.swift */,
 				71372B83F6B9CC04A2DA24EE /* NativeVideoPlayer.swift */,
@@ -1149,6 +1152,7 @@
 				CFADBE4BA2BDF780AD94EE42 /* FileIO.swift in Sources */,
 				7CBFCC3D0B6CE3E540C2589B /* NotchOverlayManager.swift in Sources */,
 				8B2DB13A3F14D6F4C6FC1744 /* KonachanModels.swift in Sources */,
+				8C9D0E1F2A3B4C5D6E7F8A9B /* KonachanTagSearchField.swift in Sources */,
 				90DBCEBC49179263DCEDD8BF /* KonachanService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

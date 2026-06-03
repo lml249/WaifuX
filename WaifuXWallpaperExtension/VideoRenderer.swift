@@ -49,26 +49,49 @@ final class VideoRenderer: @unchecked Sendable {
             ])
         }
 
+        // 获取视频实际显示尺寸（应用 preferredTransform，处理旋转/镜像等变换）
+        let naturalSize = track.naturalSize
+        let preferredTransform = track.preferredTransform
+        let transformedSize = naturalSize.applying(preferredTransform)
+        let videoWidth = abs(transformedSize.width)
+        let videoHeight = abs(transformedSize.height)
+
+        // 计算 resizeAspectFill 的 frame：缩放视频至填满 rootLayer，保持宽高比，居中
+        let bounds = rootLayer.bounds
+        let fillScale = max(bounds.width / videoWidth, bounds.height / videoHeight)
+        let fillFrame = CGRect(
+            x: (bounds.width - videoWidth * fillScale) / 2,
+            y: (bounds.height - videoHeight * fillScale) / 2,
+            width: videoWidth * fillScale,
+            height: videoHeight * fillScale
+        )
+
+        extLog("[VideoRenderer] video=\(Int(videoWidth))x\(Int(videoHeight)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(fillScale)")
+
         let displayLayer = AVSampleBufferDisplayLayer()
-        displayLayer.videoGravity = .resizeAspectFill
-        displayLayer.frame = rootLayer.bounds
+        displayLayer.videoGravity = .resize  // frame 已处理宽高比，直接拉伸填满
+        displayLayer.frame = fillFrame
         displayLayer.contentsScale = rootLayer.contentsScale
 
         return VideoRenderer(
             rootLayer: rootLayer,
             displayLayer: displayLayer,
             asset: asset,
-            videoTrack: track
+            videoTrack: track,
+            fillFrame: fillFrame
         )
     }
 
-    private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack) {
+    private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack, fillFrame: CGRect) {
         self.displayLayer = displayLayer
         self.renderer = displayLayer.sampleBufferRenderer
         self.asset = asset
         self.videoTrack = videoTrack
         self.backgroundFrameLayer = CALayer()
         self.stillFrameLayer = CALayer()
+
+        // 裁剪 displayLayer 超出 rootLayer 边界的部分（fillFrame 在宽高比不一致时会超出 rootLayer.bounds）
+        rootLayer.masksToBounds = true
 
         backgroundFrameLayer.frame = rootLayer.bounds
         backgroundFrameLayer.contentsGravity = .resizeAspectFill
