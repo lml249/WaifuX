@@ -9,6 +9,7 @@ struct MyLibraryContentView: View {
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
     @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
     @ObservedObject private var folderStore = LibraryFolderStore.shared
+    @ObservedObject private var folderLockService = FolderLockService.shared
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
 
@@ -426,17 +427,22 @@ struct MyLibraryContentView: View {
 
     private func wallpaperFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
         let display = wallpaperFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
+        let isUnlocked = FolderLockService.shared.isFolderUnlocked(folder.id)
         return LibraryFolderCard(
             folder: folder,
             previewURLs: display.previewURLs,
             itemCount: display.itemCount,
             cardWidth: config.cardWidth,
             isEditing: isEditing,
+            isUnlocked: isUnlocked,
             onTap: { handleFolderTap(folder) },
             onDrop: { ids in moveWallpapersToFolder(ids: ids, folderID: folder.id) },
             onDisband: {
                 folderStore.deleteFolder(id: folder.id, contentType: .wallpaper)
                 updateWallpaperItems()
+            },
+            onToggleLock: {
+                folderStore.toggleFolderLock(id: folder.id, contentType: .wallpaper)
             }
         )
     }
@@ -619,17 +625,22 @@ struct MyLibraryContentView: View {
 
     private func mediaFolderCard(folder: LibraryFolder, config: LibraryGridConfig) -> some View {
         let display = mediaFolderDisplay[folder.id] ?? FolderDisplayInfo(previewURLs: [], itemCount: 0)
+        let isUnlocked = FolderLockService.shared.isFolderUnlocked(folder.id)
         return LibraryFolderCard(
             folder: folder,
             previewURLs: display.previewURLs,
             itemCount: display.itemCount,
             cardWidth: config.cardWidth,
             isEditing: isEditing,
+            isUnlocked: isUnlocked,
             onTap: { handleFolderTap(folder) },
             onDrop: { ids in moveMediasToFolder(ids: ids, folderID: folder.id) },
             onDisband: {
                 folderStore.deleteFolder(id: folder.id, contentType: .media)
                 updateMediaItems()
+            },
+            onToggleLock: {
+                folderStore.toggleFolderLock(id: folder.id, contentType: .media)
             }
         )
     }
@@ -1618,13 +1629,33 @@ struct MyLibraryContentView: View {
     private func handleFolderTap(_ folder: LibraryFolder) {
         if isEditing {
             toggleSelection("folder_\(folder.id)")
-        } else {
-            switch folder.contentType {
-            case .wallpaper:
-                navigateToWallpaperFolder(folder.id)
-            case .media:
-                navigateToMediaFolder(folder.id)
+            return
+        }
+
+        // 加密文件夹需要认证
+        if folder.isLocked {
+            let lockService = FolderLockService.shared
+            if !lockService.isFolderUnlocked(folder.id) {
+                Task { @MainActor in
+                    let reason = "解锁「\(folder.name)」文件夹"
+                    let success = await lockService.unlockFolder(folderID: folder.id, reason: reason)
+                    if success {
+                        navigateToFolder(folder)
+                    }
+                }
+                return
             }
+        }
+
+        navigateToFolder(folder)
+    }
+
+    private func navigateToFolder(_ folder: LibraryFolder) {
+        switch folder.contentType {
+        case .wallpaper:
+            navigateToWallpaperFolder(folder.id)
+        case .media:
+            navigateToMediaFolder(folder.id)
         }
     }
 

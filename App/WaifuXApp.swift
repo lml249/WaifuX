@@ -579,6 +579,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func releaseForegroundResourcesForHiddenWindow(_ window: NSWindow) {
+        // 窗口隐藏时锁定所有加密文件夹
+        FolderLockService.shared.lockAllFolders()
+
         NotificationCenter.default.post(name: .appShouldReleaseForegroundMemory, object: nil)
         DisplaySelectorManager.shared.cancelForMemoryRelease()
         AnimeWindowManager.shared.closeAllWindowsForMemoryRelease()
@@ -730,14 +733,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        // 第 2 步：在主线程构建 stale 候选列表（FileManager 操作）
         let currentAppURL = appURL.standardizedFileURL
-        let staleCandidates = computeStaleWallpaperExtensionCandidates(currentExtensionURL: extensionURL, currentAppURL: currentAppURL)
 
-        // 第 3 步：Process 系统调用派发到后台，不阻塞主线程
-        DispatchQueue.global(qos: .utility).async { [appURL, extensionURL, staleCandidates, currentAppURL] in
-            self.registerBundleWithLaunchServices(appURL)
-            self.registerBundleWithPlugInKit(extensionURL)
+        // 第 2 步：Process 系统调用派发到后台，不阻塞主线程。
+        // 先清理旧注册，再注册当前正在运行的 App/appex，避免 WallpaperAgent 继续命中 Debug/临时构建产物。
+        DispatchQueue.global(qos: .utility).async { [appURL, extensionURL, currentAppURL] in
+            let staleCandidates = self.computeStaleWallpaperExtensionCandidates(
+                currentExtensionURL: extensionURL,
+                currentAppURL: currentAppURL
+            )
 
             for candidate in staleCandidates {
                 self.runRegistrationTool("/usr/bin/pluginkit", arguments: ["-r", candidate.path], label: "pluginkit remove")
@@ -748,6 +752,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 print("[WaifuXApp] Removed stale wallpaper extension registration: \(candidate.path)")
             }
 
+            self.registerBundleWithLaunchServices(appURL)
+            self.registerBundleWithPlugInKit(extensionURL)
+            print("[WaifuXApp] Registered current wallpaper extension: \(extensionURL.path)")
+
             self.terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: currentAppURL)
 
             // NSWorkspace 必须在主线程
@@ -757,7 +765,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// 在主线程计算需要清理的过期扩展列表（FileManager 枚举 + Bundle 路径比对）
+    /// 计算需要清理的过期扩展列表。
+    /// 只读取当前进程表和 PlugInKit 登记项，避免启动时枚举 `/private/tmp` / build 大目录。
     private func computeStaleWallpaperExtensionCandidates(currentExtensionURL: URL, currentAppURL: URL) -> [URL] {
         let candidates = wallpaperExtensionRegistrationCandidates(currentAppURL: currentAppURL)
         return candidates.filter { candidate in
@@ -782,37 +791,72 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func wallpaperExtensionRegistrationCandidates(currentAppURL: URL) -> [URL] {
-        let searchRoots = [
-            URL(fileURLWithPath: "/private/tmp/WaifuXBuild", isDirectory: true),
-            URL(fileURLWithPath: "/private/tmp/WaifuXLockScreenBuild", isDirectory: true),
-            URL(fileURLWithPath: "/private/tmp/WaifuXDerivedData-mainthread-fix", isDirectory: true),
-            URL(fileURLWithPath: "/Volumes/mac/Developer", isDirectory: true),
-            URL(fileURLWithPath: "/Volumes/mac/CodeLibrary/Claude/WallHaven/build", isDirectory: true),
-            URL(fileURLWithPath: "/Applications", isDirectory: true)
-        ]
+        var result: [URL] = []
+        var seen = Set<String>()
+
+        func appendCandidate(_ url: URL) {
+            let standardized = url.standardizedFileURL
+            let path = standardized.path
+            guard seen.insert(path).inserted else { return }
+            guard wallpaperExtensionBundleID(at: standardized) == "com.waifux.app.wallpaperextension" else {
+                return
+            }
+            if !path.hasPrefix(currentAppURL.path + "/") {
+                result.append(standardized)
+            }
+        }
+
+        for url in runningWallpaperExtensionCandidates() {
+            appendCandidate(url)
+        }
+        for url in plugInKitWallpaperExtensionCandidates() {
+            appendCandidate(url)
+        }
+
+        return result
+    }
+
+    private func runningWallpaperExtensionCandidates() -> [URL] {
+        let output = processOutput(
+            launchPath: "/bin/ps",
+            arguments: ["-axo", "command="]
+        )
 
         var result: [URL] = []
         var seen = Set<String>()
-        for root in searchRoots where FileManager.default.fileExists(atPath: root.path) {
-            guard let enumerator = FileManager.default.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isDirectoryKey],
-                options: [.skipsHiddenFiles]
-            ) else { continue }
+        let executableSuffix = "/WaifuXWallpaperExtension.appex/Contents/MacOS/WaifuXWallpaperExtension"
 
-            for case let url as URL in enumerator {
-                guard url.lastPathComponent == "WaifuXWallpaperExtension.appex" else { continue }
-                let standardized = url.standardizedFileURL
-                let path = standardized.path
-                guard seen.insert(path).inserted else { continue }
-                guard wallpaperExtensionBundleID(at: standardized) == "com.waifux.app.wallpaperextension" else {
-                    continue
-                }
-                if !path.hasPrefix(currentAppURL.path + "/") {
-                    result.append(standardized)
-                }
-            }
+        for line in output.split(separator: "\n") {
+            let command = line.trimmingCharacters(in: .whitespaces)
+            guard let range = command.range(of: executableSuffix) else { continue }
+            let appexPath = String(command[..<range.upperBound])
+                .replacingOccurrences(of: "/Contents/MacOS/WaifuXWallpaperExtension", with: "")
+            guard seen.insert(appexPath).inserted else { continue }
+            result.append(URL(fileURLWithPath: appexPath, isDirectory: true))
         }
+
+        return result
+    }
+
+    private func plugInKitWallpaperExtensionCandidates() -> [URL] {
+        let output = processOutput(
+            launchPath: "/usr/bin/pluginkit",
+            arguments: ["-m", "-A", "-D", "-v", "-i", "com.waifux.app.wallpaperextension"]
+        )
+
+        var result: [URL] = []
+        var seen = Set<String>()
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let markerRange = trimmed.range(of: "/WaifuXWallpaperExtension.appex") else { continue }
+            let beforeMarker = trimmed[..<markerRange.lowerBound]
+            guard let slashIndex = beforeMarker.lastIndex(of: "/") else { continue }
+            let path = String(trimmed[slashIndex..<markerRange.upperBound])
+            guard seen.insert(path).inserted else { continue }
+            result.append(URL(fileURLWithPath: path, isDirectory: true))
+        }
+
         return result
     }
 
@@ -1023,7 +1067,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 // MARK: - NSWindowDelegate
 extension AppDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // 点击关闭按钮时隐藏窗口而不是退出
+        // 点击关闭按钮时锁定所有加密文件夹并隐藏窗口
+        FolderLockService.shared.lockAllFolders()
         hideMainWindow()
         return false
     }

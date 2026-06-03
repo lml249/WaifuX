@@ -63,15 +63,23 @@ struct LibraryFolderCard: View {
     let itemCount: Int
     let cardWidth: CGFloat
     let isEditing: Bool
+    /// 文件夹是否已解锁（仅加密模式下有效）
+    let isUnlocked: Bool
     let onTap: () -> Void
     let onDrop: ([String]) -> Void
     let onDisband: () -> Void
+    let onToggleLock: (() -> Void)?
 
     @State private var isHovered = false
     @State private var isDropTarget = false
 
     private var thumbnailHeight: CGFloat {
         LibraryCardMetrics.thumbnailHeight
+    }
+
+    /// 文件夹启用了加密且未解锁
+    private var isLockedAndHidden: Bool {
+        folder.isLocked && !isUnlocked
     }
 
     var body: some View {
@@ -85,6 +93,16 @@ struct LibraryFolderCard: View {
                         imageURLs: previewURLs,
                         size: CGSize(width: cardWidth, height: thumbnailHeight)
                     )
+
+                    // 加密锁定覆盖层（厚毛玻璃）
+                    if isLockedAndHidden {
+                        LockedFolderOverlay(isUnlocked: false, iconSize: 28)
+                    }
+
+                    // 加密文件夹解锁后，左下角显示锁定按钮可手动重新上锁
+                    if folder.isLocked && isUnlocked, let onToggleLock {
+                        unlockLockButton(onToggleLock: onToggleLock)
+                    }
                 }
                 .frame(width: cardWidth, height: thumbnailHeight)
                 .clipped()
@@ -92,11 +110,18 @@ struct LibraryFolderCard: View {
                 // 信息区域（与 WallpaperEditCard 完全一致的结构和高度）
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 12) {
-                        Text(folder.name)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(1)
-                            .layoutPriority(1)
+                        HStack(spacing: 6) {
+                            // 加密文件夹显示锁图标
+                            if folder.isLocked {
+                                FolderLockBadge(isLocked: true, isUnlocked: isUnlocked)
+                            }
+
+                            Text(folder.name)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                        }
 
                         Spacer(minLength: 12)
 
@@ -135,6 +160,17 @@ struct LibraryFolderCard: View {
             isHovered = hovering
         }
         .contextMenu {
+            if let onToggleLock {
+                Button {
+                    onToggleLock()
+                } label: {
+                    if folder.isLocked {
+                        Label(t("folder.unlock"), systemImage: "lock.open")
+                    } else {
+                        Label(t("folder.lock"), systemImage: "lock")
+                    }
+                }
+            }
             Button(role: .destructive, action: onDisband) {
                 Label(t("disband.folder"), systemImage: "folder.badge.minus")
             }
@@ -162,6 +198,36 @@ struct LibraryFolderCard: View {
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.7))
         }
+    }
+
+    /// 加密文件夹解锁后左下角的锁定按钮
+    private func unlockLockButton(onToggleLock: @escaping () -> Void) -> some View {
+        VStack {
+            Spacer()
+            HStack {
+                Button {
+                    onToggleLock()
+                } label: {
+                    Image(systemName: "lock.open.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(8)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.5))
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("锁定文件夹")
+
+                Spacer()
+            }
+        }
+        .padding(10)
     }
 
     private func parseDropPayload(_ payload: String) -> [String] {

@@ -7,9 +7,25 @@ import ImageIO
 import os
 import QuartzCore
 
+extension CALayer: @unchecked @retroactive Sendable {}
+extension CAContext: @unchecked @retroactive Sendable {}
+
 final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     var agentProxy: (any WallpaperExtensionProxyXPCProtocol)?
     private var previousPresentationMode = "default"
+
+    private static func displayMetrics(for displayID: UInt32) -> (size: CGSize, scale: CGFloat)? {
+        let cgDisplayID = CGDirectDisplayID(displayID)
+        let pixelWidth = CGDisplayPixelsWide(cgDisplayID)
+        let pixelHeight = CGDisplayPixelsHigh(cgDisplayID)
+        if pixelWidth > 0, pixelHeight > 0 {
+            return (CGSize(width: pixelWidth, height: pixelHeight), 1.0)
+        }
+
+        let bounds = CGDisplayBounds(cgDisplayID)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        return (bounds.size, 1.0)
+    }
 
     // MARK: - Lifecycle
 
@@ -27,6 +43,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         // Extract displayID and destSize from request via Mirror
         var displayID: UInt32?
         var destSize = CGSize(width: 1920, height: 1080)
+        var didParseDestinationSize = false
         var scaleFactor: CGFloat = 1.0
         var isPreview = false
         var choiceConfiguration: String?
@@ -49,6 +66,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                        let endH = afterH.range(of: ",") ?? afterH.range(of: ")") {
                         destSize.width = CGFloat(Double(afterW[..<endW.lowerBound].trimmingCharacters(in: .whitespaces)) ?? 1920)
                         destSize.height = CGFloat(Double(afterH[..<endH.lowerBound].trimmingCharacters(in: .whitespaces)) ?? 1080)
+                        didParseDestinationSize = destSize.width > 0 && destSize.height > 0
                     }
                 }
                 if let sRange = desc.range(of: "scaleFactor: ") {
@@ -159,6 +177,13 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
+        if !didParseDestinationSize, let did = displayID,
+           let metrics = Self.displayMetrics(for: did) {
+            destSize = metrics.size
+            scaleFactor = metrics.scale
+            extLog("[acquire] ⚠️ request 未提供有效目标尺寸，使用 display metrics: display=\(did) size=\(Int(destSize.width))x\(Int(destSize.height)) scale=\(scaleFactor)")
+        }
+
         // 记录当前激活的实例 ID（display instance），供状态同步和日志使用。
         if let instanceID = choiceConfiguration, !instanceID.isEmpty {
             let previousID = WallpaperState.shared.currentVideoID
@@ -220,6 +245,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         rootLayer.frame = layerFrame
         rootLayer.contentsScale = scaleFactor
         rootLayer.contentsGravity = .resizeAspectFill
+        extLog("[acquire] rootLayer size=\(Int(destSize.width))x\(Int(destSize.height)) scale=\(scaleFactor) display=\(displayID ?? 0)")
 
         if let cachedImage = loadCachedSnapshotImage() {
             rootLayer.contents = cachedImage
@@ -233,146 +259,18 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             CATransaction.flush()
             doReply("context ready")
 
-            nonisolated(unsafe) let unsafeCAContext = caContext
-            nonisolated(unsafe) let unsafeRootLayer = rootLayer
+            let unsafeCAContext = caContext
+            let unsafeRootLayer = rootLayer
 
-            Task {
-                extLog("  [Acquire] 使用扩展本地解码 display=\(did)")
-                await Self.startLocalVideoFallback(
-                    displayID: did,
-                    instanceID: instanceID,
-                    rootLayer: unsafeRootLayer,
-                    caContext: unsafeCAContext,
-                    contextId: contextId,
-                    wallpaperIDString: wallpaperIDString,
-                    doReply: doReply
-                )
-                return
-
-                let generation = UUID()
-                let frameRenderer = IOSurfaceFrameRenderer.create(
-                    displayID: did,
-                    rootLayer: unsafeRootLayer,
-                    width: Int(destSize.width),
-                    height: Int(destSize.height)
-                )
-                let activeCtx = ActiveWallpaper(
-                    caContext: unsafeCAContext,
-                    rootLayer: unsafeRootLayer,
-                    renderer: nil,
-                    displayID: did,
-                    videoID: instanceID
-                )
-                let existing = WallpaperState.shared.storeContext(activeCtx, id: contextId, wallpaperID: wallpaperIDString)
-                existing?.renderer?.stop()
-
-                let surfID0: IOSurfaceID?
-                let surfID1: IOSurfaceID?
-                if #available(macOS 15.0, *) {
-                    surfID0 = frameRenderer.idleSurfaceID
-                    surfID1 = frameRenderer.surfaces.first??.surfaceID
-                } else {
-                    surfID0 = nil
-                    surfID1 = nil
-                }
-
-                if #available(macOS 15.0, *) {
-                    frameRenderer.start()
-                }
-
-                FrameChannel.shared.registerCallback(displayID: did) { surfaceID, pts, dur in
-                    guard WallpaperState.shared.isCurrentIOSurfaceRendererGeneration(generation, for: did) else {
-                        return
-                    }
-                    WallpaperState.shared.ioSurfaceRenderer(for: did)?.frameReady(surfaceID: surfaceID, timestamp: pts, duration: dur)
-                }
-                WallpaperState.shared.storeIOSurfaceRenderer(frameRenderer, generation: generation, for: did)
-
-                var registeredSurfaces = false
-                if let id0 = surfID0, let id1 = surfID1 {
-                    guard WallpaperState.shared.isCurrentIOSurfaceRendererGeneration(generation, for: did) else {
-                        extLog("  [Acquire] 跳过过期 surface 注册 display=\(did)")
-                        doReply("expired")
-                        return
-                    }
-                    registeredSurfaces = await UnixSocketClient.shared.registerSurfaces(
-                        displayID: did,
-                        surfaceID0: id0,
-                        surfaceID1: id1,
-                        videoID: instanceID
-                    )
-                }
-
-                guard registeredSurfaces else {
-                    extLog("  [Acquire] IOSurface 注册失败，回退到扩展本地解码 display=\(did)")
-                    FrameChannel.shared.unregisterCallback(displayID: did)
-                    WallpaperState.shared.removeIOSurfaceRenderer(for: did)
-                    frameRenderer.displayLayer.removeFromSuperlayer()
-                    await Self.startLocalVideoFallback(
-                        displayID: did,
-                        instanceID: instanceID,
-                        rootLayer: unsafeRootLayer,
-                        caContext: unsafeCAContext,
-                        contextId: contextId,
-                        wallpaperIDString: wallpaperIDString,
-                        doReply: doReply
-                    )
-                    return
-                }
-
-                WallpaperPrefs.shared.setActive(true)
-                extLog("  IOSurfaceFrameRenderer started for display \(did)")
-
-                // 快速检查：如果本地没有任何可用视频，无需等待帧推送，直接回退
-                if findVideoURL(videoID: instanceID) == nil && findVideoURL() == nil {
-                    extLog("  [Acquire] ⚠️ 本地无可用视频，跳过帧等待，直接回退到本地解码 display=\(did)")
-                    frameRenderer.displayLayer.isHidden = true
-                    await Self.startLocalVideoFallback(
-                        displayID: did,
-                        instanceID: instanceID,
-                        rootLayer: unsafeRootLayer,
-                        caContext: unsafeCAContext,
-                        contextId: contextId,
-                        wallpaperIDString: wallpaperIDString,
-                        doReply: doReply
-                    )
-                    return
-                }
-
-                doReply("iosurface registered")
-
-                // 不要阻塞 WallpaperAgent 的 acquire；首帧等待仅作为内部兜底。
-                let frameTimeoutNs: UInt64 = 10_000_000_000  // 10 秒
-                let pollIntervalNs: UInt64 = 100_000_000     // 100ms
-                var elapsedNs: UInt64 = 0
-                var frameArrived = false
-                while elapsedNs < frameTimeoutNs {
-                    if frameRenderer.hasReceivedFirstFrame {
-                        frameArrived = true
-                        break
-                    }
-                    try? await Task.sleep(for: .nanoseconds(pollIntervalNs))
-                    elapsedNs += pollIntervalNs
-                }
-
-                if !frameArrived {
-                    extLog("  [Acquire] ⚠️ 首帧超时 (\(Double(frameTimeoutNs) / 1_000_000_000)s) 未到达，回退到扩展本地解码 display=\(did)")
-                    // 保留 IOSurfaceFrameRenderer 和 callback 不释放，确保 surface 存活供后续 FramePusher 复用
-                    frameRenderer.displayLayer.isHidden = true
-                    await Self.startLocalVideoFallback(
-                        displayID: did,
-                        instanceID: instanceID,
-                        rootLayer: unsafeRootLayer,
-                        caContext: unsafeCAContext,
-                        contextId: contextId,
-                        wallpaperIDString: wallpaperIDString,
-                        doReply: doReply
-                    )
-                    return
-                }
-
-                extLog("  [Acquire] ✅ 首帧已到达，使用帧推送管线 display=\(did)")
-            }
+            Self.startLocalVideoFallbackTask(
+                displayID: did,
+                instanceID: instanceID,
+                rootLayer: unsafeRootLayer,
+                caContext: unsafeCAContext,
+                contextId: contextId,
+                wallpaperIDString: wallpaperIDString,
+                doReply: doReply
+            )
 
             DispatchQueue.global().asyncAfter(deadline: .now() + 15.0) {
                 doReply("timeout")
@@ -394,6 +292,29 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 wallpaperID: wallpaperIDString
             )
             doReply("no display")
+        }
+    }
+
+    private static func startLocalVideoFallbackTask(
+        displayID: UInt32,
+        instanceID: String,
+        rootLayer: CALayer,
+        caContext: CAContext,
+        contextId: UInt32,
+        wallpaperIDString: String?,
+        doReply: @escaping @Sendable (String) -> Void
+    ) {
+        Task {
+            extLog("  [Acquire] 使用扩展本地解码 display=\(displayID)")
+            await startLocalVideoFallback(
+                displayID: displayID,
+                instanceID: instanceID,
+                rootLayer: rootLayer,
+                caContext: caContext,
+                contextId: contextId,
+                wallpaperIDString: wallpaperIDString,
+                doReply: doReply
+            )
         }
     }
 
