@@ -104,9 +104,9 @@ final class NotchOverlayManager {
             defer: false
         )
         window.setFrame(frame, display: true)
-        // ⚠️ 关键：使用 desktopWindow + 1 层级，位于桌面之上、菜单栏之下。
-        // 菜单栏是半透明的，会模糊此窗口的内容，呈现纯黑视觉效果。
-        window.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
+        // ⚠️ 关键：使用 desktopWindow 层级（与视频壁纸窗口同级）。
+        // 菜单栏的毛玻璃效果会模糊此层的内容，使菜单栏呈现纯黑视觉效果。
+        window.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.isOpaque = true
         window.backgroundColor = .black

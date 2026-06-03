@@ -244,8 +244,9 @@ sign_exported_app() {
       # macOS 26: codesign --entitlements 对 .appex 不再生效。
       # 优先使用仓库中预签名的 .appex（本地 xcodebuild 签名后提交）。
       local pre_signed="$PROJECT_DIR/WaifuXWallpaperExtension.appex"
-      if [[ -f "$pre_signed" ]]; then
+      if [[ -d "$pre_signed" ]]; then
         echo "  使用预签名扩展: $(basename "$pre_signed")"
+        rm -rf "$code_path"
         cp -R "$pre_signed" "$code_path"
         echo "  ✅ $(basename "$code_path") (预签名)"
       elif [[ "$identity" != "-" ]]; then
@@ -256,12 +257,15 @@ sign_exported_app() {
           CODE_SIGN_IDENTITY="$identity" \
           CODE_SIGN_ENTITLEMENTS="$extension_entitlements" \
           ENABLE_HARDENED_RUNTIME=YES \
-          CODE_SIGN_STYLE=Automatic \
+          CODE_SIGN_STYLE=Manual \
           OTHER_CODE_SIGN_FLAGS="--timestamp --options=runtime" \
           clean build 2>&1 | tail -20
         local built_appex
-        built_appex=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" 2>/dev/null | head -1)
-        if [[ -n "$built_appex" && -f "$built_appex" ]]; then
+        built_appex=$(find "$PROJECT_DIR/build" ~/Library/Developer/Xcode/DerivedData \
+          \( -path "*/Release/WaifuXWallpaperExtension.appex" -o -path "*/Build/Products/Release/WaifuXWallpaperExtension.appex" \) \
+          -type d -print 2>/dev/null | head -1)
+        if [[ -n "$built_appex" && -d "$built_appex" ]]; then
+          rm -rf "$code_path"
           cp -R "$built_appex" "$code_path"
           echo "  ✅ $(basename "$code_path") (xcodebuild)"
         else
