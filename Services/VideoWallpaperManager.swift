@@ -1870,8 +1870,14 @@ final class VideoWallpaperManager: ObservableObject {
                 let schedulerConfig = WallpaperSchedulerService.shared.config.resolvedDisplayConfig(for: targetScreenID)
                 let isOnEndMode = schedulerConfig.isEnabled && schedulerConfig.isOnEndMode
 
-                let hdrEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
-                let components = makePlayerComponents(for: targetScreen, videoURL: videoURL, muted: isMuted, hdrEnabled: hdrEnabled, enableLooping: !isOnEndMode)
+                let hdrMetadataEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
+                let components = makePlayerComponents(
+                    for: targetScreen,
+                    videoURL: videoURL,
+                    muted: isMuted,
+                    hdrMetadataEnabled: hdrMetadataEnabled,
+                    enableLooping: !isOnEndMode
+                )
                 if let looper = components.looper {
                     self.loopers[targetScreenID] = looper
                 } else {
@@ -2119,35 +2125,26 @@ final class VideoWallpaperManager: ObservableObject {
     ///   - screen: 目标屏幕
     ///   - videoURL: 视频文件 URL
     ///   - muted: 是否静音
-    ///   - hdrEnabled: 是否启用 HDR
+    ///   - hdrMetadataEnabled: 是否应用源视频逐帧 HDR 显示元数据；这是 AVPlayerItem 原生属性，不引入 videoComposition。
     ///   - enableLooping: 是否启用循环播放（"播完即换"模式下为 false）
-    private func makePlayerComponents(for screen: NSScreen, videoURL: URL, muted: Bool, hdrEnabled: Bool = true, enableLooping: Bool = true) -> (player: AVQueuePlayer, looper: AVPlayerLooper?, item: AVPlayerItem) {
+    private func makePlayerComponents(
+        for screen: NSScreen,
+        videoURL: URL,
+        muted: Bool,
+        hdrMetadataEnabled: Bool = true,
+        enableLooping: Bool = true
+    ) -> (player: AVQueuePlayer, looper: AVPlayerLooper?, item: AVPlayerItem) {
         let playerItem = AVPlayerItem(url: videoURL)
+        if #available(macOS 11.0, *) {
+            playerItem.appliesPerFrameHDRDisplayMetadata = hdrMetadataEnabled
+        }
 
         // 计算屏幕物理像素分辨率，用于后续所有与分辨率/码率相关的限制
         let scaleFactor = screen.backingScaleFactor
         let screenPixelWidth = screen.frame.width * scaleFactor
         let screenPixelHeight = screen.frame.height * scaleFactor
 
-        // 1) 渲染分辨率兜底 + HDR→SDR 转换
-        // 对超大文件（>500MB，可能为高分辨率视频）应用渲染尺寸限制的 videoComposition，
-        // 确保 GPU 渲染管线使用屏幕分辨率，避免全分辨率帧合成的显存带宽浪费。
-        // 这弥补了 preferredMaximumResolution 对本地文件效果不确定的不足。
-        let needsResolutionLimit: Bool = {
-            guard videoURL.isFileURL,
-                  let attrs = try? FileManager.default.attributesOfItem(atPath: videoURL.path),
-                  let fileSize = attrs[.size] as? UInt64 else { return false }
-            return fileSize > 500_000_000
-        }()
-        if !hdrEnabled || needsResolutionLimit {
-            applyOptimizedVideoComposition(
-                to: playerItem,
-                forceSDR: !hdrEnabled,
-                maxRenderSize: needsResolutionLimit ? CGSize(width: screenPixelWidth, height: screenPixelHeight) : nil
-            )
-        }
-
-        // 2) 动态峰值码率限制
+        // 1) 动态峰值码率限制
         // 根据屏幕分辨率计算合理的峰值码率上限，避免超大码率视频导致持续性磁盘 I/O 和内存带宽压力。
         // 桌面壁纸通常远距离观看，可容忍较低码率。
         let totalPixels = screenPixelWidth * screenPixelHeight
@@ -2157,7 +2154,7 @@ final class VideoWallpaperManager: ObservableObject {
         let maxBitrate: Double = 50_000_000 // 50 Mbps 硬上限
         playerItem.preferredPeakBitRate = min(estimatedBitrate, maxBitrate)
 
-        // 3) 解码分辨率上限
+        // 2) 解码分辨率上限
         playerItem.preferredMaximumResolution = CGSize(width: screenPixelWidth, height: screenPixelHeight)
 
         if #available(macOS 10.15, *) {
@@ -2231,31 +2228,6 @@ final class VideoWallpaperManager: ObservableObject {
         }
     }
 
-    /// 为 AVPlayerItem 应用优化视频合成：
-    /// - `forceSDR=true` 时强制 SDR 色域（Rec.709）
-    /// - `maxRenderSize` 非 nil 时限制渲染输出尺寸为屏幕分辨率，
-    ///   确保即使解码器输出全分辨率帧，GPU 渲染管线也使用物理屏幕尺寸，
-    ///   弥补 `preferredMaximumResolution` 对本地文件效果不确定的不足。
-    private func applyOptimizedVideoComposition(to playerItem: AVPlayerItem, forceSDR: Bool, maxRenderSize: CGSize?) {
-        let asset = playerItem.asset
-        let composition = AVMutableVideoComposition(asset: asset, applyingCIFiltersWithHandler: { request in
-            request.finish(with: request.sourceImage, context: nil)
-        })
-
-        if forceSDR {
-            composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
-            composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
-            composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
-        }
-
-        if let maxRenderSize, maxRenderSize.width > 0, maxRenderSize.height > 0 {
-            // 限制渲染输出尺寸为屏幕分辨率，避免全分辨率帧合成的显存带宽浪费
-            composition.renderSize = maxRenderSize
-        }
-
-        playerItem.videoComposition = composition
-    }
-
     private func createWindow(for screen: NSScreen, videoURL: URL, muted: Bool) throws {
         let screenID = screen.wallpaperScreenIdentifier
         let frame = screen.frame
@@ -2288,8 +2260,14 @@ final class VideoWallpaperManager: ObservableObject {
         // 统一使用 AVPlayerLooper 简单循环播放原视频，不做 crossfade composition。
         // 复杂的首尾帧 crossfade 渲染逻辑已保留在 makeLoopingCompositionItem / exportLoopedVideo 中，
         // 待后续增加用户手动开关后再决定是否恢复调用。
-        let hdrEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
-        let components = makePlayerComponents(for: screen, videoURL: videoURL, muted: muted, hdrEnabled: hdrEnabled, enableLooping: !isOnEndMode)
+        let hdrMetadataEnabled = UserDefaults.standard.object(forKey: "hdr_enabled") as? Bool ?? true
+        let components = makePlayerComponents(
+            for: screen,
+            videoURL: videoURL,
+            muted: muted,
+            hdrMetadataEnabled: hdrMetadataEnabled,
+            enableLooping: !isOnEndMode
+        )
         if let looper = components.looper {
             self.loopers[screenID] = looper
         } else {

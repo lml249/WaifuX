@@ -2485,12 +2485,14 @@ private func sceneBakeParseConfig(_ arguments: [String]) throws -> SceneOfflineB
     var w = 1920
     var h = 1080
     var fps: Int32 = 30
-    var seconds = 8.0
-    if positional.count >= 6 {
+    var seconds = 0.0
+    if positional.count >= 5 {
         w = max(32, Int(positional[2]) ?? 1920)
         h = max(32, Int(positional[3]) ?? 1080)
         fps = Int32(max(1, min(60, Int(positional[4]) ?? 30)))
-        seconds = max(0.5, Double(positional[5]) ?? 15.0)
+        if positional.count >= 6 {
+            seconds = max(0.0, Double(positional[5]) ?? 0.0)
+        }
     }
     w = (w / 2) * 2
     h = (h / 2) * 2
@@ -2639,13 +2641,22 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
 
     // 轮询烘焙状态，每帧调用 tick()
     // 注意：dylib 内置烘焙使用固定时间步长，tick() 的调用时机不影响动画速度
+    var lastReportedProgress: Float = -1
     while true {
         var done = false
+        var progress: Float = 0
         sceneBakeOnMain {
             let ok = RendererBridge.shared.tickOnce()
+            progress = RendererBridge.shared.bakeProgress
             if !ok || !RendererBridge.shared.isBaking {
                 done = true
             }
+        }
+        if progress >= 0, progress <= 1,
+           progress >= lastReportedProgress + 0.005 || done || progress >= 1 {
+            lastReportedProgress = progress
+            fputs("BAKE_PROGRESS:\(String(format: "%.3f", min(max(progress, 0), 1)))\n", stderr)
+            fflush(stderr)
         }
         if done { break }
         usleep(1000) // 1ms polling interval
@@ -2663,9 +2674,8 @@ private func sceneBakePerform(_ cfg: SceneOfflineBakeConfig) throws {
         throw SceneOfflineBakeError.writerFailed("bake produced no output file")
     }
 
-    // ── 后处理：裁掉开头 2 秒黑屏段 ─────────────────────────────
-    // dylib 内置烘焙引擎吐出的视频，前 2 秒固定为黑屏（GL 初始化 + warmup）。
-    // 直接裁掉，无需亮度检测。
+    // Renderer still produces a black lead-in for some Workshop scenes. Keep the
+    // caller-side trim so exported videos start from visible content.
     sceneBakeTrimPrefix(url: cfg.outputURL, trimSeconds: 2.0)
 
     // ── 保存 sidecar JSON ─────────────────────────────────────
@@ -2769,7 +2779,7 @@ private final class SceneOfflineBakeAppDelegate: NSObject, NSApplicationDelegate
             do {
                 let cfg = try sceneBakeParseConfig(args)
                 fputs(
-                    "[bake] \(cfg.sceneRoot) → \(cfg.outputURL.path) \(cfg.width)x\(cfg.height) @\(cfg.fps)fps \(cfg.durationSeconds)s\n",
+                    "[bake] \(cfg.sceneRoot) → \(cfg.outputURL.path) resource-size @\(cfg.fps)fps \(cfg.durationSeconds)s\n",
                     stderr
                 )
                 try sceneBakePerform(cfg)
@@ -3024,7 +3034,7 @@ struct WallpaperEngineCLI {
         if command == "bake" {
             let bakeArgs = Array(remainingArgs.dropFirst())
             guard bakeArgs.count >= 2 else {
-                print("Usage: wallpaperengine-cli bake <scene_dir> <out.mp4> [width height fps seconds] [--no-dynamic-text]")
+                print("Usage: wallpaperengine-cli bake <scene_dir> <out.mp4> [width height fps [seconds]] [--no-dynamic-text]")
                 exit(1)
             }
             sceneOfflineBakeRunStandalone(arguments: bakeArgs)
@@ -3208,7 +3218,7 @@ struct WallpaperEngineCLI {
           exit                        Alias for stop
           preview <scene_dir> [w h] [--no-dynamic-text]
                                       Open a preview window (SIGTERM exits)
-          bake <dir> <out.mp4> [w h fps sec] [--no-dynamic-text]
+          bake <dir> <out.mp4> [w h fps [sec]] [--no-dynamic-text]
                                       Offline H.264 bake (no daemon)
         """)
     }

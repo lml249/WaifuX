@@ -208,7 +208,13 @@ final class LibraryGridOrderStore: ObservableObject {
         let saved = orders[scope.storageKey] ?? []
         let orderedSaved = saved.filter { available.contains($0) }
         let newIDs = ids.filter { !orderedSaved.contains($0) }
-        return orderedSaved + newIDs
+        let newFolderIDs = newIDs.filter { $0.hasPrefix("folder_") }
+        let newItemIDs = newIDs.filter { !$0.hasPrefix("folder_") }
+
+        var ordered = newFolderIDs + orderedSaved
+        let insertIndex = ordered.lastIndex { $0.hasPrefix("folder_") }.map { ordered.index(after: $0) } ?? ordered.startIndex
+        ordered.insert(contentsOf: newItemIDs, at: insertIndex)
+        return ordered
     }
 
     func reorder(moving movingIDs: [String], before targetID: String, availableIDs: [String], scope: LibraryGridOrderScope) {

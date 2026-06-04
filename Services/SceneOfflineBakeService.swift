@@ -332,6 +332,7 @@ enum SceneOfflineBakeService {
         let sceneBakesRoot = await MainActor.run {
             DownloadPathManager.shared.sceneBakesFolderURL
         }
+        let cacheDurationSeconds = renderer == .legacyCLI ? 0 : durationSeconds
         let outURL = cacheVideoURL(
             baseDir: sceneBakesRoot,
             itemID: cacheItemID,
@@ -340,7 +341,7 @@ enum SceneOfflineBakeService {
             width: evenW,
             height: evenH,
             fps: Int(fps),
-            durationSeconds: durationSeconds
+            durationSeconds: cacheDurationSeconds
         )
 
         try FileManager.default.createDirectory(at: outURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -361,7 +362,7 @@ enum SceneOfflineBakeService {
                 width: cachedInspection.width,
                 height: cachedInspection.height,
                 fps: Int(fps),
-                durationSeconds: durationSeconds,
+                durationSeconds: renderer == .legacyCLI ? cachedInspection.duration : durationSeconds,
                 bakedAt: (attrs[.creationDate] as? Date) ?? .now,
                 renderer: renderer
             )
@@ -413,7 +414,6 @@ enum SceneOfflineBakeService {
                 width: evenW,
                 height: evenH,
                 fps: fps,
-                durationSeconds: durationSeconds,
                 progress: progress
             )
             await MainActor.run { progress?(1.0) }
@@ -494,7 +494,6 @@ enum SceneOfflineBakeService {
         width: Int,
         height: Int,
         fps: Int32,
-        durationSeconds: Double,
         progress: (@MainActor (Double) -> Void)? = nil
     ) async throws -> SceneBakeArtifact {
         guard let cli = resolvedLegacyCLIExecutableURL() else {
@@ -510,7 +509,6 @@ enum SceneOfflineBakeService {
             String(width),
             String(height),
             String(fps),
-            String(Int(durationSeconds)),
             "--no-dynamic-text"
         ]
         var env = ProcessInfo.processInfo.environment
@@ -554,7 +552,6 @@ enum SceneOfflineBakeService {
         let stderrData = MutableBox(Data())
         let stdoutData = MutableBox(Data())
         let latestProgress = MutableBox(0.0)
-        let isFinished = MutableBox(false)
 
         // 读取 stdout，捕获 DYNAMIC_TEXTS: 行
         outPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -563,8 +560,7 @@ enum SceneOfflineBakeService {
             stdoutData.value.append(data)
         }
 
-        // BAKE_PROGRESS: 行解析（wallpaperengine-cli Swift 版目前不输出此格式，
-        // 但 linux-wallpaperengine-cli / 底层 C++ 库会输出，保留此解析作为补充）
+        // BAKE_PROGRESS: 行解析：wallpaperengine-cli Swift 版会从 dylib 转发真实烘焙进度。
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
@@ -575,9 +571,12 @@ enum SceneOfflineBakeService {
                     if trimmed.hasPrefix("BAKE_PROGRESS:") {
                         let valueStr = trimmed.dropFirst(14)
                         if let value = Double(valueStr) {
-                            latestProgress.value = value
+                            let clamped = min(max(value, 0.0), 0.99)
+                            let monotonic = max(latestProgress.value, clamped)
+                            guard monotonic > latestProgress.value else { continue }
+                            latestProgress.value = monotonic
                             Task { @MainActor in
-                                progress?(min(value, 0.99))
+                                progress?(monotonic)
                             }
                         }
                     }
@@ -589,7 +588,6 @@ enum SceneOfflineBakeService {
             task.terminationHandler = { process in
                 errPipe.fileHandleForReading.readabilityHandler = nil
                 outPipe.fileHandleForReading.readabilityHandler = nil
-                isFinished.value = true
 
                 let termStatus = process.terminationStatus
                 let termReason: Process.TerminationReason
@@ -628,7 +626,7 @@ enum SceneOfflineBakeService {
                             width: bakedInspection.width,
                             height: bakedInspection.height,
                             fps: Int(fps),
-                            durationSeconds: durationSeconds,
+                            durationSeconds: bakedInspection.duration,
                             bakedAt: .now,
                             renderer: .legacyCLI
                         ))
@@ -652,25 +650,6 @@ enum SceneOfflineBakeService {
 
             do {
                 try task.run()
-
-                // 启动进度估算任务：wallpaperengine-cli Swift 版不输出 BAKE_PROGRESS:，
-                // 因此用已过时间 / 预期时长作为估算进度。
-                let startTime = Date()
-                Task {
-                    while !isFinished.value {
-                        let elapsed = Date().timeIntervalSince(startTime)
-                        let estimated = min(elapsed / durationSeconds, 0.99)
-                        // 只有当估算进度高于真实 BAKE_PROGRESS 值时才报告，
-                        // 确保底层 C++ 库输出的真实进度优先。
-                        if estimated > latestProgress.value {
-                            latestProgress.value = estimated
-                            await MainActor.run {
-                                progress?(estimated)
-                            }
-                        }
-                        try? await Task.sleep(nanoseconds: 500_000_000)
-                    }
-                }
             } catch {
                 continuation.resume(throwing: SceneOfflineBakeError.bakeProcessFailed("启动 CLI 失败: \(error.localizedDescription)"))
             }

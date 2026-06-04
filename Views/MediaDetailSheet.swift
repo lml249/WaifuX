@@ -343,7 +343,7 @@ struct MediaDetailSheet: View {
                 if !isBakingScene {
                     isBakingScene = true
                 }
-                bakeProgress = progress
+                updateSceneBakeProgress(progress)
                 if progress >= 1.0 {
                     isBakingScene = false
                     bakeProgress = 0
@@ -956,6 +956,12 @@ struct MediaDetailSheet: View {
         }
     }
 
+    private func updateSceneBakeProgress(_ progress: Double) {
+        guard progress.isFinite else { return }
+        let clamped = min(max(progress, 0.0), 0.99)
+        bakeProgress = max(bakeProgress, clamped)
+    }
+
     private func runSceneOfflineBake(renderer: SceneBakeRenderer, clearCachedArtifact: Bool) {
         guard let record = currentDownloadRecord else { return }
         if isBakingScene { return }
@@ -997,7 +1003,7 @@ struct MediaDetailSheet: View {
             }
             do {
                 let artifact = try await SceneOfflineBakeService.bake(record: record, renderer: renderer) { progress in
-                    bakeProgress = progress
+                    updateSceneBakeProgress(progress)
                 }
                 let videoURL = URL(fileURLWithPath: artifact.videoPath)
 
@@ -2137,7 +2143,7 @@ struct MediaDetailSheet: View {
                     persistArtifactToItemID: persistID,
                     progress: { [self] progress in
                         Task { @MainActor in
-                            bakeProgress = progress
+                            updateSceneBakeProgress(progress)
                         }
                     }
                 )
