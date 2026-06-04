@@ -45,6 +45,9 @@ final class VideoWallpaperManager: ObservableObject {
     @Published private(set) var isMuted = true
     @Published private(set) var isPaused = false
     @Published private(set) var volume: Double = 1.0
+    /// 壁纸变更计数器（每次 applyVideoWallpaper 成功切换后自增）。
+    /// 外部订阅此属性可感知任意壁纸切换事件，不受 `currentVideoURL` 值是否变化影响。
+    @Published private(set) var wallpaperChangeCount: UInt64 = 0
 
     /// 每个屏幕的独立 poster（key 为 screenID），解决多屏自动更换时 poster 被覆盖的问题
     private var posterURLByScreen: [String: URL] = [:]
@@ -677,6 +680,7 @@ final class VideoWallpaperManager: ObservableObject {
         updateAudioSession()
         syncCurrentVideoURL()
         persistState()
+        wallpaperChangeCount &+= 1
         DynamicWallpaperAutoPauseManager.shared.reevaluateCurrentState()
 
         // 同步到锁屏镜像实例（macOS 26+）
@@ -1014,6 +1018,7 @@ final class VideoWallpaperManager: ObservableObject {
             // 全局停止（原有逻辑）
             teardownAllWindows()
             currentVideoURL = nil
+            wallpaperChangeCount &+= 1
             currentPosterURL = nil
             posterURLByScreen.removeAll()
             posterURLByScreenFingerprint.removeAll()

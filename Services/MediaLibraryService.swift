@@ -1,6 +1,19 @@
 import Foundation
 import Combine
 
+private func mergedByStableID<Record>(
+    primary: [Record],
+    fallback: [Record],
+    id: (Record) -> String
+) -> [Record] {
+    var seen = Set<String>()
+    var merged: [Record] = []
+    for record in primary + fallback where seen.insert(id(record)).inserted {
+        merged.append(record)
+    }
+    return merged
+}
+
 @MainActor
 final class MediaLibraryService: ObservableObject {
     static let shared = MediaLibraryService()
@@ -13,16 +26,19 @@ final class MediaLibraryService: ObservableObject {
     }
     @Published private(set) var recentItems: [MediaItem] = []
 
+    // MARK: - 持久化（Cache 替代 UserDefaults）
+
+    private let cache = CachePersistenceService.shared
+    private let favCategory = "media/fav"
+    private let dlCategory = "media/dl"
+
+    /// UserDefaults keys — 仅迁移用
     private let favoriteRecordsKey = "media_favorite_records_v2"
     private let downloadRecordsKey = "media_download_records_v2"
     private let recentsKey = "media_recents_v1"
     private let legacyFavoritesKey = "media_favorites_v1"
     private let legacyDownloadsKey = "media_downloads_v1"
     private let defaults = UserDefaults.standard
-    /// 持久化防抖工作项，避免高频操作（批量收藏等）触发大量 JSON 编码 + UserDefaults 写入
-    private var persistFavoritesWork: DispatchWorkItem?
-    private var persistDownloadsWork: DispatchWorkItem?
-    private var persistRecentsWork: DispatchWorkItem?
 
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
@@ -112,20 +128,22 @@ final class MediaLibraryService: ObservableObject {
 
     func toggleFavorite(_ item: MediaItem) {
         // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
-        if favoriteIDSet.contains(item.id) {
-            if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id && $0.isActive }) {
-                favoriteRecords[index].item = item
-                favoriteRecords[index].metadata.markLocalMutation(deleted: true)
-            } else if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
-                favoriteRecords[index].item = item
-                favoriteRecords[index].metadata.markLocalMutation(deleted: false)
-            }
+        if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id && $0.isActive }) {
+            favoriteRecords[index].item = item
+            favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+        } else if let index = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
+            favoriteRecords[index].item = item
+            favoriteRecords[index].metadata.markLocalMutation(deleted: false)
         } else {
             favoriteRecords.insert(MediaFavoriteRecord(item: item), at: 0)
         }
 
         favoriteRecords = deduplicated(favoriteRecords)
-        persistFavorites()
+        // 单条写入 Cache
+        if let record = favoriteRecords.first(where: { $0.item.id == item.id }) {
+            saveFavToCache(record)
+        }
+        syncFavIndex()
     }
 
     func isFavorite(_ item: MediaItem) -> Bool {
@@ -154,7 +172,8 @@ final class MediaLibraryService: ObservableObject {
     func markAsLooped(localFilePath path: String) {
         guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
         downloadRecords[index].isLooped = true
-        persistDownloads()
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     func isDownloaded(_ item: MediaItem) -> Bool {
@@ -207,7 +226,11 @@ final class MediaLibraryService: ObservableObject {
         // 预缓存文件存在性，后续 isDownloaded() 不再走 FileManager
         fileCache.markExisting(atPath: localFileURL.path)
 
-        persistDownloads()
+        // 单条写入 Cache
+        if let record = downloadRecords.first(where: { $0.item.id == item.id }) {
+            saveDlToCache(record)
+        }
+        syncDlIndex()
         upsert(item)
 
         SceneBakeEligibilityAnalyzer.scheduleAnalysisIfSceneProject(itemID: item.id, localFileURL: localFileURL)
@@ -237,7 +260,8 @@ final class MediaLibraryService: ObservableObject {
             downloadRecords[index].sceneBakeArtifact = nil
         }
         downloadRecords[index].sceneBakeEligibility = snapshot
-        persistDownloads()
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
         downloadRecords = Array(downloadRecords)
 
         if triggerAutoBake, snapshot.isEligibleForOfflineBake {
@@ -254,7 +278,8 @@ final class MediaLibraryService: ObservableObject {
             return
         }
         downloadRecords[index].sceneBakeArtifact = artifact
-        persistDownloads()
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
         downloadRecords = Array(downloadRecords)
 
         // 确保烘焙视频有抽帧封面
@@ -272,7 +297,8 @@ final class MediaLibraryService: ObservableObject {
     func upsert(_ item: MediaItem) {
         if let favoriteIndex = favoriteRecords.firstIndex(where: { $0.item.id == item.id }) {
             favoriteRecords[favoriteIndex].item = item
-            persistFavorites()
+            saveFavToCache(favoriteRecords[favoriteIndex])
+            syncFavIndex()
             favoriteRecords = Array(favoriteRecords)
         }
 
@@ -283,7 +309,8 @@ final class MediaLibraryService: ObservableObject {
 
         if let downloadIndex = downloadRecords.firstIndex(where: { $0.item.id == item.id }) {
             downloadRecords[downloadIndex].item = item
-            persistDownloads()
+            saveDlToCache(downloadRecords[downloadIndex])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -296,7 +323,8 @@ final class MediaLibraryService: ObservableObject {
     func updateDownloadPath(for itemID: String, newURL: URL) {
         if let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) {
             downloadRecords[index].localFilePath = newURL.path
-            persistDownloads()
+            saveDlToCache(downloadRecords[index])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
             print("[MediaLibraryService] Updated download path for \(itemID) to \(newURL.path)")
         }
@@ -356,11 +384,11 @@ final class MediaLibraryService: ObservableObject {
             }
         }
         if changed {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
         if favoritesChanged {
-            persistFavorites()
+            rebuildFavCache()
             favoriteRecords = Array(favoriteRecords)
         }
         if changed || favoritesChanged {
@@ -384,9 +412,10 @@ final class MediaLibraryService: ObservableObject {
         for (index, record) in favoriteRecords.enumerated() {
             if ids.contains(record.item.id) {
                 favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+                saveFavToCache(favoriteRecords[index])
             }
         }
-        persistFavorites()
+        syncFavIndex()
         favoriteRecords = Array(favoriteRecords)
     }
 
@@ -398,7 +427,8 @@ final class MediaLibraryService: ObservableObject {
             let filePath = record.localFilePath
             // 标记软删除
             downloadRecords[index].metadata.markLocalMutation(deleted: true)
-            persistDownloads()
+            saveDlToCache(downloadRecords[index])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
             // 删除物理文件
             deletePhysicalFile(at: filePath)
@@ -415,9 +445,10 @@ final class MediaLibraryService: ObservableObject {
             if ids.contains(record.item.id) {
                 recordsToDelete.append(record)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
+                saveDlToCache(downloadRecords[index])
             }
         }
-        persistDownloads()
+        syncDlIndex()
         downloadRecords = Array(downloadRecords)
         // 删除所有对应的物理文件及烘焙产物
         for record in recordsToDelete {
@@ -462,7 +493,8 @@ final class MediaLibraryService: ObservableObject {
         )
         objectWillChange.send()
         downloadRecords[index].sceneBakeArtifact = nil
-        persistDownloads()
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
         downloadRecords = Array(downloadRecords)
         NotificationCenter.default.post(
             name: .sceneOfflineBakeThumbnailDidUpdate,
@@ -527,13 +559,15 @@ final class MediaLibraryService: ObservableObject {
         // 更新收藏记录
         if let index = favoriteRecords.firstIndex(where: { $0.item.id == mediaID }) {
             favoriteRecords[index].folderID = folderID
-            persistFavorites()
+            saveFavToCache(favoriteRecords[index])
+            syncFavIndex()
             favoriteRecords = Array(favoriteRecords)
         }
         // 更新下载记录
         if let index = downloadRecords.firstIndex(where: { $0.item.id == mediaID }) {
             downloadRecords[index].folderID = folderID
-            persistDownloads()
+            saveDlToCache(downloadRecords[index])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -550,11 +584,11 @@ final class MediaLibraryService: ObservableObject {
             downloadsChanged = true
         }
         if favoritesChanged {
-            persistFavorites()
+            rebuildFavCache()
             favoriteRecords = Array(favoriteRecords)
         }
         if downloadsChanged {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -575,7 +609,7 @@ final class MediaLibraryService: ObservableObject {
         }
 
         if cleanedCount > 0 {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
             print("[MediaLibraryService] Cleaned up \(cleanedCount) invalid download records")
         }
@@ -606,44 +640,81 @@ final class MediaLibraryService: ObservableObject {
             eligibility.contentRootPath = newPrefix + String(eligibility.contentRootPath.dropFirst(oldPrefix.count))
             downloadRecords[index].sceneBakeEligibility = eligibility
         }
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
     func deactivateDownloadRecord(itemID: String) {
         guard let index = downloadRecords.firstIndex(where: { $0.item.id == itemID }) else { return }
         downloadRecords[index].metadata.markLocalMutation(deleted: true)
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     private func loadPersistedState() {
         let decoder = JSONDecoder()
 
+        // 1) 优先从 Cache 加载，同时把旧 UserDefaults 作为一次性补缺来源
+        let cachedFavs: [MediaFavoriteRecord] = cache.loadAll(category: favCategory)
+        var migratedFavs: [MediaFavoriteRecord] = []
+        var favKeysToRemove: [String] = []
+
         if let data = defaults.data(forKey: favoriteRecordsKey),
            let decoded = try? decoder.decode([MediaFavoriteRecord].self, from: data) {
-            favoriteRecords = deduplicated(decoded)
-        } else if let data = defaults.data(forKey: legacyFavoritesKey),
-                  let decoded = try? decoder.decode([MediaItem].self, from: data) {
-            favoriteRecords = deduplicated(decoded.map { MediaFavoriteRecord(item: $0) })
-            defaults.removeObject(forKey: legacyFavoritesKey)
-            persistFavorites()
+            migratedFavs.append(contentsOf: decoded)
+            favKeysToRemove.append(favoriteRecordsKey)
         }
+        if let data = defaults.data(forKey: legacyFavoritesKey),
+           let decoded = try? decoder.decode([MediaItem].self, from: data) {
+            migratedFavs.append(contentsOf: decoded.map { MediaFavoriteRecord(item: $0) })
+            favKeysToRemove.append(legacyFavoritesKey)
+        }
+
+        favoriteRecords = deduplicated(mergedByStableID(
+            primary: cachedFavs,
+            fallback: migratedFavs,
+            id: \.id
+        ))
+        if !migratedFavs.isEmpty, rebuildFavCache() {
+            favKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
+        }
+
+        // --- 下载 ---
+        let cachedDls: [MediaDownloadRecord] = cache.loadAll(category: dlCategory)
+        var migratedDls: [MediaDownloadRecord] = []
+        var dlKeysToRemove: [String] = []
 
         if let data = defaults.data(forKey: downloadRecordsKey),
            let decoded = try? decoder.decode([MediaDownloadRecord].self, from: data) {
-            downloadRecords = decoded
-        } else if let data = defaults.data(forKey: legacyDownloadsKey),
-                  let decoded = try? decoder.decode([MediaDownloadRecord].self, from: data) {
-            downloadRecords = decoded
-            defaults.removeObject(forKey: legacyDownloadsKey)
-            persistDownloads()
+            migratedDls.append(contentsOf: decoded)
+            dlKeysToRemove.append(downloadRecordsKey)
+        }
+        if let data = defaults.data(forKey: legacyDownloadsKey),
+           let decoded = try? decoder.decode([MediaDownloadRecord].self, from: data) {
+            migratedDls.append(contentsOf: decoded)
+            dlKeysToRemove.append(legacyDownloadsKey)
         }
 
+        downloadRecords = mergedByStableID(
+            primary: cachedDls,
+            fallback: migratedDls,
+            id: \.id
+        )
+        if !migratedDls.isEmpty, rebuildDlCache() {
+            dlKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
+        }
+
+        // --- 最近浏览（量小，保留 UserDefaults）---
         if let data = defaults.data(forKey: recentsKey),
-           let decoded = try? decoder.decode([MediaItem].self, from: data) {
+           let decoded = try? JSONDecoder().decode([MediaItem].self, from: data) {
             recentItems = Array(deduplicated(decoded).prefix(18))
         }
     }
 
-    /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
+    // MARK: - 最近浏览持久化（量小仍用 UserDefaults）
+
+    private var persistRecentsWork: DispatchWorkItem?
     private static let persistQueue = DispatchQueue(label: "com.waifux.media.persist", qos: .utility)
 
     private static func schedulePersist<Value: Encodable & Sendable>(
@@ -661,28 +732,67 @@ final class MediaLibraryService: ObservableObject {
         persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    private func persistFavorites() {
-        Self.schedulePersist(
-            value: favoriteRecords,
-            key: favoriteRecordsKey,
-            assigningTo: &persistFavoritesWork
-        )
-    }
-
-    func persistDownloads() {
-        Self.schedulePersist(
-            value: downloadRecords,
-            key: downloadRecordsKey,
-            assigningTo: &persistDownloadsWork
-        )
-    }
-
     private func persistRecents() {
         Self.schedulePersist(
             value: recentItems,
             key: recentsKey,
             assigningTo: &persistRecentsWork
         )
+    }
+
+    /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
+    func persistDownloads() {
+        rebuildDlCache()
+    }
+
+    // MARK: - Cache 辅助方法
+
+    @discardableResult
+    private func saveFavToCache(_ record: MediaFavoriteRecord) -> Bool {
+        cache.save(record, key: "\(favCategory)/\(record.id)")
+    }
+
+    @discardableResult
+    private func deleteFavFromCache(_ id: String) -> Bool {
+        cache.delete(key: "\(favCategory)/\(id)")
+    }
+
+    @discardableResult
+    private func saveDlToCache(_ record: MediaDownloadRecord) -> Bool {
+        cache.save(record, key: "\(dlCategory)/\(record.id)")
+    }
+
+    @discardableResult
+    private func deleteDlFromCache(_ id: String) -> Bool {
+        cache.delete(key: "\(dlCategory)/\(id)")
+    }
+
+    @discardableResult
+    private func syncFavIndex() -> Bool {
+        let ids = favoriteRecords.map(\.id)
+        return cache.saveIndex(ids, key: "index/\(favCategory)")
+    }
+
+    @discardableResult
+    private func syncDlIndex() -> Bool {
+        let ids = downloadRecords.map(\.id)
+        return cache.saveIndex(ids, key: "index/\(dlCategory)")
+    }
+
+    @discardableResult
+    private func rebuildFavCache() -> Bool {
+        for record in favoriteRecords {
+            guard saveFavToCache(record) else { return false }
+        }
+        return syncFavIndex()
+    }
+
+    @discardableResult
+    private func rebuildDlCache() -> Bool {
+        for record in downloadRecords {
+            guard saveDlToCache(record) else { return false }
+        }
+        return syncDlIndex()
     }
 
     private func deduplicated(_ items: [MediaItem]) -> [MediaItem] {
@@ -711,15 +821,19 @@ final class WallpaperLibraryService: ObservableObject {
         didSet { rebuildDownloadIndex() }
     }
 
+    // MARK: - 持久化（Cache 替代 UserDefaults）
+
+    private let cache = CachePersistenceService.shared
+    private let favCategory = "wallpaper/fav"
+    private let dlCategory = "wallpaper/dl"
+
+    /// UserDefaults key — 仅迁移用
     private let favoriteRecordsKey = "wallpaper_favorite_records_v2"
     private let downloadRecordsKey = "wallpaper_download_records_v2"
     private let legacyFavoritesKey = "local_favorites"
     private let legacyCloudFavoritesKey = "cloud_favorites"
     private let legacyDownloadsKey = "wallpaper_downloads_v1"
     private let defaults = UserDefaults.standard
-    /// 持久化防抖工作项
-    private var persistFavoritesWork: DispatchWorkItem?
-    private var persistDownloadsWork: DispatchWorkItem?
 
     /// ⚡ 快速查找索引：活跃收藏/下载的 ID 集合，避免主线程线性扫描
     private var favoriteIDSet: Set<String> = []
@@ -803,22 +917,23 @@ final class WallpaperLibraryService: ObservableObject {
 
     func toggleFavorite(_ wallpaper: Wallpaper) {
         // ⚡ 先用 Set 快速判断是否存在，避免全表 firstIndex 线性扫描
-        if favoriteIDSet.contains(wallpaper.id) {
-            // 需要 index 来修改记录，但至少 Set 过滤后只有活跃记录才可能匹配
-            if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) {
-                favoriteRecords[index].wallpaper = wallpaper
-                favoriteRecords[index].metadata.markLocalMutation(deleted: true)
-            } else if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
-                // 已存在但不活跃（软删除），重新激活
-                favoriteRecords[index].wallpaper = wallpaper
-                favoriteRecords[index].metadata.markLocalMutation(deleted: false)
-            }
+        if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id && $0.isActive }) {
+            favoriteRecords[index].wallpaper = wallpaper
+            favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+        } else if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
+            // 已存在但不活跃（软删除），重新激活
+            favoriteRecords[index].wallpaper = wallpaper
+            favoriteRecords[index].metadata.markLocalMutation(deleted: false)
         } else {
             favoriteRecords.insert(WallpaperFavoriteRecord(wallpaper: wallpaper), at: 0)
         }
 
         favoriteRecords = deduplicated(favoriteRecords)
-        persistFavorites()
+        // 单条写入 Cache
+        if let record = favoriteRecords.first(where: { $0.wallpaper.id == wallpaper.id }) {
+            saveFavToCache(record)
+        }
+        syncFavIndex()
     }
 
     func isFavorite(_ wallpaper: Wallpaper) -> Bool {
@@ -847,7 +962,8 @@ final class WallpaperLibraryService: ObservableObject {
     func markAsLooped(localFilePath path: String) {
         guard let index = downloadRecords.firstIndex(where: { $0.localFilePath == path }) else { return }
         downloadRecords[index].isLooped = true
-        persistDownloads()
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     func isDownloaded(_ wallpaper: Wallpaper) -> Bool {
@@ -897,20 +1013,25 @@ final class WallpaperLibraryService: ObservableObject {
         // 预缓存文件存在性，后续 isDownloaded() 不再走 FileManager
         fileCache.markExisting(atPath: fileURL.path)
 
-        persistDownloads()
+        // 单条写入 Cache
+        let record = downloadRecords.first { $0.wallpaper.id == wallpaper.id }
+        if let record { saveDlToCache(record) }
+        syncDlIndex()
         upsert(wallpaper)
     }
 
     func upsert(_ wallpaper: Wallpaper) {
         if let favoriteIndex = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
             favoriteRecords[favoriteIndex].wallpaper = wallpaper
-            persistFavorites()
+            saveFavToCache(favoriteRecords[favoriteIndex])
+            syncFavIndex()
             favoriteRecords = Array(favoriteRecords)
         }
 
         if let downloadIndex = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaper.id }) {
             downloadRecords[downloadIndex].wallpaper = wallpaper
-            persistDownloads()
+            saveDlToCache(downloadRecords[downloadIndex])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -934,11 +1055,11 @@ final class WallpaperLibraryService: ObservableObject {
 
         // 批量持久化
         if favoritesChanged {
-            persistFavorites()
+            rebuildFavCache()
             favoriteRecords = Array(favoriteRecords)
         }
         if downloadsChanged {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -951,7 +1072,8 @@ final class WallpaperLibraryService: ObservableObject {
     func updateDownloadPath(for wallpaperID: String, newURL: URL) {
         if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
             downloadRecords[index].localFilePath = newURL.path
-            persistDownloads()
+            saveDlToCache(downloadRecords[index])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
             print("[WallpaperLibraryService] Updated download path for \(wallpaperID) to \(newURL.path)")
         }
@@ -985,11 +1107,11 @@ final class WallpaperLibraryService: ObservableObject {
             }
         }
         if changed {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
         if favoritesChanged {
-            persistFavorites()
+            rebuildFavCache()
             favoriteRecords = Array(favoriteRecords)
         }
         if changed || favoritesChanged {
@@ -1043,9 +1165,10 @@ final class WallpaperLibraryService: ObservableObject {
         for (index, record) in favoriteRecords.enumerated() {
             if ids.contains(record.wallpaper.id) {
                 favoriteRecords[index].metadata.markLocalMutation(deleted: true)
+                saveFavToCache(favoriteRecords[index])
             }
         }
-        persistFavorites()
+        syncFavIndex()
         favoriteRecords = Array(favoriteRecords)
     }
 
@@ -1057,9 +1180,10 @@ final class WallpaperLibraryService: ObservableObject {
             if ids.contains(record.wallpaper.id) {
                 filesToDelete.append(record.localFilePath)
                 downloadRecords[index].metadata.markLocalMutation(deleted: true)
+                saveDlToCache(downloadRecords[index])
             }
         }
-        persistDownloads()
+        syncDlIndex()
         downloadRecords = Array(downloadRecords)
         // 删除所有对应的物理文件
         for path in filesToDelete {
@@ -1122,7 +1246,7 @@ final class WallpaperLibraryService: ObservableObject {
         }
 
         if cleanedCount > 0 {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
             print("[WallpaperLibraryService] Cleaned up \(cleanedCount) invalid download records")
         }
@@ -1134,12 +1258,16 @@ final class WallpaperLibraryService: ObservableObject {
     func repairDownloadPath(recordID: String, newPath: String) {
         guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
         downloadRecords[index].localFilePath = newPath
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     /// 将指定记录标记为已删除（由 DirectoryMigrationService 调用）
     func deactivateDownloadRecord(recordID: String) {
         guard let index = downloadRecords.firstIndex(where: { $0.id == recordID }) else { return }
         downloadRecords[index].metadata.markLocalMutation(deleted: true)
+        saveDlToCache(downloadRecords[index])
+        syncDlIndex()
     }
 
     // MARK: - 文件夹移动
@@ -1148,13 +1276,15 @@ final class WallpaperLibraryService: ObservableObject {
         // 更新收藏记录
         if let index = favoriteRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
             favoriteRecords[index].folderID = folderID
-            persistFavorites()
+            saveFavToCache(favoriteRecords[index])
+            syncFavIndex()
             favoriteRecords = Array(favoriteRecords)
         }
         // 更新下载记录
         if let index = downloadRecords.firstIndex(where: { $0.wallpaper.id == wallpaperID }) {
             downloadRecords[index].folderID = folderID
-            persistDownloads()
+            saveDlToCache(downloadRecords[index])
+            syncDlIndex()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -1171,11 +1301,11 @@ final class WallpaperLibraryService: ObservableObject {
             downloadsChanged = true
         }
         if favoritesChanged {
-            persistFavorites()
+            rebuildFavCache()
             favoriteRecords = Array(favoriteRecords)
         }
         if downloadsChanged {
-            persistDownloads()
+            rebuildDlCache()
             downloadRecords = Array(downloadRecords)
         }
     }
@@ -1183,73 +1313,123 @@ final class WallpaperLibraryService: ObservableObject {
     private func loadPersistedState() {
         let decoder = JSONDecoder()
 
+        // 1) 优先从 Cache 加载，同时把旧 UserDefaults 作为一次性补缺来源
+        let cachedFavs: [WallpaperFavoriteRecord] = cache.loadAll(category: favCategory)
+        var migratedFavs: [WallpaperFavoriteRecord] = []
+        var favKeysToRemove: [String] = []
+
         if let data = defaults.data(forKey: favoriteRecordsKey),
            let decoded = try? decoder.decode([WallpaperFavoriteRecord].self, from: data) {
-            favoriteRecords = deduplicated(decoded)
-        } else {
-            var migratedFavorites: [WallpaperFavoriteRecord] = []
-
-            if let data = defaults.data(forKey: legacyFavoritesKey),
-               let decoded = try? decoder.decode([Wallpaper].self, from: data) {
-                migratedFavorites.append(contentsOf: decoded.map { WallpaperFavoriteRecord(wallpaper: $0) })
-                defaults.removeObject(forKey: legacyFavoritesKey)
-            }
-
-            if let data = defaults.data(forKey: legacyCloudFavoritesKey),
-               let decoded = try? decoder.decode([Wallpaper].self, from: data) {
-                migratedFavorites.append(contentsOf: decoded.map { WallpaperFavoriteRecord(wallpaper: $0) })
-                defaults.removeObject(forKey: legacyCloudFavoritesKey)
-            }
-
-            favoriteRecords = deduplicated(migratedFavorites)
-            if !favoriteRecords.isEmpty {
-                persistFavorites()
-            }
+            migratedFavs.append(contentsOf: decoded)
+            favKeysToRemove.append(favoriteRecordsKey)
         }
+        if let data = defaults.data(forKey: legacyFavoritesKey),
+           let decoded = try? decoder.decode([Wallpaper].self, from: data) {
+            migratedFavs.append(contentsOf: decoded.map { WallpaperFavoriteRecord(wallpaper: $0) })
+            favKeysToRemove.append(legacyFavoritesKey)
+        }
+        if let data = defaults.data(forKey: legacyCloudFavoritesKey),
+           let decoded = try? decoder.decode([Wallpaper].self, from: data) {
+            migratedFavs.append(contentsOf: decoded.map { WallpaperFavoriteRecord(wallpaper: $0) })
+            favKeysToRemove.append(legacyCloudFavoritesKey)
+        }
+
+        favoriteRecords = deduplicated(mergedByStableID(
+            primary: cachedFavs,
+            fallback: migratedFavs,
+            id: \.id
+        ))
+        if !migratedFavs.isEmpty, rebuildFavCache() {
+            favKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
+        }
+
+        // --- 下载 ---
+        let cachedDls: [WallpaperDownloadRecord] = cache.loadAll(category: dlCategory)
+        var migratedDls: [WallpaperDownloadRecord] = []
+        var dlKeysToRemove: [String] = []
 
         if let data = defaults.data(forKey: downloadRecordsKey),
            let decoded = try? decoder.decode([WallpaperDownloadRecord].self, from: data) {
-            downloadRecords = decoded
-        } else if let data = defaults.data(forKey: legacyDownloadsKey),
-                  let decoded = try? decoder.decode([WallpaperDownloadRecord].self, from: data) {
-            downloadRecords = decoded
-            defaults.removeObject(forKey: legacyDownloadsKey)
-            persistDownloads()
+            migratedDls.append(contentsOf: decoded)
+            dlKeysToRemove.append(downloadRecordsKey)
+        }
+        if let data = defaults.data(forKey: legacyDownloadsKey),
+           let decoded = try? decoder.decode([WallpaperDownloadRecord].self, from: data) {
+            migratedDls.append(contentsOf: decoded)
+            dlKeysToRemove.append(legacyDownloadsKey)
+        }
+
+        downloadRecords = mergedByStableID(
+            primary: cachedDls,
+            fallback: migratedDls,
+            id: \.id
+        )
+        if !migratedDls.isEmpty, rebuildDlCache() {
+            dlKeysToRemove.forEach { defaults.removeObject(forKey: $0) }
         }
     }
 
-    /// 后台持久化队列，避免 JSON 编码 + UserDefaults 写入阻塞主线程
-    private static let persistQueue = DispatchQueue(label: "com.waifux.wallpaper.persist", qos: .utility)
-
-    private static func schedulePersist<Value: Encodable & Sendable>(
-        value: Value,
-        key: String,
-        assigningTo storage: inout DispatchWorkItem?
-    ) {
-        storage?.cancel()
-        let work = DispatchWorkItem(block: { @Sendable in
-            if let data = try? JSONEncoder().encode(value) {
-                UserDefaults.standard.set(data, forKey: key)
-            }
-        })
-        storage = work
-        persistQueue.asyncAfter(deadline: .now() + 0.3, execute: work)
-    }
-
-    private func persistFavorites() {
-        Self.schedulePersist(
-            value: favoriteRecords,
-            key: favoriteRecordsKey,
-            assigningTo: &persistFavoritesWork
-        )
-    }
-
+    /// 外部调用入口：批量重建下载 Cache（由 DirectoryMigrationService 等调用）
     func persistDownloads() {
-        Self.schedulePersist(
-            value: downloadRecords,
-            key: downloadRecordsKey,
-            assigningTo: &persistDownloadsWork
-        )
+        rebuildDlCache()
+    }
+
+    // MARK: - Cache 辅助方法
+
+    /// 保存单条收藏记录到 Cache
+    @discardableResult
+    private func saveFavToCache(_ record: WallpaperFavoriteRecord) -> Bool {
+        cache.save(record, key: "\(favCategory)/\(record.id)")
+    }
+
+    /// 删除单条收藏记录
+    @discardableResult
+    private func deleteFavFromCache(_ id: String) -> Bool {
+        cache.delete(key: "\(favCategory)/\(id)")
+    }
+
+    /// 保存单条下载记录到 Cache
+    @discardableResult
+    private func saveDlToCache(_ record: WallpaperDownloadRecord) -> Bool {
+        cache.save(record, key: "\(dlCategory)/\(record.id)")
+    }
+
+    /// 删除单条下载记录
+    @discardableResult
+    private func deleteDlFromCache(_ id: String) -> Bool {
+        cache.delete(key: "\(dlCategory)/\(id)")
+    }
+
+    /// 同步收藏索引（活跃 ID 列表）
+    @discardableResult
+    private func syncFavIndex() -> Bool {
+        let ids = favoriteRecords.map(\.id)
+        return cache.saveIndex(ids, key: "index/\(favCategory)")
+    }
+
+    /// 同步下载索引
+    @discardableResult
+    private func syncDlIndex() -> Bool {
+        let ids = downloadRecords.map(\.id)
+        return cache.saveIndex(ids, key: "index/\(dlCategory)")
+    }
+
+    /// 全量重建收藏缓存（用于迁移/批量操作后）
+    @discardableResult
+    private func rebuildFavCache() -> Bool {
+        for record in favoriteRecords {
+            guard saveFavToCache(record) else { return false }
+        }
+        return syncFavIndex()
+    }
+
+    /// 全量重建下载缓存
+    @discardableResult
+    private func rebuildDlCache() -> Bool {
+        for record in downloadRecords {
+            guard saveDlToCache(record) else { return false }
+        }
+        return syncDlIndex()
     }
 
     private func deduplicated(_ records: [WallpaperFavoriteRecord]) -> [WallpaperFavoriteRecord] {

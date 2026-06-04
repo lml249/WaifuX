@@ -1407,9 +1407,6 @@ private struct WorkshopSettingsTab: View {
                 // SteamCMD 登录
                 steamCMDLoginSection
 
-                // 清理下载缓存
-                cleanupSection
-
                 // 桌面动态元素（时钟、音频柱状图等）
                 MacSettingsSection {
                     MacSettingsRow(title: t("workshop.desktopDynamicElements"), subtitle: t("workshop.desktopDynamicElementsDesc"), showDivider: false) {
@@ -1431,6 +1428,9 @@ private struct WorkshopSettingsTab: View {
                         }
                     }
                 }
+
+                // 清理下载缓存
+                cleanupSection
 
                 Spacer()
             }

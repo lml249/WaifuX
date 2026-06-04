@@ -22,6 +22,9 @@ public struct DynamicTextEntry: Codable, Equatable, Sendable {
     public let value: String?
     /// 是否可见
     public let visible: Bool
+    /// 格式字符串，如 "hh"（时）、"mm"（分）、"ss"（秒）、"hh:mm"（完整时间）
+    /// 从 text.scriptproperties.format 提取；nil 表示未知（回退到完整时间 "HH:mm"）
+    public var format: String? = nil
 
     /// renderer sidecar 中的原始文本对象字段（用于按 Wallpaper Engine 场景坐标恢复 overlay）。
     public var id: String? = nil
@@ -50,6 +53,13 @@ public struct DynamicTextEntry: Codable, Equatable, Sendable {
     public var finalScaleY: Double? = nil
     public var alignment: String? = nil
     public var renderOrder: Int? = nil
+
+    /// 返回仅修改 format 的新副本，保留所有其他字段
+    func withFormat(_ newFormat: String?) -> DynamicTextEntry {
+        var copy = self
+        copy.format = newFormat
+        return copy
+    }
 }
 
 public struct WallpaperDynamicTextsInfo: Codable, Equatable, Sendable {
@@ -101,26 +111,49 @@ public enum WallpaperDynamicTextParser {
         var entries: [DynamicTextEntry] = []
 
         for obj in objects {
-            guard let type = obj["type"] as? String,
-                  type.lowercased() == "text",
-                  let tp = obj["textProperties"] as? [String: Any]
-            else { continue }
+            // 检测文本对象：scene.json 可能用 "text"（旧格式）或 "textProperties"（新格式）
+            // 且不一定有明确的 "type": "text" 字段
+            let textObj: [String: Any]?
+            if let tp = obj["textProperties"] as? [String: Any] {
+                textObj = tp
+            } else if let t = obj["text"] as? [String: Any] {
+                textObj = t
+            } else if let type = obj["type"] as? String, type.lowercased() == "text",
+                      let tp = obj["textProperties"] as? [String: Any] {
+                textObj = tp
+            } else {
+                textObj = nil
+            }
+            guard let tp = textObj else { continue }
 
             let name = (obj["name"] as? String) ?? ""
             let script = tp["script"] as? String
             let value = tp["value"] as? String
             let visible = (obj["visible"] as? Bool) ?? true
 
-            let behavior = detectBehavior(name: name, script: script)
-            if behavior != "unknown" {
-                entries.append(DynamicTextEntry(
-                    behavior: behavior,
-                    name: name,
-                    script: script,
-                    value: value,
-                    visible: visible
-                ))
+            // 提取格式：scriptproperties / scriptProperties 中的 format 字段
+            let format: String?
+            if let sp = tp["scriptproperties"] as? [String: Any],
+               let f = sp["format"] as? String {
+                format = f
+            } else if let sp = tp["scriptProperties"] as? [String: Any],
+                      let f = sp["format"] as? String {
+                format = f
+            } else {
+                format = nil
             }
+
+            let behavior = detectBehavior(name: name, script: script, format: format)
+            // 不再过滤 "unknown" 行为：所有可见文本对象都应保留到 overlay 中，
+            // 即使无法检测行为类型。renderedText 的 default 分支会显示原始 value。
+            entries.append(DynamicTextEntry(
+                behavior: behavior,
+                name: name,
+                script: script,
+                value: value,
+                visible: visible,
+                format: format
+            ))
         }
 
         return WallpaperDynamicTextsInfo(
@@ -133,27 +166,63 @@ public enum WallpaperDynamicTextParser {
     // MARK: - 行为检测
 
     /// 与 web 模板 detectBehavior() 一致的逻辑
-    private static func detectBehavior(name: String, script: String?) -> String {
+    /// - Parameters:
+    ///   - format: 从 text.scriptproperties.format 提取的显式格式字符串（如 "hh"、"mm"、"dd"）
+    private static func detectBehavior(name: String, script: String?, format: String? = nil) -> String {
+        // 优先使用显式 format 字段判断
+        // Wallpaper Engine 格式约定：hh/h=小时, mm/m=分钟, ss/s=秒, dd/d=日,
+        // MM/M=月份(大写), yyyy/yy=年, EEEE/EEE=星期(大写)
+        if let fmt = format {
+            let lower = fmt.lowercased()
+
+            // 星期标记
+            if fmt.contains("EEEE") || fmt.contains("EEE") || fmt == "E" { return "weekday" }
+
+            // 年标记
+            if lower.contains("yyyy") || lower.contains("yy") { return "date" }
+
+            // 月标记（原始大写 MM）
+            if fmt.contains("MMMM") || fmt.contains("MMM") || fmt == "MM" { return "date" }
+
+            // 日标记
+            if lower.contains("dd") || lower == "d" { return "date" }
+
+            // 时间标记（小写 hh/h/mm/m/ss/s）
+            if lower.contains("hh") || lower == "h" { return "clock" }
+            if lower.contains("mm") || lower == "m" { return "clock" }
+            if lower.contains("ss") || lower == "s" { return "clock" }
+        }
+
         let lowerName = name.lowercased().replacingOccurrences(of: " ", with: "")
         let lowerScript = (script ?? "").lowercased()
 
-        // 时钟：script 含 hour/minute/second 或名称暗示
+        // 时钟：script 含 hour/minute/second 或名称暗示（支持中文）
         let isClock = lowerScript.contains("hour") || lowerScript.contains("minute")
             || lowerScript.contains("second")
             || lowerScript.contains("%h") || lowerScript.contains("%m") || lowerScript.contains("%s")
             || lowerScript.contains("gethours") || lowerScript.contains("getminutes") || lowerScript.contains("getseconds")
             || lowerScript.contains("os.time") || lowerScript.contains("os.date")
             || lowerName.contains("clock") || lowerName.contains("time")
+            // 中文名称匹配：时钟/时间/时/分钟/分钟/秒钟/秒
+            || lowerName.contains("时钟") || lowerName.contains("时间") || lowerName == "时"
+            || lowerName.contains("分钟") || lowerName.contains("分秒")
+            || lowerName.contains("秒钟") || lowerName == "秒"
         if isClock { return "clock" }
 
-        // 星期优先于日期
-        if lowerName == "day" || lowerName.contains("weekday") || lowerName.contains("week") {
+        // 时段（AM/PM 指示器，如"下午"、"凌晨"）
+        if lowerName.contains("时段") || lowerName.contains("ampm") {
+            return "period"
+        }
+
+        // 星期优先于日期（支持中文）
+        if lowerName == "day" || lowerName.contains("weekday") || lowerName.contains("week")
+            || lowerName.contains("星期") || lowerName == "周" {
             return "weekday"
         }
         if lowerName.contains("day") && !lowerName.contains("date") {
             return "weekday"
         }
-        if lowerName.contains("date") {
+        if lowerName.contains("date") || lowerName.contains("日期") {
             return "date"
         }
 
@@ -247,9 +316,11 @@ private extension WallpaperDynamicTextParser {
         }
 
         let entries = textObjects.compactMap(legacyEntry(from:))
+        // 后处理：对同名的 clock 条目推断格式（hh/mm/ss）
+        let inferredEntries = inferLegacyClockFormats(entries: entries)
         return WallpaperDynamicTextsInfo(
-            hasDynamicText: !entries.isEmpty || (isRendererDynamicTextList && !textObjects.isEmpty),
-            entries: entries,
+            hasDynamicText: !inferredEntries.isEmpty || (isRendererDynamicTextList && !textObjects.isEmpty),
+            entries: inferredEntries,
             sceneWidth: sceneWidth,
             sceneHeight: sceneHeight,
             extractedAt: Date()
@@ -267,14 +338,29 @@ private extension WallpaperDynamicTextParser {
 
     static func legacyEntry(from object: [String: Any]) -> DynamicTextEntry? {
         let behavior = legacyBehavior(from: object)
-        guard behavior != "unknown" else { return nil }
+        // 注意：不再过滤 "unknown" 行为。即使行为未知，只要 renderer 输出了该对象
+        //（有位置/颜色/字体信息），就应该在 overlay 中保留其位置占位。
+        // 对于 "unknown" 条目，renderedText 的 default 分支会显示原始 value。
+
+        // 从 scriptproperties 提取 format
+        let format: String?
+        if let sp = object["scriptproperties"] as? [String: Any],
+           let f = legacyString(sp["format"]) {
+            format = f
+        } else if let sp = object["scriptProperties"] as? [String: Any],
+                  let f = legacyString(sp["format"]) {
+            format = f
+        } else {
+            format = nil
+        }
 
         var entry = DynamicTextEntry(
             behavior: behavior,
             name: legacyString(object["name"] ?? object["id"]) ?? "",
             script: legacyString(object["script"]),
             value: legacyString(object["value"] ?? object["text"]),
-            visible: legacyBool(object["visible"]) ?? true
+            visible: legacyBool(object["visible"]) ?? true,
+            format: format
         )
         entry.id = legacyString(object["id"])
         entry.x = legacyDouble(object["x"])
@@ -325,7 +411,56 @@ private extension WallpaperDynamicTextParser {
 
         let name = legacyString(object["name"] ?? object["id"]) ?? ""
         let script = legacyString(object["script"])
-        return detectBehavior(name: name, script: script)
+        // 尝试从 scriptproperties 提取 format
+        let format: String?
+        if let sp = object["scriptproperties"] as? [String: Any],
+           let f = legacyString(sp["format"]) {
+            format = f
+        } else if let sp = object["scriptProperties"] as? [String: Any],
+                  let f = legacyString(sp["format"]) {
+            format = f
+        } else {
+            format = nil
+        }
+        return detectBehavior(name: name, script: script, format: format)
+    }
+
+    /// 后处理：对同名的 clock 条目推断格式（hh/mm/ss）。
+    /// 当 renderer sidecar 未提供 format 字段时，根据条目位置/名称推断格式。
+    static func inferLegacyClockFormats(entries: [DynamicTextEntry]) -> [DynamicTextEntry] {
+        let clockIndices = entries.indices.filter { idx in
+            entries[idx].behavior == "clock" && entries[idx].format == nil
+        }
+        guard !clockIndices.isEmpty else { return entries }
+
+        var result = entries
+
+        // 同名条目按 X 位置从左到右推断 hh/mm/ss
+        let groupedByName = Dictionary(grouping: clockIndices) { entries[$0].name }
+        for (_, indices) in groupedByName where indices.count >= 2 {
+            let sorted = indices.sorted { lhs, rhs in
+                let lx = entries[lhs].finalOriginX ?? entries[lhs].originX ?? entries[lhs].finalX ?? 0
+                let rx = entries[rhs].finalOriginX ?? entries[rhs].originX ?? entries[rhs].finalX ?? 0
+                return lx < rx
+            }
+            let formats = ["hh", "mm", "ss"]
+            for (i, idx) in sorted.enumerated() where i < formats.count {
+                result[idx] = result[idx].withFormat(formats[i])
+            }
+        }
+
+        // 对未配对的独立条目：仅当名称明确指向时间组件（秒/分）时才推断格式
+        // 名称含"时钟"/"time"等主时钟词汇的保留 format=nil → 显示完整时间 HH:mm
+        for idx in clockIndices where result[idx].format == nil {
+            let lowerName = result[idx].name.lowercased()
+            if lowerName.contains("second") || lowerName.contains("秒钟") || lowerName == "秒" || lowerName.contains("sec") {
+                result[idx] = result[idx].withFormat("ss")
+            } else if lowerName.contains("minute") || lowerName.contains("分钟") || lowerName == "分" || lowerName.contains("min") {
+                result[idx] = result[idx].withFormat("mm")
+            }
+        }
+
+        return result
     }
 
     static func legacyString(_ value: Any?) -> String? {

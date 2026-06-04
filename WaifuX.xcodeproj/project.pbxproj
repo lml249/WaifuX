@@ -114,6 +114,7 @@
 		7CBFCC3D0B6CE3E540C2589B /* NotchOverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 686561141BAEE0C03E5992F1 /* NotchOverlayManager.swift */; };
 		7CE9D7595407EF27D532FE30 /* DanmakuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDB6DD5A499E7BFC1DB6DB1B /* DanmakuView.swift */; };
 		7D439B9CC297E0893336CDFE /* LiquidGlassWallpaperCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7159115AD04C7CD5E4B85F /* LiquidGlassWallpaperCard.swift */; };
+		7DC1CC892F0E3EBA2C3F0EAF /* CachePersistenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 052D1B96F0CFBE6BB5275D62 /* CachePersistenceService.swift */; };
 		808D90FA1E1592D13FEC41FC /* RuleMarketView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5147F264943106E0DEC95DF3 /* RuleMarketView.swift */; };
 		819B9105E8E85CCD720117FC /* HTMLParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC5EF18290E78CAC93FAF3FA /* HTMLParser.swift */; };
 		8466942F2BFA85F86B4F2FA0 /* DynamicBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACE8000798FEE18A01F02B13 /* DynamicBackground.swift */; };
@@ -246,6 +247,7 @@
 
 /* Begin PBXFileReference section */
 		02E3788AB0F9EC18D14604A4 /* BounceSymbolModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BounceSymbolModifier.swift; sourceTree = "<group>"; };
+		052D1B96F0CFBE6BB5275D62 /* CachePersistenceService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CachePersistenceService.swift; sourceTree = "<group>"; };
 		0536692A0BF2778A553D8E82 /* SleepPreventer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SleepPreventer.swift; sourceTree = "<group>"; };
 		05A203B45928820B45B95DE2 /* WaifuXWallpaperExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WaifuXWallpaperExtension.entitlements; sourceTree = "<group>"; };
 		05A871A337E95110230471F2 /* TopNavigationBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopNavigationBar.swift; sourceTree = "<group>"; };
@@ -362,7 +364,6 @@
 		8ED35D3E2C6C3E7FC268D73C /* WallpaperEngineEmbeddedAssets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WallpaperEngineEmbeddedAssets.swift; sourceTree = "<group>"; };
 		8FF6005F8F505439E1DD6D6C /* LiquidGlassAudioVisualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassAudioVisualizer.swift; sourceTree = "<group>"; };
 		90887F64FCF64F7B1EDB9EDD /* SearchOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchOverlay.swift; sourceTree = "<group>"; };
-		D0E1F2A3B4C5D6E7F8A9B0C1 /* KonachanTagSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanTagSearchField.swift; sourceTree = "<group>"; };
 		916B2F6262D12AA99FF3B356 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		91E6D95488469530050E4E91 /* GuessYouLikeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GuessYouLikeViewModel.swift; sourceTree = "<group>"; };
 		92360DB7D61D511F712E8CC6 /* DownloadError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadError.swift; sourceTree = "<group>"; };
@@ -414,6 +415,7 @@
 		CDD6C2D290470B8843A1A157 /* MediaExploreViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaExploreViewModel.swift; sourceTree = "<group>"; };
 		CE3727E57F3F09F93DF5B40C /* ContentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentModels.swift; sourceTree = "<group>"; };
 		CFF7EC2802DEB922E192AE8E /* GitHubHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubHosts.swift; sourceTree = "<group>"; };
+		D0E1F2A3B4C5D6E7F8A9B0C1 /* KonachanTagSearchField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KonachanTagSearchField.swift; sourceTree = "<group>"; };
 		D154DF41056CBDAB804D79D2 /* DesktopIconManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopIconManager.swift; sourceTree = "<group>"; };
 		D30E1D462FB89FD612BE72B2 /* ExploreGridCollectionViewLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreGridCollectionViewLayout.swift; sourceTree = "<group>"; };
 		D52E421AB7EE59F2ADC29ACA /* LiquidGlassNextItemToast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlassNextItemToast.swift; sourceTree = "<group>"; };
@@ -657,6 +659,7 @@
 				6F9A4187FED2F381BE10E4B5 /* WorkshopSourceManager.swift */,
 				686561141BAEE0C03E5992F1 /* NotchOverlayManager.swift */,
 				AC7191D30E898DA37452A716 /* KonachanService.swift */,
+				052D1B96F0CFBE6BB5275D62 /* CachePersistenceService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -814,6 +817,7 @@
 				36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */,
 				BC19BD96AF0FA90F9C5AEE8E /* Kanna */,
 				7406A65B952FEC95D5076CEB /* Kingfisher */,
+				0CB29D532618118021719950 /* Cache */,
 			);
 			productName = WaifuX;
 			productReference = F8F5AC79AF32CB408870B4A5 /* WaifuX.app */;
@@ -862,6 +866,7 @@
 				9239DF85518FA3A295D3B163 /* XCRemoteSwiftPackageReference "Kanna" */,
 				CF90BE4B76A6DBEDBB2A4DFF /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
+				9C0845A22FD15079001C1ABE /* XCRemoteSwiftPackageReference "Cache" */,
 			);
 			productRefGroup = 346FAD1EEA2CE3D78685888C /* Products */;
 			projectDirPath = "";
@@ -1162,6 +1167,7 @@
 				8B2DB13A3F14D6F4C6FC1744 /* KonachanModels.swift in Sources */,
 				8C9D0E1F2A3B4C5D6E7F8A9B /* KonachanTagSearchField.swift in Sources */,
 				90DBCEBC49179263DCEDD8BF /* KonachanService.swift in Sources */,
+				7DC1CC892F0E3EBA2C3F0EAF /* CachePersistenceService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1466,6 +1472,14 @@
 				minimumVersion = 2.7.0;
 			};
 		};
+		9C0845A22FD15079001C1ABE /* XCRemoteSwiftPackageReference "Cache" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/hyperoslo/Cache.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.4.0;
+			};
+		};
 		CF90BE4B76A6DBEDBB2A4DFF /* XCRemoteSwiftPackageReference "Kingfisher" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/onevcat/Kingfisher.git";
@@ -1477,6 +1491,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		0CB29D532618118021719950 /* Cache */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9C0845A22FD15079001C1ABE /* XCRemoteSwiftPackageReference "Cache" */;
+			productName = Cache;
+		};
 		36EB61FD2D6156A5D05A8FA0 /* SwiftSoup */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9780DABD8DD91C37A69DF031 /* XCRemoteSwiftPackageReference "SwiftSoup" */;

@@ -27,6 +27,9 @@ packages:
   Kingfisher:
     url: https://github.com/onevcat/Kingfisher.git
     from: "8.8.0"
+  Cache:
+    url: https://github.com/hyperoslo/Cache.git
+    from: "7.4.0"
 
 settings:
   base:
@@ -70,7 +73,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuX
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
-        MARKETING_VERSION: 38.0.113
+        MARKETING_VERSION: 38.0.114
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -87,6 +90,7 @@ targets:
       - package: SwiftSoup
       - package: Kanna
       - package: Kingfisher
+      - package: Cache
       - target: WaifuXWallpaperExtension
         embed: true
     preBuildScripts:
@@ -302,7 +306,7 @@ targets:
       base:
         PRODUCT_NAME: WaifuXWallpaperExtension
         PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.wallpaperextension
-        MARKETING_VERSION: 38.0.113
+        MARKETING_VERSION: 38.0.114
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"

@@ -13,14 +13,14 @@ struct FavoriteAnime: Codable, Identifiable, Equatable {
     var tags: [String] // 用户标签
     var score: Int? // 用户评分 (1-10)
     var watchStatus: WatchStatus
-    
+
     enum WatchStatus: String, Codable, CaseIterable {
         case planToWatch = "plan_to_watch"
         case watching = "watching"
         case completed = "completed"
         case onHold = "on_hold"
         case dropped = "dropped"
-        
+
         var displayName: String {
             switch self {
             case .planToWatch: return t("favorite.planToWatch")
@@ -30,7 +30,7 @@ struct FavoriteAnime: Codable, Identifiable, Equatable {
             case .dropped: return t("favorite.dropped")
             }
         }
-        
+
         var icon: String {
             switch self {
             case .planToWatch: return "bookmark"
@@ -40,7 +40,7 @@ struct FavoriteAnime: Codable, Identifiable, Equatable {
             case .dropped: return "xmark.circle"
             }
         }
-        
+
         var color: String {
             switch self {
             case .planToWatch: return "3B82F6"
@@ -59,7 +59,7 @@ enum FavoriteSortOption: String, CaseIterable {
     case title = "title"
     case score = "score"
     case updatedAt = "updated_at"
-    
+
     var displayName: String {
         switch self {
         case .addedAt: return t("favorite.addedAt")
@@ -74,51 +74,81 @@ enum FavoriteSortOption: String, CaseIterable {
 @MainActor
 class AnimeFavoriteStore: ObservableObject {
     static let shared = AnimeFavoriteStore()
-    
+
+    private let cache = CachePersistenceService.shared
+    private let animeFavCategory = "anime/fav"
+
+    /// UserDefaults key — 仅迁移用
     private let defaults = UserDefaults.standard
     private let favoritesKey = "anime_favorites_v1"
-    
+
     @Published private(set) var favorites: [String: FavoriteAnime] = [:]
     @Published var sortOption: FavoriteSortOption = .addedAt
     @Published var filterStatus: FavoriteAnime.WatchStatus? = nil
-    
+
     private init() {
         // ⚠️ 不在 init 中读 UserDefaults，避免 _CFXPreferences 递归栈溢出
     }
-    
+
     /// 延迟恢复持久化数据（必须在 AppDelegate.applicationDidFinishLaunching 中调用）
     func restoreSavedData() {
         loadFromDisk()
     }
-    
+
     // MARK: - 加载/保存
-    
+
     private func loadFromDisk() {
-        if let data = defaults.data(forKey: favoritesKey),
-           let decoded = try? JSONDecoder().decode([String: FavoriteAnime].self, from: data) {
+        // 1) 优先从 Cache 加载
+        let cachedFavs: [FavoriteAnime] = cache.loadAll(category: animeFavCategory)
+        if !cachedFavs.isEmpty {
+            var dict: [String: FavoriteAnime] = [:]
+            for fav in cachedFavs {
+                dict[fav.id] = fav
+            }
+            favorites = dict
+        } else if let data = defaults.data(forKey: favoritesKey),
+                  let decoded = try? JSONDecoder().decode([String: FavoriteAnime].self, from: data) {
+            // 2) Cache 为空 → 从 UserDefaults 迁移
             favorites = decoded
+            defaults.removeObject(forKey: favoritesKey)
+            rebuildCache()
         }
-        
-        // 加载排序设置
+
+        // 加载排序设置（量小，保留 UserDefaults）
         if let sortRaw = defaults.string(forKey: "anime_favorite_sort"),
            let sort = FavoriteSortOption(rawValue: sortRaw) {
             sortOption = sort
         }
     }
-    
-    private func saveToDisk() {
-        if let encoded = try? JSONEncoder().encode(favorites) {
-            defaults.set(encoded, forKey: favoritesKey)
-        }
+
+    // MARK: - Cache 辅助
+
+    private func saveFavToCache(_ fav: FavoriteAnime) {
+        cache.save(fav, key: "\(animeFavCategory)/\(fav.id)")
     }
-    
+
+    private func deleteFavFromCache(_ id: String) {
+        cache.delete(key: "\(animeFavCategory)/\(id)")
+    }
+
+    private func syncIndex() {
+        cache.saveIndex(Array(favorites.keys), key: "index/\(animeFavCategory)")
+    }
+
+    private func rebuildCache() {
+        for (_, fav) in favorites {
+            saveFavToCache(fav)
+        }
+        syncIndex()
+    }
+
     func saveSortOption(_ option: FavoriteSortOption) {
         sortOption = option
         defaults.set(option.rawValue, forKey: "anime_favorite_sort")
     }
-    
+
     // MARK: - 收藏操作
-    
+
     /// 添加收藏
     func addFavorite(
         anime: AnimeSearchResult,
@@ -140,29 +170,31 @@ class AnimeFavoriteStore: ObservableObject {
             score: score,
             watchStatus: status
         )
-        
+
         favorites[anime.id] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     /// 从 ViewModel 添加收藏
     func addFavorite(from viewModel: AnimeDetailViewModel, status: FavoriteAnime.WatchStatus = .planToWatch) {
         let anime = viewModel.anime
         let bangumiId = viewModel.bangumiDetail?.id
-        
+
         addFavorite(
             anime: anime,
             bangumiId: bangumiId,
             status: status
         )
     }
-    
+
     /// 移除收藏
     func removeFavorite(animeId: String) {
         favorites.removeValue(forKey: animeId)
-        saveToDisk()
+        deleteFavFromCache(animeId)
+        syncIndex()
     }
-    
+
     /// 切换收藏状态
     func toggleFavorite(anime: AnimeSearchResult, bangumiId: Int? = nil) -> Bool {
         if isFavorite(animeId: anime.id) {
@@ -173,55 +205,59 @@ class AnimeFavoriteStore: ObservableObject {
             return true
         }
     }
-    
+
     /// 检查是否已收藏
     func isFavorite(animeId: String) -> Bool {
         favorites[animeId] != nil
     }
-    
+
     /// 获取收藏
     func getFavorite(animeId: String) -> FavoriteAnime? {
         favorites[animeId]
     }
-    
+
     // MARK: - 更新收藏
-    
+
     /// 更新观看状态
     func updateWatchStatus(animeId: String, status: FavoriteAnime.WatchStatus) {
         guard var favorite = favorites[animeId] else { return }
         favorite.watchStatus = status
         favorite.updatedAt = Date()
         favorites[animeId] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     /// 更新评分
     func updateScore(animeId: String, score: Int?) {
         guard var favorite = favorites[animeId] else { return }
         favorite.score = score
         favorite.updatedAt = Date()
         favorites[animeId] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     /// 更新备注
     func updateNote(animeId: String, note: String?) {
         guard var favorite = favorites[animeId] else { return }
         favorite.note = note
         favorite.updatedAt = Date()
         favorites[animeId] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     /// 更新标签
     func updateTags(animeId: String, tags: [String]) {
         guard var favorite = favorites[animeId] else { return }
         favorite.tags = tags
         favorite.updatedAt = Date()
         favorites[animeId] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     /// 添加标签
     func addTag(animeId: String, tag: String) {
         guard var favorite = favorites[animeId] else { return }
@@ -229,35 +265,37 @@ class AnimeFavoriteStore: ObservableObject {
             favorite.tags.append(tag)
             favorite.updatedAt = Date()
             favorites[animeId] = favorite
-            saveToDisk()
+            saveFavToCache(favorite)
+            syncIndex()
         }
     }
-    
+
     /// 移除标签
     func removeTag(animeId: String, tag: String) {
         guard var favorite = favorites[animeId] else { return }
         favorite.tags.removeAll { $0 == tag }
         favorite.updatedAt = Date()
         favorites[animeId] = favorite
-        saveToDisk()
+        saveFavToCache(favorite)
+        syncIndex()
     }
-    
+
     // MARK: - 查询
-    
+
     /// 获取所有收藏列表
     var allFavorites: [FavoriteAnime] {
         Array(favorites.values)
     }
-    
+
     /// 获取筛选和排序后的列表
     var filteredAndSortedFavorites: [FavoriteAnime] {
         var result = allFavorites
-        
+
         // 筛选
         if let status = filterStatus {
             result = result.filter { $0.watchStatus == status }
         }
-        
+
         // 排序
         switch sortOption {
         case .addedAt:
@@ -274,25 +312,25 @@ class AnimeFavoriteStore: ObservableObject {
         case .updatedAt:
             result.sort { $0.updatedAt > $1.updatedAt }
         }
-        
+
         return result
     }
-    
+
     /// 按状态分组
     func favoritesByStatus(_ status: FavoriteAnime.WatchStatus) -> [FavoriteAnime] {
         allFavorites.filter { $0.watchStatus == status }
     }
-    
+
     /// 获取所有标签
     var allTags: [String] {
         Array(Set(allFavorites.flatMap { $0.tags })).sorted()
     }
-    
+
     /// 按标签搜索
     func favoritesWithTag(_ tag: String) -> [FavoriteAnime] {
         allFavorites.filter { $0.tags.contains(tag) }
     }
-    
+
     /// 搜索标题
     func searchFavorites(query: String) -> [FavoriteAnime] {
         let lowerQuery = query.lowercased()
@@ -301,15 +339,15 @@ class AnimeFavoriteStore: ObservableObject {
             $0.tags.contains { $0.lowercased().contains(lowerQuery) }
         }
     }
-    
+
     // MARK: - 统计
-    
+
     var totalCount: Int { favorites.count }
-    
+
     func countByStatus(_ status: FavoriteAnime.WatchStatus) -> Int {
         favorites.values.filter { $0.watchStatus == status }.count
     }
-    
+
     var statistics: [FavoriteAnime.WatchStatus: Int] {
         Dictionary(grouping: allFavorites, by: { $0.watchStatus })
             .mapValues { $0.count }

@@ -8,11 +8,11 @@ public struct CategoryChip: View {
     let accentColors: [String]
     let isSelected: Bool
     let action: () -> Void
-    
+
     @Environment(\.arcIsLightMode) private var isLightMode
     private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
-    
+
     public init(
         icon: String,
         title: String,
@@ -26,7 +26,7 @@ public struct CategoryChip: View {
         self.isSelected = isSelected
         self.action = action
     }
-    
+
     public var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -40,12 +40,12 @@ public struct CategoryChip: View {
                             )
                         )
                         .frame(width: 22, height: 22)
-                    
+
                     Image(systemName: icon)
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(isSelected ? .white : .black.opacity(0.78))
                 }
-                
+
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
@@ -87,17 +87,17 @@ public struct TagChip: View {
     let title: String
     let isSelected: Bool
     let action: () -> Void
-    
+
     @Environment(\.arcIsLightMode) private var isLightMode
     private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
-    
+
     public init(title: String, isSelected: Bool, action: @escaping () -> Void) {
         self.title = title
         self.isSelected = isSelected
         self.action = action
     }
-    
+
     public var body: some View {
         Button(action: action) {
             Text(title)
@@ -236,16 +236,16 @@ public struct ExploreSearchBar: View {
 public struct ResetFiltersButton: View {
     let tint: Color
     let action: () -> Void
-    
+
     @Environment(\.arcIsLightMode) private var isLightMode
     private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
-    
+
     public init(tint: Color, action: @escaping () -> Void) {
         self.tint = tint
         self.action = action
     }
-    
+
     public var body: some View {
         Button(action: action) {
             Image(systemName: "arrow.counterclockwise")
@@ -302,16 +302,16 @@ public struct SortMenu<SortOption: SortOptionProtocol>: View {
     let options: [SortOption]
     @Binding var selected: SortOption
     let tint: Color
-    
+
     @Environment(\.arcIsLightMode) private var isLightMode
     private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
-    
+
     public init(options: [SortOption], selected: Binding<SortOption>, tint: Color) {
         self.options = options
         self._selected = selected
         self.tint = tint
     }
-    
+
     public var body: some View {
         Menu {
             ForEach(options) { option in
@@ -351,7 +351,7 @@ public struct FilterChip: View {
     @Environment(\.arcIsLightMode) private var isLightMode
     private var txt: ArcTextColors { ArcTextColors(isLightMode: isLightMode) }
     @State private var isHovered = false
-    
+
     public init(title: String, subtitle: String = "", isSelected: Bool, tint: Color, action: @escaping () -> Void) {
         self.title = title
         self.subtitle = subtitle
@@ -359,14 +359,14 @@ public struct FilterChip: View {
         self.tint = tint
         self.action = action
     }
-    
+
     public var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(txt.primary.opacity(0.94))
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(txt.secondary.opacity(0.8))
-                }
+                // if !subtitle.isEmpty {
+                //     Text(subtitle).font(.system(size: 11, weight: .medium)).foregroundStyle(txt.secondary.opacity(0.8))
+                // }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

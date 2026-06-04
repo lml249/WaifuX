@@ -7,7 +7,7 @@ import CoreText
 // MARK: - 液态玻璃时钟 Overlay 管理器
 //
 // 为每个屏幕创建透明 NSWindow，在桌面壁纸层之上渲染
-// LiquidGlassClockView。配合烘焙场景壁纸使用。
+// 场景 sidecar 中的动态文本对象。配合烘焙场景壁纸使用。
 //
 // ═══════════════════════════════════════════════════════════
 // 架构：
@@ -71,9 +71,19 @@ public final class LiquidGlassClockOverlayManager {
             }
             .store(in: &cancellables)
 
-        // 监听视频壁纸激活状态变化 → 自动显示/隐藏时钟
+        // 监听视频壁纸切换 → 自动显示/隐藏/更新时钟
         VideoWallpaperManager.shared.$currentVideoURL
             .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.onVideoWallpaperStateChanged()
+            }
+            .store(in: &cancellables)
+
+        // 第二道保障：订阅壁纸变更计数器，确保任何壁纸切换后 overlay 都刷新
+        // 即使 `currentVideoURL` 值不变（如：同一 URL 重新应用），此计数器也会自增。
+        VideoWallpaperManager.shared.$wallpaperChangeCount
+            .receive(on: DispatchQueue.main)
+            .dropFirst()  // 跳过初始值 0
             .sink { [weak self] _ in
                 self?.onVideoWallpaperStateChanged()
             }
@@ -111,10 +121,26 @@ public final class LiquidGlassClockOverlayManager {
 
     // MARK: - 公开方法
 
-    /// 立即刷新所有屏幕的时钟窗口（外部调用，如热键切换）
+    /// 立即刷新所有屏幕的时钟窗口（外部调用，如热键切换、壁纸切换）
     public func refreshAll() {
         let config = LiquidGlassClockSettings.shared.config
-        applyConfig(config)
+        if shouldShowClock(config: config) {
+            if clockWindows.isEmpty {
+                createWindowsForAllScreens(config: config)
+            } else {
+                // 窗口已存在时也必须更新内容（壁纸切换时 sidecar 数据已变化）
+                updateAllWindows(config: config)
+            }
+            if config.enabled {
+                startClockTimer()
+            } else {
+                stopClockTimer()
+            }
+        } else {
+            destroyAllWindows()
+            stopClockTimer()
+        }
+        currentConfig = config
         // 确保所有窗口置前
         for (_, window) in clockWindows {
             window.orderFront(nil)
@@ -189,15 +215,12 @@ public final class LiquidGlassClockOverlayManager {
     }
 
     private func shouldShowClock(config: LiquidGlassClockConfiguration) -> Bool {
-        // 总开关：如果用户关闭了桌面动态元素，任何情况都不显示
         guard config.enabled else { return false }
-        // 有视频壁纸时，检查 sidecar 动态文本补偿层
-        if VideoWallpaperManager.shared.isVideoWallpaperActive,
-           let videoURL = VideoWallpaperManager.shared.currentVideoURL {
-            return WallpaperDynamicTextParser.hasDynamicText(for: videoURL)
-        }
-        // 无视频壁纸时显示纯桌面时钟
-        return true
+        // 仅在有视频壁纸且关联 sidecar 有时钟文本时才显示 overlay
+        guard VideoWallpaperManager.shared.isVideoWallpaperActive,
+              let videoURL = VideoWallpaperManager.shared.currentVideoURL
+        else { return false }
+        return WallpaperDynamicTextParser.hasDynamicText(for: videoURL)
     }
 
     // MARK: - 定时器管理
@@ -373,10 +396,13 @@ public final class LiquidGlassClockOverlayManager {
     private func makeClockView(for screen: NSScreen, config: LiquidGlassClockConfiguration, screenID: String = "") -> some View {
         let sidecarInfo = currentDynamicTextInfo()
         let rendererEntries = sidecarInfo?.entries.filter { entry in
-            entry.visible && (
-                entry.finalOriginX != nil || entry.originX != nil || entry.finalX != nil ||
-                entry.finalOriginY != nil || entry.originY != nil || entry.finalY != nil
-            )
+            guard entry.visible else { return false }
+            // 未知行为的条目必须有实际文本内容才渲染，否则跳过（避免空白占位）
+            if entry.behavior == "unknown" {
+                guard let value = entry.value, !value.isEmpty else { return false }
+            }
+            return entry.finalOriginX != nil || entry.originX != nil || entry.finalX != nil ||
+                   entry.finalOriginY != nil || entry.originY != nil || entry.finalY != nil
         } ?? []
         if !rendererEntries.isEmpty {
             return AnyView(
@@ -389,43 +415,8 @@ public final class LiquidGlassClockOverlayManager {
             )
         }
 
-        let alignment: Alignment
-        let edgePadding: EdgeInsets
-
-        switch config.corner {
-        case .topLeft:
-            alignment = .topLeading
-            edgePadding = EdgeInsets(top: config.verticalPadding, leading: config.horizontalPadding, bottom: 0, trailing: 0)
-        case .topRight:
-            alignment = .topTrailing
-            edgePadding = EdgeInsets(top: config.verticalPadding, leading: 0, bottom: 0, trailing: config.horizontalPadding)
-        case .bottomLeft:
-            alignment = .bottomLeading
-            edgePadding = EdgeInsets(top: 0, leading: config.horizontalPadding, bottom: config.verticalPadding, trailing: 0)
-        case .bottomRight:
-            alignment = .bottomTrailing
-            edgePadding = EdgeInsets(top: 0, leading: 0, bottom: config.verticalPadding, trailing: config.horizontalPadding)
-        }
-
-        // 如果启用 Metal 路径，注册 MTKView 以便暂停/恢复
-        let sid = screenID
-
-        return AnyView(ZStack {
-            Color.clear
-                .ignoresSafeArea()
-
-            LiquidGlassClockView(config: config, mtkViewRegistry: { [weak self] mtkView in
-                guard let self = self else { return }
-                if !sid.isEmpty {
-                    self.metalViews[sid] = mtkView
-                    if VideoWallpaperManager.shared.isPaused {
-                        mtkView.isPaused = true
-                    }
-                }
-            })
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
-            .padding(edgePadding)
-        })
+        // 没有 sidecar 文本条目时，不显示任何默认时钟
+        return AnyView(Color.clear.ignoresSafeArea())
     }
 
     // MARK: - 通知处理
@@ -515,21 +506,94 @@ private struct RendererDynamicTextView: View {
     }
 
     private var renderedText: String {
+        // 根据条目名称是否含中文选择对应语言的 formatter
+        let useChinese = Self.isChineseName(entry.name)
+
         switch entry.behavior {
         case "clock":
-            return Self.clockFormatter.string(from: now)
+            return Self.formattedClock(from: now, format: entry.format)
         case "weekday":
-            let raw = Self.weekdayFormatter.string(from: now).uppercased()
+            let formatter = useChinese ? Self.chineseWeekdayFormatter : Self.weekdayFormatter
+            let raw = formatter.string(from: now)
             // C++ renderer 对 Day 对象会加空格: "W E D N E S D A Y"
             let name = entry.name.lowercased().replacingOccurrences(of: " ", with: "")
-            if name == "day" || name.contains("day") {
-                return raw.map { String($0) }.joined(separator: "  ")
+            if !useChinese {
+                if name == "day" || name.contains("day") {
+                    return raw.uppercased().map { String($0) }.joined(separator: "  ")
+                }
+                return raw.uppercased()
             }
             return raw
         case "date":
-            return Self.dateFormatter.string(from: now)
+            let formatter = useChinese ? Self.chineseDateFormatter : Self.dateFormatter
+            return formatter.string(from: now)
+        case "period":
+            return Self.formattedPeriod(from: now)
         default:
             return entry.value ?? ""
+        }
+    }
+
+    /// 根据当前时间返回中文时段文本
+    private static func formattedPeriod(from date: Date) -> String {
+        let hour = Calendar.current.component(.hour, from: date)
+        switch hour {
+        case 0:      return "午夜"
+        case 1..<7:  return "凌晨"
+        case 7..<12: return "早上"
+        case 12:     return "正午"
+        case 13..<18: return "下午"
+        case 18:     return "傍晚"
+        default:     return "晚上"
+        }
+    }
+
+    /// 根据 format 格式化时钟时间组件
+    /// - Parameters:
+    ///   - format: 格式描述，如 "hh"（时）、"mm"（分）、"ss"（秒）、"hh:mm"（完整时间）
+    ///              nil 时回退到完整时间 "HH:mm"
+    private static func formattedClock(from date: Date, format: String?) -> String {
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.hour, .minute, .second], from: date)
+
+        guard let fmt = format?.lowercased(), !fmt.isEmpty else {
+            // 无格式信息，回退到完整时间
+            return clockFormatter.string(from: date)
+        }
+
+        switch fmt {
+        case "hh":
+            return String(format: "%02d", comps.hour ?? 0)
+        case "h":
+            return "\(comps.hour ?? 0)"
+        case "mm":
+            return String(format: "%02d", comps.minute ?? 0)
+        case "m":
+            return "\(comps.minute ?? 0)"
+        case "ss":
+            return String(format: "%02d", comps.second ?? 0)
+        case "s":
+            return "\(comps.second ?? 0)"
+        default:
+            // 将 format 中的 hh/h/mm/m/ss/s 替换为实际值
+            var result = fmt
+            // 总是替换已知的时间组件占位符
+            result = result.replacingOccurrences(of: "hh", with: String(format: "%02d", comps.hour ?? 0))
+            if !fmt.contains("hh") {
+                result = result.replacingOccurrences(of: "h", with: "\(comps.hour ?? 0)")
+            }
+            result = result.replacingOccurrences(of: "mm", with: String(format: "%02d", comps.minute ?? 0))
+            if !fmt.contains("mm") {
+                result = result.replacingOccurrences(of: "m", with: "\(comps.minute ?? 0)")
+            }
+            result = result.replacingOccurrences(of: "ss", with: String(format: "%02d", comps.second ?? 0))
+            if !fmt.contains("ss") {
+                result = result.replacingOccurrences(of: "s", with: "\(comps.second ?? 0)")
+            }
+            if result == fmt {
+                return clockFormatter.string(from: date)
+            }
+            return result
         }
     }
 
@@ -584,6 +648,7 @@ private struct RendererDynamicTextView: View {
         return formatter
     }()
 
+    /// 英文日期/星期 formatter（默认）
     private static let weekdayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -597,6 +662,27 @@ private struct RendererDynamicTextView: View {
         formatter.dateFormat = "d MMM yyyy"
         return formatter
     }()
+
+    /// 中文日期/星期 formatter（仅当壁纸条目名含中文时使用）
+    private static let chineseWeekdayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh-CN")
+        formatter.dateFormat = "EEEE"
+        return formatter
+    }()
+
+    private static let chineseDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh-CN")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    /// 条目名称是否包含中文字符
+    private static func isChineseName(_ name: String) -> Bool {
+        name.unicodeScalars.contains(where: { $0.properties.isIdeographic })
+    }
 
     /// 加载字体、注册、返回 PostScript 名称供 Font.custom 使用。
     /// 先把字体写入临时文件，再用 CTFontManagerRegisterFontsForURL 注册，
