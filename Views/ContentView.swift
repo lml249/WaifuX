@@ -219,7 +219,8 @@ private struct MyLibraryTabPage: View {
             selectedMedia: navigationState.binding(for: \.librarySelectedMedia),
             selectedAnime: navigationState.binding(for: \.librarySelectedAnime),
             wallpaperContext: navigationState.binding(for: \.libraryWallpaperContext),
-            mediaContext: navigationState.binding(for: \.libraryMediaContext)
+            mediaContext: navigationState.binding(for: \.libraryMediaContext),
+            isVisible: navigationState.selectedTab == .myMedia
         )
         .environment(\.coverGIFPlaybackHostActive, navigationState.selectedTab == .myMedia)
     }
@@ -381,6 +382,14 @@ struct ContentView: View {
     }
 
     private var mainContent: some View {
+        mainContentBase
+            .environment(\.mainTopBarContentPadding, MainTopBarLayout.legacyContentTopPadding)
+            .overlay(alignment: .top) {
+                topNavigationBar
+            }
+    }
+
+    private var mainContentBase: some View {
         ZStack {
             Color(hex: "0D0D0D")
                 .ignoresSafeArea()
@@ -399,25 +408,23 @@ struct ContentView: View {
                 navigationState.selectedTab = .myMedia
             }
             .id(localization.currentLanguage)
-
-            VStack {
-                TopNavigationBar(
-                    selectedTab: navigationState.binding(for: \.selectedTab),
-                    onOpenSettings: { openSettingsWindow() },
-                    onGuessYouLike: { guessYouLikeVM.show() },
-                    onClose: { hideMainWindow() },
-                    onMinimize: { minimizeWindow() },
-                    onMaximize: { maximizeWindow() },
-                    onZoom: { zoomWindow() }
-                )
-                .zIndex(100)
-
-                Spacer()
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationBarBackButtonHidden(true)
-        .toolbar(.hidden, for: .automatic)
+        .toolbar(navigationState.selectedTab == .myMedia ? .visible : .hidden, for: .automatic)
+    }
+
+    private var topNavigationBar: some View {
+        TopNavigationBar(
+            selectedTab: navigationState.binding(for: \.selectedTab),
+            onOpenSettings: { openSettingsWindow() },
+            onGuessYouLike: { guessYouLikeVM.show() },
+            onClose: { hideMainWindow() },
+            onMinimize: { minimizeWindow() },
+            onMaximize: { maximizeWindow() },
+            onZoom: { zoomWindow() }
+        )
+        .zIndex(100)
     }
 
     private func minimizeWindow() {
@@ -2115,7 +2122,6 @@ private struct MyMediaVideoCard: View {
 // MARK: - iOS 丝滑风格下载进度弹窗宿主
 private struct DownloadProgressToastHost: View {
     @StateObject private var viewModel = DownloadToastViewModel()
-    @ObservedObject private var workshopService = WorkshopService.shared
     let onDismiss: (DownloadToastSnapshot) -> Void
     let onCancel: (DownloadToastSnapshot) -> Void
     let onRetry: (DownloadToastSnapshot) -> Void
@@ -2144,7 +2150,7 @@ private struct DownloadProgressToastHost: View {
                 DownloadProgressToast(
                     snapshot: snapshot,
                     activeTaskCount: viewModel.activeTaskCount,
-                    steamCMDQueuedCount: workshopService.steamCMDQueuedCount,
+                    steamCMDQueuedCount: viewModel.steamCMDQueuedCount,
                     onDismiss: {
                         dismiss(snapshot)
                     },
@@ -2225,7 +2231,9 @@ private struct DownloadProgressToastHost: View {
                 displayedSnapshot = snapshot
                 performShow()
             } else {
-                withAnimation(iOSShowAnimation) {
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
                     displayedSnapshot = snapshot
                 }
             }

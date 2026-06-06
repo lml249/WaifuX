@@ -1,6 +1,21 @@
 import SwiftUI
 import AppKit
 
+enum MainTopBarLayout {
+    static let legacyContentTopPadding: CGFloat = 80
+}
+
+private struct MainTopBarContentPaddingKey: EnvironmentKey {
+    static let defaultValue: CGFloat = MainTopBarLayout.legacyContentTopPadding
+}
+
+extension EnvironmentValues {
+    var mainTopBarContentPadding: CGFloat {
+        get { self[MainTopBarContentPaddingKey.self] }
+        set { self[MainTopBarContentPaddingKey.self] = newValue }
+    }
+}
+
 // MARK: - 主标签类型
 public enum MainTab: String, CaseIterable {
     case home, wallpaperExplore, mediaExplore, animeExplore, myMedia
@@ -82,6 +97,7 @@ struct TopNavigationBar: View {
     }
 }
 
+// MARK: - 红绿灯按钮组
 struct CustomWindowControls: View {
     let onClose: () -> Void
     let onMinimize: () -> Void
@@ -242,7 +258,7 @@ private struct TopBarSegmentedControl: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .liquidGlassSurface(.prominent, tint: Color.black.opacity(0.25), in: Capsule(style: .continuous))
+        .liquidGlassSurface(.prominent, tint: Color.black.opacity(0.18), in: Capsule(style: .continuous))
         .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
     }
 
@@ -265,7 +281,7 @@ private struct TopBarSegmentedControl: View {
         if #available(macOS 26.0, *) {
             // macOS 26: 使用原生玻璃效果
             Capsule(style: .continuous)
-                .liquidGlassSurface(.max, tint: Color.black.opacity(0.3), in: Capsule(style: .continuous))
+                .liquidGlassSurface(.max, tint: Color.black.opacity(0.18), in: Capsule(style: .continuous))
                 .overlay(
                     Capsule(style: .continuous)
                         .stroke(

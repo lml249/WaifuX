@@ -227,6 +227,7 @@ private struct ControlButtons: View {
                 onSpeedChange()
             }
         }
+        .glassContainer(spacing: 20)
     }
 }
 

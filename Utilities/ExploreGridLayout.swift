@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// 用于 `onScrollGeometryChange` 的 Equatable 状态，只在跨过"近底"阈值时翻转。
+/// 避免因 contentSize 增长导致 distance 数值波动触发不必要的 action 回调。
+public struct ScrollNearBottomState: Equatable {
+    public var isNearBottom: Bool
+    public init(isNearBottom: Bool) {
+        self.isNearBottom = isNearBottom
+    }
+}
+
 /// 探索页网格：列数 2…4（中间宽度默认约 3 列）、间距 16pt。
 enum ExploreGridLayout {
     static let spacing: CGFloat = 16
@@ -30,189 +39,48 @@ enum ExploreGridLayout {
             count: n
         )
     }
-}
 
-private struct ExploreColumnDistributionKey: Equatable {
-    let itemCount: Int
-    let version: Int
-    let columnCount: Int
-    let cardWidthUnits: Int
-    let spacingUnits: Int
-}
-
-@MainActor
-final class ExploreColumnDistributionCache<Item>: ObservableObject {
-    private var cachedKey: ExploreColumnDistributionKey?
-    private var cachedColumnIndices: [[Int]] = []
-
-    func columns(
-        for items: [Item],
-        version: Int,
-        columnCount: Int,
-        cardWidth: CGFloat,
-        spacing: CGFloat,
-        height: (Item) -> CGFloat
-    ) -> [[Item]] {
-        let key = ExploreColumnDistributionKey(
-            itemCount: items.count,
-            version: version,
-            columnCount: columnCount,
-            cardWidthUnits: Int((cardWidth * 100).rounded()),
-            spacingUnits: Int((spacing * 100).rounded())
-        )
-
-        if cachedKey != key {
-            cachedKey = key
-            cachedColumnIndices = distributeIndices(
-                for: items,
-                columnCount: columnCount,
-                spacing: spacing,
-                height: height
-            )
-        }
-
-        return cachedColumnIndices.map { indices in
-            indices.compactMap { index in
-                guard items.indices.contains(index) else { return nil }
-                return items[index]
-            }
-        }
-    }
-
-    func invalidate() {
-        cachedKey = nil
-        cachedColumnIndices = []
-    }
-
-    private func distributeIndices(
-        for items: [Item],
-        columnCount: Int,
-        spacing: CGFloat,
-        height: (Item) -> CGFloat
-    ) -> [[Int]] {
+    static func stableColumns<Item>(items: [Item], columnCount: Int) -> [[Item]] {
         let safeColumnCount = max(1, columnCount)
-        var columns: [[Int]] = Array(repeating: [], count: safeColumnCount)
-        var columnHeights: [CGFloat] = Array(repeating: 0, count: safeColumnCount)
+        var columns = Array(repeating: [Item](), count: safeColumnCount)
 
         for (index, item) in items.enumerated() {
-            let itemHeight = max(1, height(item))
-            let minHeight = columnHeights.min() ?? 0
-            let column = columnHeights.firstIndex(of: minHeight) ?? 0
-            columns[column].append(index)
-            columnHeights[column] += itemHeight + spacing
+            columns[index % safeColumnCount].append(item)
         }
 
         return columns
     }
-}
 
-// MARK: - 增量瀑布流分配器
-
-/// 保持 column 分配状态，追加新 items 时只分配新 item，不重算已有 item。
-/// 仅在列数/卡片宽度变化或 feed 被替换时触发全量重算，避免滚动加载时重复遍历全部 items。
-@MainActor
-final class ExploreIncrementalDistributor<Item: Identifiable>: ObservableObject {
-    private var columnItems: [[Item]] = []
-    private var columnHeights: [CGFloat] = []
-    private var itemIDs: Set<Item.ID> = []
-    private var linearItemIDs: [Item.ID] = []
-    private var lastColumnCount = 0
-    private var lastCardWidth: CGFloat = 0
-    private var lastSpacing: CGFloat = 0
-
-    /// 接收当前完整 items 列表，只有确认是尾部追加时才增量分配。
-    func append(
-        items newItems: [Item],
+    /// 高度平衡的瀑布流列分配，根据每项计算高度将新项放入当前最矮的列。
+    /// 适用于图片尺寸不一致的场景（如壁纸/媒体），避免部分列堆积过多导致视觉不平衡。
+    /// - Parameters:
+    ///   - items: 所有数据项
+    ///   - columnCount: 列数
+    ///   - cardWidth: 卡片宽度（用于计算高度）
+    ///   - spacing: 列内 item 间距
+    ///   - heightProvider: 返回每项在给定卡片宽度下的高度
+    /// - Returns: 每列的数据数组
+    static func waterfallColumns<Item>(
+        items: [Item],
         columnCount: Int,
         cardWidth: CGFloat,
         spacing: CGFloat,
-        height: (Item) -> CGFloat
+        heightProvider: (Item) -> CGFloat
     ) -> [[Item]] {
-        let validColumnCount = max(1, columnCount)
-        let validCardWidth = max(1, cardWidth)
-        let incomingIDs = newItems.map(\.id)
-
-        if incomingIDs.isEmpty {
-            invalidate()
-            return Array(repeating: [], count: validColumnCount)
-        }
-
-        // 如果列数或卡片宽度变化（窗口缩放），全量重算
-        if columnCount != lastColumnCount || abs(cardWidth - lastCardWidth) > 1 || abs(spacing - lastSpacing) > 0.5 {
-            reset(with: newItems, columnCount: validColumnCount, cardWidth: validCardWidth, spacing: spacing, height: height)
-            return columnItems
-        }
-
-        // 搜索/筛选/重置会替换整个 feed；此时不能沿用上一轮的列状态。
-        if !linearItemIDs.isEmpty {
-            let isAppendOnly = incomingIDs.count >= linearItemIDs.count &&
-                zip(linearItemIDs, incomingIDs).allSatisfy { $0 == $1 }
-
-            if !isAppendOnly {
-                reset(with: newItems, columnCount: validColumnCount, cardWidth: validCardWidth, spacing: spacing, height: height)
-                return columnItems
-            }
-        }
-
-        // 过滤出真正的新 items
-        let toAdd = newItems.filter { !itemIDs.contains($0.id) }
-        guard !toAdd.isEmpty else { return columnItems }
-
-        // 补齐列数（初次使用或列数增加时）
-        while columnItems.count < validColumnCount {
-            columnItems.append([])
-            columnHeights.append(0)
-        }
-
-        for item in toAdd {
-            let h = max(1, height(item))
-            let minH = columnHeights.min() ?? 0
-            let col = columnHeights.firstIndex(of: minH) ?? 0
-            columnItems[col].append(item)
-            columnHeights[col] += h + spacing
-            itemIDs.insert(item.id)
-        }
-        linearItemIDs = incomingIDs
-
-        return columnItems
-    }
-
-    /// 全量重算所有 items
-    func reset(
-        with items: [Item],
-        columnCount: Int,
-        cardWidth: CGFloat,
-        spacing: CGFloat,
-        height: (Item) -> CGFloat
-    ) {
-        let validColumnCount = max(1, columnCount)
-        columnItems = Array(repeating: [], count: validColumnCount)
-        columnHeights = Array(repeating: 0, count: validColumnCount)
-        itemIDs.removeAll()
-        linearItemIDs = items.map(\.id)
+        let safeColumnCount = max(1, columnCount)
+        var columns = Array(repeating: [Item](), count: safeColumnCount)
+        var columnHeights = Array(repeating: CGFloat(0), count: safeColumnCount)
 
         for item in items {
-            itemIDs.insert(item.id)
-            let h = max(1, height(item))
-            let minH = columnHeights.min() ?? 0
-            let col = columnHeights.firstIndex(of: minH) ?? 0
-            columnItems[col].append(item)
-            columnHeights[col] += h + spacing
+            // 找到当前总高度最小的列
+            let minHeight = columnHeights.min() ?? 0
+            let column = columnHeights.firstIndex(of: minHeight) ?? 0
+
+            columns[column].append(item)
+            let itemHeight = heightProvider(item)
+            columnHeights[column] += itemHeight + spacing
         }
 
-        lastColumnCount = validColumnCount
-        lastCardWidth = max(1, cardWidth)
-        lastSpacing = spacing
-    }
-
-    /// 清空分配状态（filter/搜索切换时调用）
-    func invalidate() {
-        columnItems = []
-        columnHeights = []
-        itemIDs = []
-        linearItemIDs = []
-        lastColumnCount = 0
-        lastCardWidth = 0
-        lastSpacing = 0
+        return columns
     }
 }

@@ -1534,6 +1534,34 @@ struct MediaDetailSheet: View {
         let item = itemWithLocalWorkshopVideo(merged)
         resolvedItem = item
         viewModel.recordViewed(resolvedItem)
+
+        // 如果已下载但尚未分析烘焙资格，尝试重新分析（修复后重试之前失败的分析）
+        if let record = currentDownloadRecord, record.sceneBakeEligibility == nil,
+           let localURL = findLocalWorkshopFile(for: resolvedItem) {
+            let contentRoot = sceneEngineContentRoot(for: localURL)
+            if FileManager.default.fileExists(atPath: contentRoot.appendingPathComponent("project.json").path) {
+                Task(priority: .utility) {
+                    do {
+                        let snapshot = try SceneBakeEligibilityAnalyzer.analyze(
+                            contentRoot: contentRoot,
+                            intent: .desktopLoop,
+                            strict: false
+                        )
+                        await MainActor.run {
+                            MediaLibraryService.shared.attachSceneBakeEligibility(
+                                itemID: resolvedItem.id,
+                                snapshot: snapshot,
+                                triggerAutoBake: true
+                            )
+                            print("[MediaDetailSheet] ✅ 烘焙资格分析完成: tier=\(snapshot.tier.rawValue) score=\(snapshot.score)")
+                        }
+                    } catch {
+                        print("[MediaDetailSheet] ⚠️ 烘焙资格分析重试失败: \(error)")
+                    }
+                }
+            }
+        }
+
         withAnimation(.easeInOut(duration: 0.3)) {
             isSourcesReady = true
         }

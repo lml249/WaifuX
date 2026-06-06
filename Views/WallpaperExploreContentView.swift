@@ -17,6 +17,20 @@ private struct WallpaperLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
     }
 }
 
+private final class WallpaperExploreScrollCoordinator: ObservableObject {
+    var sentinelDebounceTask: DispatchWorkItem?
+    var pendingLoadMoreTask: DispatchWorkItem?
+    var wasNearBottom = false
+
+    func cancelPendingWork() {
+        sentinelDebounceTask?.cancel()
+        pendingLoadMoreTask?.cancel()
+        sentinelDebounceTask = nil
+        pendingLoadMoreTask = nil
+        wasNearBottom = false
+    }
+}
+
 // MARK: - WallpaperExploreContentView - 壁纸探索页
 
 struct WallpaperExploreContentView: View {
@@ -31,6 +45,7 @@ struct WallpaperExploreContentView: View {
     @ObservedObject private var videoWallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var wallpaperEngineBridge = WallpaperEngineXBridge.shared
     @StateObject private var translationBridge = SearchTranslationBridge()
+    @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
     init(viewModel: WallpaperViewModel, selectedWallpaper: Binding<Wallpaper?>, isVisible: Bool = true) {
         self._viewModel = ObservedObject(wrappedValue: viewModel)
         self._selectedWallpaper = selectedWallpaper
@@ -63,11 +78,7 @@ struct WallpaperExploreContentView: View {
     @State private var wallpaperURLInput = ""
     @State private var isResolvingWallpaperURL = false
     @State private var wallpaperURLError: String?
-    /// 增量瀑布流分配器
-    @StateObject private var columnDistributor = ExploreIncrementalDistributor<Wallpaper>()
-
-    /// 防抖：避免同一帧内多次 Preference 更新触发无限布局循环
-    @State private var sentinelDebounceTask: DispatchWorkItem?
+    @StateObject private var scrollCoordinator = WallpaperExploreScrollCoordinator()
 
     /// 缓存筛选后的列表，避免每次 body 重绘时对 `wallpapers` 全表过滤（Wallhaven 分类）
     /// 使用 @StateObject 包装容器避免值语义触发不必要的 body 重建
@@ -178,7 +189,7 @@ struct WallpaperExploreContentView: View {
     }
 
     private func scrollContent(width: CGFloat, viewportHeight: CGFloat, gridConfig: WallpaperGridConfig) -> some View {
-        return ZStack {
+        ZStack {
             if visibleWallpapers.isEmpty {
                 legacyScrollContent(width: width) {
                     Group {
@@ -217,7 +228,7 @@ struct WallpaperExploreContentView: View {
                 body()
             }
             .padding(.horizontal, 28)
-            .padding(.top, 80)
+            .padding(.top, mainTopBarContentPadding)
             .padding(.bottom, 48)
             .frame(width: width, alignment: .leading)
             .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -246,19 +257,24 @@ struct WallpaperExploreContentView: View {
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             .onChange(of: viewModel.wallpapers.count) { _, count in
-                if count == 0 { columnDistributor.invalidate() }
                 if count > 60 { showScrollToTop = true }
             }
-            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
+            .onScrollGeometryChange(for: ScrollNearBottomState.self, of: { geometry in
                 let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return geometry.contentSize.height - bottomOffset
-            }, action: { _, distanceFromBottom in
-                guard isVisible, distanceFromBottom.isFinite else { return }
-                if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
-                    Task { @MainActor in
-                        triggerLoadMore()
-                    }
+                let distanceFromBottom = geometry.contentSize.height - bottomOffset
+                guard distanceFromBottom.isFinite else {
+                    return ScrollNearBottomState(isNearBottom: false)
+                }
+                return ScrollNearBottomState(
+                    isNearBottom: distanceFromBottom <= Self.loadMoreTriggerThreshold
+                )
+            }, action: { oldValue, newValue in
+                if newValue.isNearBottom && !oldValue.isNearBottom {
+                    guard !scrollCoordinator.wasNearBottom else { return }
+                    scrollCoordinator.wasNearBottom = true
+                    scheduleLoadMoreFromScroll()
+                } else if !newValue.isNearBottom && oldValue.isNearBottom {
+                    scrollCoordinator.wasNearBottom = false
                 }
             })
             .scrollDisabled(!isVisible)
@@ -291,17 +307,16 @@ struct WallpaperExploreContentView: View {
             }
             .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             .onChange(of: viewModel.wallpapers.count) { _, count in
-                if count == 0 { columnDistributor.invalidate() }
                 if count > 60 { showScrollToTop = true }
             }
             .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
-                sentinelDebounceTask?.cancel()
+                scrollCoordinator.sentinelDebounceTask?.cancel()
                 let task = DispatchWorkItem { [self] in
                     guard !Task.isCancelled else { return }
                     self.handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
                 }
-                sentinelDebounceTask = task
-                DispatchQueue.main.async(execute: task)
+                scrollCoordinator.sentinelDebounceTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
             }
             .scrollDisabled(!isVisible)
             .disabled(isInitialLoading || !isVisible)
@@ -319,25 +334,15 @@ struct WallpaperExploreContentView: View {
             HStack {
                 Spacer()
                 if showScrollToTop {
-                    Button {
+                    ScrollToTopButton {
                         outerScrollToTopToken += 1
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .frame(width: 44, height: 44)
-                            .liquidGlassSurface(.regular, in: Circle())
                     }
-                    .buttonStyle(.plain)
                     .padding(.trailing, 28)
                     .padding(.bottom, 120)
-                    .contentShape(Rectangle())
-                    .zIndex(100)
                     .transition(.scale.combined(with: .opacity))
                 }
             }
         }
-        .zIndex(100)
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
 
@@ -725,7 +730,7 @@ struct WallpaperExploreContentView: View {
             contentHeader
                 .padding(.top, 12)
         }
-        .padding(.top, 80)
+        .padding(.top, mainTopBarContentPadding)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
@@ -735,28 +740,26 @@ struct WallpaperExploreContentView: View {
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
         let items = visibleWallpapers
-
-        let columnItems: [[Wallpaper]]
-        if items.isEmpty {
-            columnItems = Array(repeating: [], count: max(1, config.columnCount))
-        } else {
-            columnItems = columnDistributor.append(
-                items: items,
-                columnCount: config.columnCount,
-                cardWidth: config.cardWidth,
-                spacing: config.spacing,
-                height: { [config] wallpaper in
-                    let aspectRatio = min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
-                    return config.cardWidth / aspectRatio + 46
+        let columnItems = ExploreGridLayout.waterfallColumns(
+            items: items,
+            columnCount: config.columnCount,
+            cardWidth: config.cardWidth,
+            spacing: config.spacing,
+            heightProvider: { wallpaper in
+                let safeAspectRatio: CGFloat
+                if wallpaper.dimensionX > 0, wallpaper.dimensionY > 0 {
+                    safeAspectRatio = CGFloat(wallpaper.dimensionX) / CGFloat(wallpaper.dimensionY)
+                } else {
+                    safeAspectRatio = 1.6 // 默认 16:10
                 }
-            )
-        }
+                return config.cardWidth / safeAspectRatio
+            }
+        )
 
         return HStack(alignment: .top, spacing: config.spacing) {
             ForEach(0..<config.columnCount, id: \.self) { columnIndex in
-                let items = columnItems[safe: columnIndex] ?? []
                 LazyVStack(spacing: config.spacing) {
-                    ForEach(items) { wallpaper in
+                    ForEach(columnItems[safe: columnIndex] ?? []) { wallpaper in
                         WallpaperCardView(
                             wallpaper: wallpaper,
                             isFavorite: viewModel.isFavorite(wallpaper),
@@ -1010,11 +1013,19 @@ struct WallpaperExploreContentView: View {
               !viewModel.isLoading,
               !isLoadingMore else { return }
 
-        Task {
-            isLoadingMore = true
+        isLoadingMore = true
+        loadMoreFailed = false
+        loadMoreTask?.cancel()
+        loadMoreTask = Task { @MainActor in
+            defer {
+                isLoadingMore = false
+                loadMoreTask = nil
+            }
+
+            guard !Task.isCancelled else { return }
             loadMoreFailed = false
-            defer { isLoadingMore = false }
             await viewModel.loadMore()
+            guard !Task.isCancelled else { return }
             // 检查是否加载失败（仍有更多页但没有新数据）
             if viewModel.hasMorePages && viewModel.errorMessage != nil {
                 loadMoreFailed = true
@@ -1022,10 +1033,24 @@ struct WallpaperExploreContentView: View {
         }
     }
 
+    private func scheduleLoadMoreFromScroll() {
+        scrollCoordinator.pendingLoadMoreTask?.cancel()
+        let task = DispatchWorkItem { [self] in
+            triggerLoadMore()
+        }
+        scrollCoordinator.pendingLoadMoreTask = task
+        DispatchQueue.main.async(execute: task)
+    }
+
     private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
-            triggerLoadMore()
+        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
+        if isNearBottom {
+            guard !scrollCoordinator.wasNearBottom else { return }
+            scrollCoordinator.wasNearBottom = true
+            scheduleLoadMoreFromScroll()
+        } else {
+            scrollCoordinator.wasNearBottom = false
         }
     }
 
@@ -1149,12 +1174,11 @@ struct WallpaperExploreContentView: View {
 
     private func prepareForFeedReplacement() {
         loadMoreTask?.cancel()
-        sentinelDebounceTask?.cancel()
+        scrollCoordinator.cancelPendingWork()
         isLoadingMore = false
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
-        columnDistributor.invalidate()
     }
 
     private func syncAtmosphereIfNeeded() {

@@ -16,6 +16,7 @@ final class VideoRenderer: @unchecked Sendable {
     let displayLayer: AVSampleBufferDisplayLayer
     let timebase: CMTimebase
     private let renderer: AVSampleBufferVideoRenderer
+    private let rootLayer: CALayer
     private let backgroundFrameLayer: CALayer
     private let stillFrameLayer: CALayer
     private var asset: AVURLAsset
@@ -49,28 +50,15 @@ final class VideoRenderer: @unchecked Sendable {
             ])
         }
 
-        // 获取视频实际显示尺寸（应用 preferredTransform，处理旋转/镜像等变换）
-        let naturalSize = track.naturalSize
-        let preferredTransform = track.preferredTransform
-        let transformedSize = naturalSize.applying(preferredTransform)
-        let videoWidth = abs(transformedSize.width)
-        let videoHeight = abs(transformedSize.height)
-
-        // 计算 resizeAspectFill 的 frame：缩放视频至填满 rootLayer，保持宽高比，居中
         let bounds = rootLayer.bounds
-        let fillScale = max(bounds.width / videoWidth, bounds.height / videoHeight)
-        let fillFrame = CGRect(
-            x: (bounds.width - videoWidth * fillScale) / 2,
-            y: (bounds.height - videoHeight * fillScale) / 2,
-            width: videoWidth * fillScale,
-            height: videoHeight * fillScale
-        )
+        let videoSize = Self.displaySize(for: track)
+        let layout = Self.aspectFillLayout(videoSize: videoSize, in: bounds)
 
-        extLog("[VideoRenderer] video=\(Int(videoWidth))x\(Int(videoHeight)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(fillScale)")
+        extLog("[VideoRenderer] video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(layout.scale)")
 
         let displayLayer = AVSampleBufferDisplayLayer()
-        displayLayer.videoGravity = .resize  // frame 已处理宽高比，直接拉伸填满
-        displayLayer.frame = fillFrame
+        displayLayer.videoGravity = .resizeAspectFill
+        displayLayer.frame = layout.frame
         displayLayer.contentsScale = rootLayer.contentsScale
 
         return VideoRenderer(
@@ -78,13 +66,14 @@ final class VideoRenderer: @unchecked Sendable {
             displayLayer: displayLayer,
             asset: asset,
             videoTrack: track,
-            fillFrame: fillFrame
+            fillFrame: layout.frame
         )
     }
 
     private init(rootLayer: CALayer, displayLayer: AVSampleBufferDisplayLayer, asset: AVURLAsset, videoTrack: AVAssetTrack, fillFrame: CGRect) {
         self.displayLayer = displayLayer
         self.renderer = displayLayer.sampleBufferRenderer
+        self.rootLayer = rootLayer
         self.asset = asset
         self.videoTrack = videoTrack
         self.backgroundFrameLayer = CALayer()
@@ -116,6 +105,50 @@ final class VideoRenderer: @unchecked Sendable {
         CMTimebaseSetRate(timebase, rate: 0.0)
         displayLayer.controlTimebase = timebase
         generateBackgroundFrame(for: asset)
+    }
+
+    private static func displaySize(for track: AVAssetTrack) -> CGSize {
+        let naturalSize = track.naturalSize
+        let transformedSize = naturalSize.applying(track.preferredTransform)
+        let videoWidth = max(1, abs(transformedSize.width))
+        let videoHeight = max(1, abs(transformedSize.height))
+        return CGSize(width: videoWidth, height: videoHeight)
+    }
+
+    private static func aspectFillLayout(videoSize: CGSize, in bounds: CGRect) -> (frame: CGRect, scale: CGFloat) {
+        let videoWidth = max(1, videoSize.width)
+        let videoHeight = max(1, videoSize.height)
+        let fillScale = max(bounds.width / videoWidth, bounds.height / videoHeight)
+        let fillFrame = CGRect(
+            x: (bounds.width - videoWidth * fillScale) / 2,
+            y: (bounds.height - videoHeight * fillScale) / 2,
+            width: videoWidth * fillScale,
+            height: videoHeight * fillScale
+        )
+        return (fillFrame, fillScale)
+    }
+
+    private func applyAspectFillLayout(for track: AVAssetTrack) {
+        let videoSize = Self.displaySize(for: track)
+        if Thread.isMainThread {
+            applyAspectFillLayout(videoSize: videoSize)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.applyAspectFillLayout(videoSize: videoSize)
+            }
+        }
+    }
+
+    private func applyAspectFillLayout(videoSize: CGSize) {
+        let bounds = rootLayer.bounds
+        let layout = Self.aspectFillLayout(videoSize: videoSize, in: bounds)
+        rootLayer.masksToBounds = true
+        backgroundFrameLayer.frame = bounds
+        displayLayer.frame = layout.frame
+        displayLayer.contentsScale = rootLayer.contentsScale
+        stillFrameLayer.frame = bounds
+        stillFrameLayer.contentsScale = rootLayer.contentsScale
+        extLog("[VideoRenderer] layout updated video=\(Int(videoSize.width))x\(Int(videoSize.height)) display=\(Int(bounds.width))x\(Int(bounds.height)) fillScale=\(layout.scale)")
     }
 
     // MARK: - Playback Control
@@ -198,6 +231,7 @@ final class VideoRenderer: @unchecked Sendable {
                 nextReader?.cancelReading()
                 asset = newAsset
                 videoTrack = track
+                applyAspectFillLayout(for: track)
                 generateBackgroundFrame(for: newAsset)
                 ptsOffset = .zero
                 lastEnqueuedEnd = .zero
@@ -451,6 +485,7 @@ final class VideoRenderer: @unchecked Sendable {
             if let nrAsset = nr.asset as? AVURLAsset, nrAsset.url != asset.url {
                 asset = nrAsset
                 videoTrack = no.track
+                applyAspectFillLayout(for: no.track)
                 extLog("  [Renderer] 已切换变体: \(nrAsset.url.lastPathComponent)")
             }
             currentReader = nr

@@ -122,13 +122,19 @@ class DownloadTaskViewModel: ObservableObject {
 final class DownloadToastViewModel: ObservableObject {
     @Published private(set) var snapshot: DownloadToastSnapshot?
     @Published private(set) var activeTaskCount: Int = 0
+    @Published private(set) var steamCMDQueuedCount: Int = 0
 
     private let downloadService: DownloadTaskService
+    private let workshopService: WorkshopService
     private var cancellables = Set<AnyCancellable>()
     private var preferredRunningTaskID: String?
+    private var lastEmittedSnapshot: DownloadToastSnapshot?
+    private var lastToastProgressEmitDate: Date?
+    private let runningProgressEmitInterval: TimeInterval = 0.20
 
-    init(downloadService: DownloadTaskService = .shared) {
+    init(downloadService: DownloadTaskService = .shared, workshopService: WorkshopService = .shared) {
         self.downloadService = downloadService
+        self.workshopService = workshopService
 
         downloadService.$tasks
             .receive(on: DispatchQueue.main)
@@ -144,6 +150,11 @@ final class DownloadToastViewModel: ObservableObject {
                 self?.activeTaskCount = state.activeCount
             }
             .store(in: &cancellables)
+
+        workshopService.$steamCMDQueuedCount
+            .receive(on: DispatchQueue.main)
+            .removeDuplicates()
+            .assign(to: &$steamCMDQueuedCount)
     }
 
     func isSuppressed(taskID: String) -> Bool {
@@ -168,13 +179,15 @@ final class DownloadToastViewModel: ObservableObject {
         // 固定显示当前偏好的 running 任务，避免多个任务同时下载时弹窗来回闪烁
         if let preferredID = preferredRunningTaskID,
            let task = visibleRunningTasks.first(where: { $0.id == preferredID }) {
-            return (DownloadToastSnapshot(task: task), activeCount)
+            let snapshot = coalescedRunningSnapshot(for: task)
+            return emit(snapshot, activeCount: activeCount)
         }
 
         // 选择最新的 running 任务并记住它
         if let runningTask = visibleRunningTasks.max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
             preferredRunningTaskID = runningTask.id
-            return (DownloadToastSnapshot(task: runningTask), activeCount)
+            let snapshot = coalescedRunningSnapshot(for: runningTask)
+            return emit(snapshot, activeCount: activeCount)
         }
 
         preferredRunningTaskID = nil
@@ -186,7 +199,7 @@ final class DownloadToastViewModel: ObservableObject {
                 return isActionable && Date().timeIntervalSince(referenceDate) < 30
             })
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
-            return (DownloadToastSnapshot(task: actionableTask), activeCount)
+            return emit(DownloadToastSnapshot(task: actionableTask), activeCount: activeCount)
         }
 
         if let recentCompletedTask = tasks
@@ -196,9 +209,45 @@ final class DownloadToastViewModel: ObservableObject {
                 return Date().timeIntervalSince(referenceDate) < 1.8
             })
             .max(by: { $0.lastUpdatedAt < $1.lastUpdatedAt }) {
-            return (DownloadToastSnapshot(task: recentCompletedTask), activeCount)
+            return emit(DownloadToastSnapshot(task: recentCompletedTask), activeCount: activeCount)
         }
 
-        return (nil, activeCount)
+        return emit(nil, activeCount: activeCount)
+    }
+
+    private func emit(_ snapshot: DownloadToastSnapshot?, activeCount: Int) -> (snapshot: DownloadToastSnapshot?, activeCount: Int) {
+        lastEmittedSnapshot = snapshot
+        if snapshot?.isRunning != true {
+            lastToastProgressEmitDate = nil
+        }
+        return (snapshot, activeCount)
+    }
+
+    private func coalescedRunningSnapshot(for task: DownloadTask) -> DownloadToastSnapshot {
+        let nextSnapshot = DownloadToastSnapshot(task: task)
+        guard let previous = lastEmittedSnapshot,
+              previous.id == nextSnapshot.id,
+              previous.kind == nextSnapshot.kind,
+              previous.title == nextSnapshot.title,
+              previous.subtitle == nextSnapshot.subtitle,
+              previous.badgeText == nextSnapshot.badgeText,
+              previous.status == nextSnapshot.status,
+              nextSnapshot.isRunning else {
+            lastToastProgressEmitDate = Date()
+            return nextSnapshot
+        }
+
+        let now = Date()
+        let enoughTimePassed = lastToastProgressEmitDate.map {
+            now.timeIntervalSince($0) >= runningProgressEmitInterval
+        } ?? true
+        let enoughProgressChanged = abs(nextSnapshot.progress - previous.progress) >= 0.02
+
+        guard enoughTimePassed || enoughProgressChanged else {
+            return previous
+        }
+
+        lastToastProgressEmitDate = now
+        return nextSnapshot
     }
 }

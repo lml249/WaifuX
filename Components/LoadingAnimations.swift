@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Shimmer 效果（iOS 风格闪光加载动画）
 struct ShimmerModifier: ViewModifier {
     @State private var isAnimating = false
-    
+
     func body(content: Content) -> some View {
         content
             .overlay(
@@ -128,7 +128,7 @@ struct HeroSkeletonView: View {
     var primary: Color = Color(hex: "5A7CFF")
     var secondary: Color = Color(hex: "8A5CFF")
     var tertiary: Color = Color(hex: "20C1FF")
-    
+
     var body: some View {
         ZStack {
             LinearGradient(
@@ -342,7 +342,7 @@ struct ContentTransitionModifier: ViewModifier {
     @State private var offset: CGFloat = 20
     let delay: Double
     let duration: Double
-    
+
     func body(content: Content) -> some View {
         content
             .opacity(opacity)
@@ -369,18 +369,18 @@ extension View {
 struct OptimizedLoadingView: View {
     let message: String
     let showSkeleton: Bool
-    
+
     init(message: String = t("loading"), showSkeleton: Bool = true) {
         self.message = message
         self.showSkeleton = showSkeleton
     }
-    
+
     var body: some View {
         if showSkeleton {
             VStack(spacing: 20) {
                 CustomProgressView(tint: LiquidGlassColors.primaryPink)
                     .scaleEffect(1.2)
-                
+
                 Text(message)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(LiquidGlassColors.textSecondary)
@@ -390,7 +390,7 @@ struct OptimizedLoadingView: View {
             // 简单的 loading spinner
             VStack(spacing: 16) {
                 CustomProgressView(tint: LiquidGlassColors.primaryPink)
-                
+
                 Text(message)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(LiquidGlassColors.textSecondary)
@@ -693,9 +693,9 @@ struct AnimatedEmptyState: View {
     let icon: String
     let title: String
     let subtitle: String
-    
+
     @State private var isAnimating = false
-    
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: icon)
@@ -703,11 +703,11 @@ struct AnimatedEmptyState: View {
                 .foregroundStyle(LiquidGlassColors.textTertiary)
                 .scaleEffect(isAnimating ? 1.1 : 1.0)
                 .opacity(isAnimating ? 0.7 : 1.0)
-            
+
             Text(title)
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(LiquidGlassColors.textPrimary)
-            
+
             Text(subtitle)
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(LiquidGlassColors.textSecondary)
@@ -942,16 +942,37 @@ struct BottomLoadingFailedCard: View {
     }
 }
 
+// MARK: - 滚动感知环境值
+
+/// 表示当前是否处于快速滚动交互中（用于降级液态玻璃渲染）
+public struct ScrollInteractionKey: EnvironmentKey {
+    public static let defaultValue: Bool = false
+}
+
+public extension EnvironmentValues {
+    var isScrollInteracting: Bool {
+        get { self[ScrollInteractionKey.self] }
+        set { self[ScrollInteractionKey.self] = newValue }
+    }
+}
+
 // MARK: - 回到顶部按钮
 
-/// 回到顶部按钮
+/// 回到顶部按钮（滚动感知版）
 /// 浮动在列表右下角，使用液态玻璃效果，点击后平滑滚动到顶部
+/// 快速滚动时自动降级为轻量毛玻璃，减少 GPU 折射计算
 struct ScrollToTopButton: View {
     let action: () -> Void
+    var forceLightweight: Bool = false
 
+    @Environment(\.isScrollInteracting) private var isScrollInteracting
     @State private var isHovered = false
 
     private let buttonSize: CGFloat = 44
+
+    private var useLightweight: Bool {
+        forceLightweight || isScrollInteracting
+    }
 
     var body: some View {
         Button(action: action) {
@@ -960,8 +981,18 @@ struct ScrollToTopButton: View {
                 .foregroundStyle(Color.white.opacity(0.85))
                 .frame(width: buttonSize, height: buttonSize)
                 .background(
-                    Circle()
-                        .fill(.ultraThinMaterial)
+                    Group {
+                        if useLightweight {
+                            // 快速滚动时使用系统毛玻璃（轻量）
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                        } else {
+                            // 静止时使用液态玻璃（高质量）
+                            Circle()
+                                .fill(Color.clear)
+                                .liquidGlassSurface(.regular, in: Circle())
+                        }
+                    }
                         .overlay(
                             Circle()
                                 .stroke(Color.white.opacity(0.2), lineWidth: 0.5)

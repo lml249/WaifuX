@@ -188,14 +188,8 @@ public struct MediaVideoCard: View {
                             .setProcessor(DownsamplingImageProcessor(size: targetImageSize))
                             .cacheMemoryOnly(false)
                             .memoryCacheExpiration(.seconds(300))
-                            .fade(duration: 0.3)
                             .placeholder { _ in
                                 SkeletonCard(width: cardWidth, height: thumbnailHeight, cornerRadius: 0)
-                            }
-                            .onSuccess { result in
-                                if !detectedGIF, result.image.kf.gifRepresentation() != nil {
-                                    detectedGIF = true
-                                }
                             }
                             .resizable()
                             .scaledToFill()
@@ -208,7 +202,6 @@ public struct MediaVideoCard: View {
                         KFAnimatedImage.url(listThumbnailURL)
                             .memoryCacheExpiration(.seconds(60))
                             .diskCacheExpiration(.days(3))
-                            .fade(duration: 0.3)
                             .configure { view in
                                 configureAnimatedGIFViewForAspectFill(
                                     view,
@@ -376,7 +369,7 @@ public struct MediaVideoCard: View {
         guard resolvedThumbnailURL == nil,
               let local = localMediaFileURL,
               local.isFileURL,
-              FileManager.default.fileExists(atPath: local.path) else { return }
+              FileExistenceCache.shared.fileExists(atPath: local.path) else { return }
 
         if let thumbnailURL,
            thumbnailURL.isFileURL,
@@ -464,7 +457,7 @@ public struct WallpaperEditCard: View {
     private var resolvedThumbURL: URL? {
         if let local = localFileURL,
            local.isFileURL,
-           FileManager.default.fileExists(atPath: local.path) {
+           FileExistenceCache.shared.fileExists(atPath: local.path) {
             return local
         }
         return wallpaper.thumbURL ?? wallpaper.smallThumbURL
@@ -478,7 +471,6 @@ public struct WallpaperEditCard: View {
                     KFImage(resolvedThumbURL)
                         .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
                         .cacheMemoryOnly(false)
-                        .fade(duration: 0.3)
                         .placeholder { _ in
                             SkeletonCard(
                                 width: cardWidth,

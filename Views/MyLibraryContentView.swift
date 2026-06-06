@@ -13,6 +13,7 @@ struct MyLibraryContentView: View {
     @ObservedObject private var folderLockService = FolderLockService.shared
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var workshopSourceManager = WorkshopSourceManager.shared
+    @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
 
     // 分类筛选
     @State private var selectedContentType: ContentType = .wallpaper
@@ -21,10 +22,14 @@ struct MyLibraryContentView: View {
     @Binding var selectedAnime: AnimeSearchResult?
     @Binding var wallpaperContext: [Wallpaper]
     @Binding var mediaContext: [MediaItem]
+    let isVisible: Bool
     @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
     @State private var selectedSubTab: SubTab = .downloads
+    @State private var librarySearchQuery = ""
+    @State private var isLibrarySearchExpanded = false
+    @FocusState private var isLibrarySearchFocused: Bool
 
     // 编辑状态
     @State private var isEditing = false
@@ -118,6 +123,14 @@ struct MyLibraryContentView: View {
         }
     }
 
+    private var trimmedLibrarySearchQuery: String {
+        librarySearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasActiveLibrarySearch: Bool {
+        !trimmedLibrarySearchQuery.isEmpty
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             if isEditing {
@@ -148,19 +161,20 @@ struct MyLibraryContentView: View {
                 let animeGridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 32) {
+                    VStack(alignment: .leading, spacing: 0) {
                         mediaHero
-                        ContentTypePicker(selected: $selectedContentType)
+                        libraryControlPanel
+                            .padding(.top, 36)
                         contentSections(config: gridConfig, animeConfig: animeGridConfig)
+                            .padding(.top, 10)
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 28)
-                    .padding(.top, 80)
-                    .padding(.bottom, 48)
+                    .padding(.top, mainTopBarContentPadding)
+                    .padding(.bottom, 80)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .frame(minHeight: geometry.size.height)
                 }
-                .scrollClipDisabled()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -176,6 +190,16 @@ struct MyLibraryContentView: View {
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
                 await loadAnimeFavorites()
+            }
+        }
+        .onChange(of: librarySearchQuery) { _, _ in
+            updateWallpaperItems()
+            updateMediaItems()
+            syncSelectionWithVisibleItems()
+        }
+        .onChange(of: isVisible) { _, visible in
+            if !visible {
+                isLibrarySearchExpanded = false
             }
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in
@@ -321,6 +345,7 @@ struct MyLibraryContentView: View {
                 originalName: nil
             )
         }
+        syncSelectionWithVisibleItems()
     }
 
     private func releaseForegroundMemory() {
@@ -394,6 +419,43 @@ struct MyLibraryContentView: View {
         }
     }
 
+    private var activeLibraryTint: Color {
+        switch selectedContentType {
+        case .wallpaper:
+            return LiquidGlassColors.primaryPink
+        case .video:
+            return LiquidGlassColors.secondaryViolet
+        case .anime:
+            return LiquidGlassColors.tertiaryBlue
+        }
+    }
+
+    private var libraryControlPanel: some View {
+        let tint = activeLibraryTint
+
+        return HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                ContentTypePicker(selected: $selectedContentType)
+                librarySearchControl
+
+                if selectedContentType != .anime {
+                    subTabDropdown
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(alignment: .center, spacing: 10) {
+                if selectedContentType == .wallpaper {
+                    wallpaperRatioPicker(color: tint)
+                }
+
+                libraryToolbarActions(tint: tint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     // MARK: - Content Sections
     @ViewBuilder
     private func contentSections(config: LibraryGridConfig, animeConfig: AnimeGridConfig) -> some View {
@@ -409,14 +471,7 @@ struct MyLibraryContentView: View {
 
     // MARK: - Wallpaper Section
     private func wallpaperSection(config: LibraryGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(
-                title: t("library.wallpapers"),
-                color: LiquidGlassColors.primaryPink,
-                importAction: importWallpapers,
-                folderURL: DownloadPathManager.shared.wallpapersFolderURL
-            )
-
+        VStack(alignment: .leading, spacing: 12) {
             // 文件夹导航面包屑
             folderBreadcrumb(
                 folderStack: wallpaperFolderStack,
@@ -427,9 +482,9 @@ struct MyLibraryContentView: View {
 
             if wallpaperItems.isEmpty && currentWallpaperFolders.isEmpty {
                 emptyMediaSurface(
-                    title: selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads"),
-                    subtitle: selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint"),
-                    icon: selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle",
+                    title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites") : t("no.wallpaper.downloads")),
+                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.wallpaper.favorites.hint") : t("no.wallpaper.downloads.hint")),
+                    icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
                     accent: LiquidGlassColors.primaryPink
                 )
             } else {
@@ -546,7 +601,12 @@ struct MyLibraryContentView: View {
         case .portrait:
             wallpaperItems = baseItems.filter { $0.wallpaper.dimensionX < $0.wallpaper.dimensionY }
         }
+        if hasActiveLibrarySearch {
+            let query = trimmedLibrarySearchQuery
+            wallpaperItems = wallpaperItems.filter { matchesLibrarySearch(for: $0, query: query) }
+        }
         refreshWallpaperFolderDisplay()
+        syncSelectionWithVisibleItems()
     }
 
     private var orderedWallpaperGridItems: [LibraryGridEntry<AnyWallpaperItem>] {
@@ -556,11 +616,17 @@ struct MyLibraryContentView: View {
     }
 
     private var currentWallpaperFolders: [LibraryFolder] {
-        folderStore.folders(for: .wallpaper, parentID: currentWallpaperFolderID)
+        let folders = folderStore.folders(for: .wallpaper, parentID: currentWallpaperFolderID)
+        guard hasActiveLibrarySearch else { return folders }
+        let query = trimmedLibrarySearchQuery
+        return folders.filter { matchesLibrarySearch(for: $0, query: query) }
     }
 
     private var currentMediaFolders: [LibraryFolder] {
-        folderStore.folders(for: .media, parentID: currentMediaFolderID)
+        let folders = folderStore.folders(for: .media, parentID: currentMediaFolderID)
+        guard hasActiveLibrarySearch else { return folders }
+        let query = trimmedLibrarySearchQuery
+        return folders.filter { matchesLibrarySearch(for: $0, query: query) }
     }
 
     private func updateMediaItems() {
@@ -594,7 +660,12 @@ struct MyLibraryContentView: View {
         }
         // 媒体库不再做横屏/竖屏筛选
         mediaItems = baseItems
+        if hasActiveLibrarySearch {
+            let query = trimmedLibrarySearchQuery
+            mediaItems = mediaItems.filter { matchesLibrarySearch(for: $0, query: query) }
+        }
         refreshMediaFolderDisplay()
+        syncSelectionWithVisibleItems()
     }
 
     private var orderedMediaGridItems: [LibraryGridEntry<AnyMediaItem>] {
@@ -651,17 +722,7 @@ struct MyLibraryContentView: View {
 
     // MARK: - Media Section
     private func mediaSection(config: LibraryGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(
-                title: t("library.videos"),
-                color: LiquidGlassColors.secondaryViolet,
-                importAction: { Task { await importMedia() } },
-                workshopImportAction: importWorkshop,
-                syncSubscriptionAction: { syncSubscriptions() },
-                isSyncing: isSyncingSubscriptions,
-                folderURL: DownloadPathManager.shared.mediaFolderURL
-            )
-
+        VStack(alignment: .leading, spacing: 12) {
             // 文件夹导航面包屑
             folderBreadcrumb(
                 folderStack: mediaFolderStack,
@@ -672,9 +733,9 @@ struct MyLibraryContentView: View {
 
             if mediaItems.isEmpty && currentMediaFolders.isEmpty {
                 emptyMediaSurface(
-                    title: selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads"),
-                    subtitle: selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint"),
-                    icon: selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle",
+                    title: hasActiveLibrarySearch ? t("error.empty.title") : (selectedSubTab == .favorites ? t("no.media.favorites") : t("no.media.downloads")),
+                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : (selectedSubTab == .favorites ? t("no.media.favorites.hint") : t("no.media.downloads.hint")),
+                    icon: hasActiveLibrarySearch ? "magnifyingglass" : (selectedSubTab == .favorites ? "heart.slash" : "arrow.down.circle"),
                     accent: LiquidGlassColors.secondaryViolet
                 )
             } else {
@@ -1020,19 +1081,12 @@ struct MyLibraryContentView: View {
 
     // MARK: - Anime Section
     private func animeSection(config: AnimeGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(
-                title: t("library.anime"),
-                color: LiquidGlassColors.tertiaryBlue,
-                importAction: nil,
-                folderURL: nil
-            )
-
+        VStack(alignment: .leading, spacing: 12) {
             if currentAnimeItems.isEmpty {
                 emptyMediaSurface(
-                    title: t("no.anime.favorites"),
-                    subtitle: t("no.anime.favorites.hint"),
-                    icon: "heart.slash",
+                    title: hasActiveLibrarySearch ? t("error.empty.title") : t("no.anime.favorites"),
+                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : t("no.anime.favorites.hint"),
+                    icon: hasActiveLibrarySearch ? "magnifyingglass" : "heart.slash",
                     accent: LiquidGlassColors.tertiaryBlue
                 )
             } else {
@@ -1059,7 +1113,9 @@ struct MyLibraryContentView: View {
 
     private var currentAnimeItems: [AnimeSearchResult] {
         // 动漫目前只有收藏
-        animeFavorites
+        guard hasActiveLibrarySearch else { return animeFavorites }
+        let query = trimmedLibrarySearchQuery
+        return animeFavorites.filter { matchesLibrarySearch(for: $0, query: query) }
     }
 
     // MARK: - Section Header
@@ -1368,249 +1424,282 @@ struct MyLibraryContentView: View {
         return "\(count)"
     }
 
-    private func sectionHeader(
-        title: String,
-        color: Color,
-        importAction: (() -> Void)?,
-        workshopImportAction: (() -> Void)? = nil,
-        syncSubscriptionAction: (() -> Void)? = nil,
-        isSyncing: Bool = false,
-        folderURL: URL?
-    ) -> some View {
-        HStack(spacing: 16) {
-            // 左侧：收藏 / 已下载 下拉选择器 + 壁纸比例筛选
-            HStack(spacing: 10) {
-                if selectedContentType != .anime {
-                    Menu {
-                        ForEach(SubTab.allCases, id: \.self) { tab in
-                            Button(tab.title) {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    selectedSubTab = tab
-                                    isEditing = false
-                                    selectedItems.removeAll()
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(selectedSubTab.title)
-                                .font(.system(size: 14, weight: .semibold))
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 10, weight: .semibold))
-                        }
-                        .foregroundStyle(.white.opacity(0.95))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.white.opacity(0.1))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                        )
-                    }
-                    .menuStyle(.borderlessButton)
-                    .pointingHandCursor()
-                } else {
-                    Text(title)
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.95))
-                }
+    private var librarySearchControl: some View {
+        HStack(spacing: 0) {
+            if isLibrarySearchExpanded {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.75))
 
-                // 壁纸比例筛选（媒体库不显示）
-                if selectedContentType == .wallpaper {
-                    HStack(spacing: 0) {
-                        ForEach(WallpaperRatioFilter.allCases, id: \.self) { filter in
-                            Button {
-                                if selectedContentType == .wallpaper {
-                                    wallpaperRatioFilter = filter
-                                } else {
-                                    mediaRatioFilter = filter
-                                }
-                                isEditing = false
-                                selectedItems.removeAll()
-                            } label: {
-                                Text(filter.title)
-                                    .font(.system(size: 12, weight: activeRatioFilter == filter ? .semibold : .medium))
-                                    .foregroundStyle(activeRatioFilter == filter ? .white : .white.opacity(0.7))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                            .fill(activeRatioFilter == filter ? color.opacity(0.35) : Color.clear)
-                                    )
+                    TextField(t("search.placeholder"), text: $librarySearchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .focused($isLibrarySearchFocused)
+                        .onSubmit {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                isLibrarySearchExpanded = false
                             }
-                            .buttonStyle(.plain)
-                            .pointingHandCursor()
                         }
+                        .onExitCommand {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                isLibrarySearchExpanded = false
+                            }
+                        }
+
+                    if !librarySearchQuery.isEmpty {
+                        Button {
+                            librarySearchQuery = ""
+                            // 清空后自动收起
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                isLibrarySearchExpanded = false
+                            }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.white.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 2)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                    )
+                }
+                .padding(.horizontal, 14)
+                .frame(maxWidth: 240)
+                .frame(height: 42)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            } else {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isLibrarySearchExpanded = true
+                        isLibrarySearchFocused = true
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .frame(width: 42, height: 42)
+                }
+                .buttonStyle(.plain)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .background(
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+        .clipped()
+        .animation(.easeInOut(duration: 0.25), value: isLibrarySearchExpanded)
+        .onChange(of: isLibrarySearchFocused) { _, focused in
+            if !focused {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    isLibrarySearchExpanded = false
+                }
+            }
+        }
+    }
+
+    private func libraryToolbarActions(tint: Color) -> some View {
+        HStack(spacing: 8) {
+            toolbarCapsuleButton(
+                title: isEditing ? t("done") : t("edit"),
+                systemImage: isEditing ? "checkmark.circle.fill" : "checkmark.circle",
+                tint: tint,
+                prominence: isEditing ? .primary : .secondary
+            ) {
+                withAnimation {
+                    isEditing.toggle()
+                    selectedItems.removeAll()
                 }
             }
 
-            Spacer()
-
-            // 右侧：按钮组
-            HStack(spacing: 8) {
-                // 新建文件夹
-                if selectedContentType != .anime {
-                    Button {
-                        showNewFolderSheet = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder.badge.plus")
-                                .font(.system(size: 12))
-                            Text(t("new.folder"))
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.white.opacity(0.08))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
+            if selectedContentType != .anime {
+                toolbarCapsuleButton(
+                    title: t("new.folder"),
+                    systemImage: "folder.badge.plus",
+                    tint: tint,
+                    prominence: .secondary
+                ) {
+                    showNewFolderSheet = true
                 }
+            }
 
-                // 编辑 / 完成
-                Button {
-                    withAnimation {
-                        isEditing.toggle()
+            libraryUtilityMenu(tint: tint)
+        }
+    }
+
+    private var subTabDropdown: some View {
+        Menu {
+            ForEach(SubTab.allCases, id: \.self) { tab in
+                Button(tab.title) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        selectedSubTab = tab
+                        isEditing = false
                         selectedItems.removeAll()
                     }
+                }
+            }
+        } label: {
+            Text(selectedSubTab.title)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.95))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .pointingHandCursor()
+    }
+
+    private func wallpaperRatioPicker(color: Color) -> some View {
+        HStack(spacing: 0) {
+            ForEach(WallpaperRatioFilter.allCases, id: \.self) { filter in
+                Button {
+                    wallpaperRatioFilter = filter
+                    isEditing = false
+                    selectedItems.removeAll()
                 } label: {
-                    Text(isEditing ? t("done") : t("edit"))
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(isEditing ? .white : .white.opacity(0.9))
-                        .padding(.horizontal, 12)
+                    Text(filter.title)
+                        .font(.system(size: 12, weight: activeRatioFilter == filter ? .semibold : .medium))
+                        .foregroundStyle(activeRatioFilter == filter ? .white : .white.opacity(0.7))
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isEditing ? color.opacity(0.35) : Color.white.opacity(0.08))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(activeRatioFilter == filter ? color.opacity(0.35) : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
                 .pointingHandCursor()
-
-                // 导入
-                if let importAction {
-                    Button(action: importAction) {
-                        Text(t("import"))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.white.opacity(0.08))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                }
-
-                // Workshop 导入
-                if let workshopImportAction {
-                    Button(action: workshopImportAction) {
-                        Text(t("import.workshop"))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.white.opacity(0.08))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                }
-
-                // 同步 Steam 订阅
-                if let syncSubscriptionAction {
-                    Button(action: syncSubscriptionAction) {
-                        HStack(spacing: 4) {
-                            if isSyncing {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .scaleEffect(0.7)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.system(size: 12))
-                            }
-                            Text(isSyncing ? "同步中..." : "同步订阅")
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundStyle(.white.opacity(0.9))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(isSyncing ? color.opacity(0.25) : Color.white.opacity(0.08))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                    .disabled(isSyncing)
-                }
-
-                // 打开文件夹
-                if let folderURL {
-                    Button {
-                        openFolderInFinder(folderURL)
-                    } label: {
-                        Text(t("open.in.finder"))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.white.opacity(0.08))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                }
             }
         }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func libraryUtilityMenu(tint: Color) -> some View {
+        let hasMenuItems = selectedSubTab == .downloads
+        && (selectedContentType == .wallpaper || selectedContentType == .video)
+
+        if hasMenuItems {
+            Menu {
+                if selectedSubTab == .downloads {
+                    switch selectedContentType {
+                    case .wallpaper:
+                        Button(action: importWallpapers) {
+                            Label(t("import"), systemImage: "square.and.arrow.down")
+                        }
+
+                        Button {
+                            openFolderInFinder(DownloadPathManager.shared.wallpapersFolderURL)
+                        } label: {
+                            Label(t("open.in.finder"), systemImage: "folder")
+                        }
+                    case .video:
+                        Button {
+                            Task { await importMedia() }
+                        } label: {
+                            Label(t("import"), systemImage: "square.and.arrow.down")
+                        }
+
+                        Button(action: importWorkshop) {
+                            Label(t("import.workshop"), systemImage: "sparkles.rectangle.stack")
+                        }
+
+                        Button(action: { syncSubscriptions() }) {
+                            Label(isSyncingSubscriptions ? "同步中..." : "同步订阅", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .disabled(isSyncingSubscriptions)
+
+                        Button {
+                            openFolderInFinder(DownloadPathManager.shared.mediaFolderURL)
+                        } label: {
+                            Label(t("open.in.finder"), systemImage: "folder")
+                        }
+                    case .anime:
+                        EmptyView()
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .pointingHandCursor()
+        }
+    }
+
+    private enum ToolbarButtonProminence {
+        case primary
+        case secondary
+    }
+
+    private func toolbarCapsuleButton(
+        title: String,
+        systemImage: String,
+        tint: Color,
+        prominence: ToolbarButtonProminence,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(.white.opacity(0.92))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background {
+                Group {
+                    if prominence == .primary {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(tint.opacity(0.3))
+                    } else {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                    }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(prominence == .primary ? tint.opacity(0.24) : Color.white.opacity(0.15), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     // MARK: - 文件夹面包屑
@@ -1657,7 +1746,7 @@ struct MyLibraryContentView: View {
                     .padding(.vertical, 4)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
+                            .fill(.ultraThinMaterial)
                     )
                 }
                 .buttonStyle(.plain)
@@ -1812,6 +1901,10 @@ struct MyLibraryContentView: View {
         selectedItems = selectedItems.count == allIDs.count ? [] : allIDs
     }
 
+    private func syncSelectionWithVisibleItems() {
+        selectedItems = selectedItems.intersection(Set(currentItemIDs))
+    }
+
     private var currentItemIDs: [String] {
         switch selectedContentType {
         case .wallpaper:
@@ -1889,6 +1982,69 @@ struct MyLibraryContentView: View {
         isEditing = false
         updateWallpaperItems()
         updateMediaItems()
+    }
+
+    private func matchesLibrarySearch(for folder: LibraryFolder, query: String) -> Bool {
+        folder.name.localizedCaseInsensitiveContains(query)
+    }
+
+    private func matchesLibrarySearch(for item: AnyWallpaperItem, query: String) -> Bool {
+        let wallpaper = item.wallpaper
+        let directMatches = [
+            item.localFileURL?.deletingPathExtension().lastPathComponent,
+            wallpaper.id,
+            wallpaper.category,
+            wallpaper.categoryDisplayName,
+            wallpaper.purity,
+            wallpaper.purityDisplayName,
+            wallpaper.effectiveResolutionLabel,
+            wallpaper.ratio,
+            wallpaper.source,
+            wallpaper.uploader?.username,
+            wallpaper.primaryTagName
+        ]
+        if directMatches.contains(where: { $0?.localizedCaseInsensitiveContains(query) == true }) {
+            return true
+        }
+        return wallpaper.tags?.contains(where: {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || ($0.alias?.localizedCaseInsensitiveContains(query) ?? false)
+        }) ?? false
+    }
+
+    private func matchesLibrarySearch(for item: AnyMediaItem, query: String) -> Bool {
+        let media = item.mediaItem
+        let directMatches = [
+            item.localFileURL?.deletingPathExtension().lastPathComponent,
+            media.id,
+            media.title,
+            media.collectionTitle,
+            media.summary,
+            media.sourceName,
+            media.authorName,
+            media.resolutionLabel,
+            media.exactResolution,
+            media.primaryTagText
+        ]
+        if directMatches.contains(where: { $0?.localizedCaseInsensitiveContains(query) == true }) {
+            return true
+        }
+        return media.tags.contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+
+    private func matchesLibrarySearch(for anime: AnimeSearchResult, query: String) -> Bool {
+        let directMatches = [
+            anime.title,
+            anime.originalName,
+            anime.sourceName,
+            anime.latestEpisode,
+            anime.summary,
+            anime.rating
+        ]
+        if directMatches.contains(where: { $0?.localizedCaseInsensitiveContains(query) == true }) {
+            return true
+        }
+        return anime.tags?.contains(where: { $0.name.localizedCaseInsensitiveContains(query) }) ?? false
     }
 
     /// 删除本地壁纸（含物理文件删除）
@@ -2444,51 +2600,88 @@ struct MyLibraryContentView: View {
 struct ContentTypePicker: View {
     @Binding var selected: ContentType
 
+    @Namespace private var selectionNamespace
+    @State private var hoveredType: ContentType?
+
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 6) {
             ForEach(ContentType.allCases, id: \.self) { type in
-                ContentTypeButton(
-                    type: type,
-                    isSelected: selected == type
-                ) {
+                Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         selected = type
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: type.icon)
+                            .font(.system(size: 13, weight: .semibold))
+
+                        Text(type.displayName)
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .foregroundStyle(labelColor(for: type))
+                    .frame(minWidth: 86, minHeight: 32)
+                    .padding(.horizontal, 10)
+                    .background {
+                        if selected == type {
+                            selectedTypeGlass
+                        } else if hoveredType == type {
+                            Capsule(style: .continuous)
+                                .fill(.ultraThinMaterial)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .contentShape(Capsule(style: .continuous))
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        hoveredType = hovering ? type : (hoveredType == type ? nil : hoveredType)
                     }
                 }
             }
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
     }
-}
 
-struct ContentTypeButton: View {
-    let type: ContentType
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: type.icon)
-                    .font(.system(size: 14, weight: .semibold))
-
-                Text(type.displayName)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
-            }
-            .foregroundStyle(isSelected ? .white : .white.opacity(0.7))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.3) : Color.white.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isSelected ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
-            )
+    private func labelColor(for type: ContentType) -> Color {
+        if selected == type {
+            return .white.opacity(0.96)
         }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
+        if hoveredType == type {
+            return .white.opacity(0.86)
+        }
+        return .white.opacity(0.72)
+    }
+
+    @ViewBuilder
+    private var selectedTypeGlass: some View {
+        Capsule(style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.34),
+                                Color.white.opacity(0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.8
+                    )
+            )
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+            .matchedGeometryEffect(id: "libraryContentTypeGlass", in: selectionNamespace)
     }
 }
 

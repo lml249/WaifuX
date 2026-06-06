@@ -55,6 +55,44 @@ final class MediaExploreViewModel: ObservableObject {
     /// 预加载页面的下一页路径（预加载页面返回的 nextPagePath）。
     private var preloadedNextPath: String?
 
+    /// 详情页导航期间的探索列表快照。用于防止 SwiftUI 视图重建、前台释放或过期加载
+    /// 把已滚动出来的分页列表清空/回退到第一页。
+    private var preservedExploreFeedSnapshot: ExploreFeedSnapshot?
+
+    private struct ExploreFeedSnapshot {
+        let activeSource: WorkshopSourceManager.SourceType
+        let items: [MediaItem]
+        let currentTitle: String
+        let currentQuery: String
+        let currentSource: MediaRouteSource
+        let nextPagePath: String?
+        let hasMorePages: Bool
+        let preloadedItems: [MediaItem]
+        let preloadedPagePath: String?
+        let preloadedNextPath: String?
+        let workshopCurrentPage: Int
+        let workshopHasMore: Bool
+        let workshopSearchQuery: String
+        let workshopCurrentTags: [String]
+        let workshopCurrentType: WorkshopSourceManager.WorkshopTypeFilter
+        let workshopCurrentContentLevel: WorkshopSourceManager.WorkshopContentLevel?
+        let workshopCurrentResolution: String?
+        let workshopSortBy: WorkshopSearchParams.SortOption
+        let workshopDays: Int?
+        let dongtaiCurrentPage: Int
+        let dongtaiHasMore: Bool
+        let dongtaiSearchQuery: String
+        let dongtaiCurrentCategories: Set<DynamicWallpaperCategory>
+        let dongtaiCurrentListType: DynamicWallpaperListType
+        let dongtaiSortBy: DynamicWallpaperSortOption
+        let dongtaiFilterAudio: Bool?
+        let dongtaiFilterFourK: Bool?
+        let wallsflowCurrentPage: Int
+        let wallsflowHasMore: Bool
+        let wallsflowSearchQuery: String
+        let wallsflowCurrentCategorySlug: String
+    }
+
     /// 本地媒体缓存重建任务（带防抖）
     private var rebuildLocalMediaCacheTask: Task<Void, Never>?
 
@@ -176,6 +214,7 @@ final class MediaExploreViewModel: ObservableObject {
                 self.detailTasks.values.forEach { $0.cancel() }
                 self.detailTasks.removeAll()
                 self.cancelDetailPrefetchQueue()
+                self.invalidatePreservedExploreFeed()
                 // 2. 清空预加载缓存
                 self.preloadedItems = []
                 self.preloadedPagePath = nil
@@ -347,6 +386,10 @@ final class MediaExploreViewModel: ObservableObject {
 
     func initialLoadIfNeeded() async {
         print("[MediaExploreViewModel] initialLoadIfNeeded called, items.count=\(items.count)")
+        if restoreExploreFeedIfNeededAfterDetailReturn() {
+            print("[MediaExploreViewModel] restored preserved explore feed, skipping initial load")
+            return
+        }
         guard items.isEmpty else {
             print("[MediaExploreViewModel] items not empty, skipping initial load")
             return
@@ -363,6 +406,115 @@ final class MediaExploreViewModel: ObservableObject {
         }
     }
 
+    func preserveExploreFeedForDetailNavigation() {
+        guard !items.isEmpty else { return }
+
+        preservedExploreFeedSnapshot = ExploreFeedSnapshot(
+            activeSource: workshopSourceManager.activeSource,
+            items: items,
+            currentTitle: currentTitle,
+            currentQuery: currentQuery,
+            currentSource: currentSource,
+            nextPagePath: nextPagePath,
+            hasMorePages: hasMorePages,
+            preloadedItems: preloadedItems,
+            preloadedPagePath: preloadedPagePath,
+            preloadedNextPath: preloadedNextPath,
+            workshopCurrentPage: workshopCurrentPage,
+            workshopHasMore: workshopHasMore,
+            workshopSearchQuery: workshopSearchQuery,
+            workshopCurrentTags: workshopCurrentTags,
+            workshopCurrentType: workshopCurrentType,
+            workshopCurrentContentLevel: workshopCurrentContentLevel,
+            workshopCurrentResolution: workshopCurrentResolution,
+            workshopSortBy: workshopSortBy,
+            workshopDays: workshopDays,
+            dongtaiCurrentPage: dongtaiCurrentPage,
+            dongtaiHasMore: dongtaiHasMore,
+            dongtaiSearchQuery: dongtaiSearchQuery,
+            dongtaiCurrentCategories: dongtaiCurrentCategories,
+            dongtaiCurrentListType: dongtaiCurrentListType,
+            dongtaiSortBy: dongtaiSortBy,
+            dongtaiFilterAudio: dongtaiFilterAudio,
+            dongtaiFilterFourK: dongtaiFilterFourK,
+            wallsflowCurrentPage: wallsflowCurrentPage,
+            wallsflowHasMore: wallsflowHasMore,
+            wallsflowSearchQuery: wallsflowSearchQuery,
+            wallsflowCurrentCategorySlug: wallsflowCurrentCategorySlug
+        )
+    }
+
+    @discardableResult
+    func restoreExploreFeedIfNeededAfterDetailReturn() -> Bool {
+        guard let snapshot = preservedExploreFeedSnapshot else { return false }
+        guard snapshot.activeSource == workshopSourceManager.activeSource else {
+            invalidatePreservedExploreFeed()
+            return false
+        }
+        guard shouldRestoreExploreFeed(from: snapshot) else {
+            if !items.isEmpty {
+                invalidatePreservedExploreFeed()
+            }
+            return false
+        }
+
+        let currentItemsByID = items.reduce(into: [String: MediaItem]()) { result, item in
+            result[item.id] = item
+        }
+        items = snapshot.items.map { currentItemsByID[$0.id] ?? $0 }
+        currentTitle = snapshot.currentTitle
+        currentQuery = snapshot.currentQuery
+        currentSource = snapshot.currentSource
+        nextPagePath = snapshot.nextPagePath
+        hasMorePages = snapshot.hasMorePages
+        preloadedItems = snapshot.preloadedItems
+        preloadedPagePath = snapshot.preloadedPagePath
+        preloadedNextPath = snapshot.preloadedNextPath
+        workshopCurrentPage = snapshot.workshopCurrentPage
+        workshopHasMore = snapshot.workshopHasMore
+        workshopSearchQuery = snapshot.workshopSearchQuery
+        workshopCurrentTags = snapshot.workshopCurrentTags
+        workshopCurrentType = snapshot.workshopCurrentType
+        workshopCurrentContentLevel = snapshot.workshopCurrentContentLevel
+        workshopCurrentResolution = snapshot.workshopCurrentResolution
+        workshopSortBy = snapshot.workshopSortBy
+        workshopDays = snapshot.workshopDays
+        dongtaiCurrentPage = snapshot.dongtaiCurrentPage
+        dongtaiHasMore = snapshot.dongtaiHasMore
+        dongtaiSearchQuery = snapshot.dongtaiSearchQuery
+        dongtaiCurrentCategories = snapshot.dongtaiCurrentCategories
+        dongtaiCurrentListType = snapshot.dongtaiCurrentListType
+        dongtaiSortBy = snapshot.dongtaiSortBy
+        dongtaiFilterAudio = snapshot.dongtaiFilterAudio
+        dongtaiFilterFourK = snapshot.dongtaiFilterFourK
+        wallsflowCurrentPage = snapshot.wallsflowCurrentPage
+        wallsflowHasMore = snapshot.wallsflowHasMore
+        wallsflowSearchQuery = snapshot.wallsflowSearchQuery
+        wallsflowCurrentCategorySlug = snapshot.wallsflowCurrentCategorySlug
+        errorMessage = nil
+        isLoading = false
+        isLoadingMore = false
+        invalidatePreservedExploreFeed()
+        return true
+    }
+
+    func invalidatePreservedExploreFeed() {
+        preservedExploreFeedSnapshot = nil
+    }
+
+    private func shouldRestoreExploreFeed(from snapshot: ExploreFeedSnapshot) -> Bool {
+        guard !snapshot.items.isEmpty else { return false }
+
+        if items.isEmpty {
+            return true
+        }
+
+        guard items.count < snapshot.items.count else { return false }
+        let currentIDs = items.map(\.id)
+        let snapshotPrefixIDs = snapshot.items.prefix(items.count).map(\.id)
+        return currentIDs.elementsEqual(snapshotPrefixIDs)
+    }
+
     func load(source: MediaRouteSource) async {
         print("[MediaExploreViewModel] load called with source=\(source), current isLoading=\(isLoading)")
 
@@ -371,6 +523,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
+        invalidatePreservedExploreFeed()
         isLoading = true
         print("[MediaExploreViewModel] isLoading set to true")
 
@@ -631,6 +784,7 @@ final class MediaExploreViewModel: ObservableObject {
     /// 重置 MotionBG 浏览状态并强制加载默认首页。
     @MainActor
     func resetAndLoadDefaultHomeFeed() async {
+        invalidatePreservedExploreFeed()
         preloadTask?.cancel()
         cancelDetailPrefetchQueue()
         preloadedItems = []
@@ -718,6 +872,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
+        invalidatePreservedExploreFeed()
         // 清空旧结果，避免新请求时残留上一轮的图片
         items = []
 
@@ -765,6 +920,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
+        invalidatePreservedExploreFeed()
         // 清空旧搜索结果，避免新搜索时残留上一轮的图片
         items = []
 
@@ -1124,34 +1280,77 @@ final class MediaExploreViewModel: ObservableObject {
             // 保留列表 thumbnailURL，避免回填详情后整卡因基础缩略图 URL 变化闪烁；
             // 但必须接纳详情页解析出的 posterURL，否则列表会一直停留在 364x205 小图。
             let original = items[index]
-            items[index] = MediaItem(
-                slug: original.slug,
-                title: original.title,
-                pageURL: updatedItem.pageURL,
-                thumbnailURL: original.thumbnailURL,
-                resolutionLabel: original.resolutionLabel,
-                collectionTitle: original.collectionTitle,
-                summary: updatedItem.summary,
-                previewVideoURL: updatedItem.previewVideoURL ?? original.previewVideoURL,
-                posterURL: updatedItem.posterURL ?? original.posterURL,
-                tags: original.tags,
-                exactResolution: original.exactResolution,
-                durationSeconds: updatedItem.durationSeconds,
-                downloadOptions: updatedItem.downloadOptions,
-                sourceName: original.sourceName,
-                isAnimatedImage: updatedItem.isAnimatedImage,
-                subscriptionCount: updatedItem.subscriptionCount,
-                favoriteCount: updatedItem.favoriteCount,
-                viewCount: updatedItem.viewCount,
-                ratingScore: updatedItem.ratingScore,
-                authorName: updatedItem.authorName ?? original.authorName,
-                authorSteamID: updatedItem.authorSteamID ?? original.authorSteamID,
-                authorAvatarURL: updatedItem.authorAvatarURL ?? original.authorAvatarURL,
-                fileSize: updatedItem.fileSize,
-                createdAt: updatedItem.createdAt,
-                updatedAt: updatedItem.updatedAt
-            )
+            items[index] = mergedListItem(original: original, detail: updatedItem)
         }
+
+        guard let snapshot = preservedExploreFeedSnapshot,
+              let snapshotIndex = snapshot.items.firstIndex(where: { $0.id == updatedItem.id }) else { return }
+
+        var snapshotItems = snapshot.items
+        snapshotItems[snapshotIndex] = mergedListItem(original: snapshotItems[snapshotIndex], detail: updatedItem)
+        preservedExploreFeedSnapshot = ExploreFeedSnapshot(
+            activeSource: snapshot.activeSource,
+            items: snapshotItems,
+            currentTitle: snapshot.currentTitle,
+            currentQuery: snapshot.currentQuery,
+            currentSource: snapshot.currentSource,
+            nextPagePath: snapshot.nextPagePath,
+            hasMorePages: snapshot.hasMorePages,
+            preloadedItems: snapshot.preloadedItems,
+            preloadedPagePath: snapshot.preloadedPagePath,
+            preloadedNextPath: snapshot.preloadedNextPath,
+            workshopCurrentPage: snapshot.workshopCurrentPage,
+            workshopHasMore: snapshot.workshopHasMore,
+            workshopSearchQuery: snapshot.workshopSearchQuery,
+            workshopCurrentTags: snapshot.workshopCurrentTags,
+            workshopCurrentType: snapshot.workshopCurrentType,
+            workshopCurrentContentLevel: snapshot.workshopCurrentContentLevel,
+            workshopCurrentResolution: snapshot.workshopCurrentResolution,
+            workshopSortBy: snapshot.workshopSortBy,
+            workshopDays: snapshot.workshopDays,
+            dongtaiCurrentPage: snapshot.dongtaiCurrentPage,
+            dongtaiHasMore: snapshot.dongtaiHasMore,
+            dongtaiSearchQuery: snapshot.dongtaiSearchQuery,
+            dongtaiCurrentCategories: snapshot.dongtaiCurrentCategories,
+            dongtaiCurrentListType: snapshot.dongtaiCurrentListType,
+            dongtaiSortBy: snapshot.dongtaiSortBy,
+            dongtaiFilterAudio: snapshot.dongtaiFilterAudio,
+            dongtaiFilterFourK: snapshot.dongtaiFilterFourK,
+            wallsflowCurrentPage: snapshot.wallsflowCurrentPage,
+            wallsflowHasMore: snapshot.wallsflowHasMore,
+            wallsflowSearchQuery: snapshot.wallsflowSearchQuery,
+            wallsflowCurrentCategorySlug: snapshot.wallsflowCurrentCategorySlug
+        )
+    }
+
+    private func mergedListItem(original: MediaItem, detail updatedItem: MediaItem) -> MediaItem {
+        MediaItem(
+            slug: original.slug,
+            title: original.title,
+            pageURL: updatedItem.pageURL,
+            thumbnailURL: original.thumbnailURL,
+            resolutionLabel: original.resolutionLabel,
+            collectionTitle: original.collectionTitle,
+            summary: updatedItem.summary,
+            previewVideoURL: updatedItem.previewVideoURL ?? original.previewVideoURL,
+            posterURL: updatedItem.posterURL ?? original.posterURL,
+            tags: original.tags,
+            exactResolution: original.exactResolution,
+            durationSeconds: updatedItem.durationSeconds,
+            downloadOptions: updatedItem.downloadOptions,
+            sourceName: original.sourceName,
+            isAnimatedImage: updatedItem.isAnimatedImage,
+            subscriptionCount: updatedItem.subscriptionCount,
+            favoriteCount: updatedItem.favoriteCount,
+            viewCount: updatedItem.viewCount,
+            ratingScore: updatedItem.ratingScore,
+            authorName: updatedItem.authorName ?? original.authorName,
+            authorSteamID: updatedItem.authorSteamID ?? original.authorSteamID,
+            authorAvatarURL: updatedItem.authorAvatarURL ?? original.authorAvatarURL,
+            fileSize: updatedItem.fileSize,
+            createdAt: updatedItem.createdAt,
+            updatedAt: updatedItem.updatedAt
+        )
     }
 
     private func preferredWallpaperOption(for item: MediaItem) -> MediaDownloadOption? {
@@ -1329,15 +1528,15 @@ final class MediaExploreViewModel: ObservableObject {
     /// 清空所有项目（用于数据源切换时）
     func clearItems() {
         cancelDetailPrefetchQueue()
+        invalidatePreservedExploreFeed()
         items.removeAll()
         hasMorePages = true
     }
 
     // MARK: - 内存压力处理
 
-    /// 系统内存压力时自动触发：裁剪列表并取消网络请求。
+    /// 系统内存压力时自动触发：释放可重建的预取/详情任务，不丢弃探索列表分页状态。
     /// Kingfisher / VideoThumbnailCache 等由 WaifuXApp 的 DispatchSource 统一清理。
-    /// 不破坏分页游标，用户继续下滑后可正常加载更多。
     private func handleMemoryPressure() {
         print("[MediaExploreViewModel] 内存压力，释放缓存: items=\(items.count)")
         networkRecoveryTask?.cancel()
@@ -1348,13 +1547,6 @@ final class MediaExploreViewModel: ObservableObject {
         cancelDetailPrefetchQueue()
         detailTasks.values.forEach { $0.cancel() }
         detailTasks.removeAll()
-        // 裁剪列表：仅保留最近 2 页（~40 条）
-        if items.count > 40 {
-            items = Array(items.suffix(40))
-        }
-        if homeItems.count > 40 {
-            homeItems = Array(homeItems.suffix(40))
-        }
     }
 
     /// 释放前台浏览态内存：取消当前前台任务并清空列表/本地列表快照，保留持久化库数据与设置状态。
@@ -1444,6 +1636,7 @@ final class MediaExploreViewModel: ObservableObject {
     /// 重置 Workshop 浏览状态并强制加载默认趋势列表。
     @MainActor
     func resetAndLoadDefaultWorkshopFeed() async {
+        invalidatePreservedExploreFeed()
         workshopSearchQuery = ""
         currentQuery = ""
         workshopCurrentTags = []
@@ -1469,6 +1662,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// Workshop 搜索（与 Explore 搜索栏提交一致：清空标签/类型并回到默认 SFW）
     func searchWorkshop(query: String) async {
+        invalidatePreservedExploreFeed()
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         workshopSearchQuery = trimmedQuery
         currentQuery = trimmedQuery
@@ -1487,6 +1681,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 按标签筛选 Workshop 内容
     func loadWorkshopWithTags(_ tags: [String]) async {
+        invalidatePreservedExploreFeed()
         workshopCurrentTags = tags
         await loadWorkshopFeedInternal(query: "", tags: tags, resolution: workshopCurrentResolution)
     }
@@ -1499,6 +1694,7 @@ final class MediaExploreViewModel: ObservableObject {
         contentLevel: WorkshopSourceManager.WorkshopContentLevel? = nil,
         resolution: String? = nil
     ) async {
+        invalidatePreservedExploreFeed()
         workshopSearchQuery = query
         workshopCurrentTags = tags
         workshopCurrentType = type
@@ -1509,6 +1705,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 设置 Workshop 排序方式
     func setWorkshopSort(sortBy: WorkshopSearchParams.SortOption, days: Int? = nil) async {
+        invalidatePreservedExploreFeed()
         workshopSortBy = sortBy
         workshopDays = days
         await loadWorkshopFeedInternal(
@@ -1659,6 +1856,7 @@ final class MediaExploreViewModel: ObservableObject {
     /// 重置 DongTai 浏览状态并强制加载默认列表
     @MainActor
     func resetAndLoadDefaultDongTaiFeed() async {
+        invalidatePreservedExploreFeed()
         dongtaiSearchQuery = ""
         currentQuery = ""
         dongtaiCurrentCategories = []
@@ -1690,6 +1888,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// DongTai 搜索
     func searchDongTai(query: String) async {
+        invalidatePreservedExploreFeed()
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         dongtaiSearchQuery = trimmedQuery
         currentQuery = trimmedQuery
@@ -1708,6 +1907,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 按分类筛选 DongTai 内容
     func loadDongTaiWithCategories(_ categories: Set<DynamicWallpaperCategory>) async {
+        invalidatePreservedExploreFeed()
         dongtaiCurrentCategories = categories
         await loadDongTaiFeedInternal(
             query: dongtaiSearchQuery,
@@ -1721,6 +1921,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 按列表类型筛选
     func loadDongTaiWithListType(_ listType: DynamicWallpaperListType) async {
+        invalidatePreservedExploreFeed()
         dongtaiCurrentListType = listType
         await loadDongTaiFeedInternal(
             query: dongtaiSearchQuery,
@@ -1734,6 +1935,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 设置 DongTai 排序方式
     func setDongTaiSort(sortBy: DynamicWallpaperSortOption) async {
+        invalidatePreservedExploreFeed()
         dongtaiSortBy = sortBy
         await loadDongTaiFeedInternal(
             query: dongtaiSearchQuery,
@@ -1754,6 +1956,7 @@ final class MediaExploreViewModel: ObservableObject {
         hasAudio: Bool?,
         isFourK: Bool?
     ) async {
+        invalidatePreservedExploreFeed()
         dongtaiSearchQuery = query
         currentQuery = query
         dongtaiCurrentCategories = categories
@@ -1774,6 +1977,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 设置 DongTai 筛选（音频/4K）
     func setDongTaiFilters(hasAudio: Bool? = nil, isFourK: Bool? = nil) async {
+        invalidatePreservedExploreFeed()
         dongtaiFilterAudio = hasAudio
         dongtaiFilterFourK = isFourK
         await loadDongTaiFeedInternal(
@@ -1903,6 +2107,7 @@ final class MediaExploreViewModel: ObservableObject {
     /// 重置 Wallsflow 浏览状态并强制加载默认首页
     @MainActor
     func resetAndLoadDefaultWallsflowFeed() async {
+        invalidatePreservedExploreFeed()
         wallsflowSearchQuery = ""
         currentQuery = ""
         wallsflowCurrentCategorySlug = "live-wallpapers"
@@ -1917,6 +2122,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// Wallsflow 搜索
     func searchWallsflow(query: String) async {
+        invalidatePreservedExploreFeed()
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         wallsflowSearchQuery = trimmedQuery
         currentQuery = trimmedQuery
@@ -1927,6 +2133,7 @@ final class MediaExploreViewModel: ObservableObject {
 
     /// 按分类浏览 Wallsflow
     func loadWallsflowCategory(slug: String) async {
+        invalidatePreservedExploreFeed()
         wallsflowCurrentCategorySlug = slug
         await loadWallsflowFeedInternal(query: "", categorySlug: slug)
     }

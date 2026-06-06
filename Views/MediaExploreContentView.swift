@@ -14,6 +14,20 @@ private struct MediaLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
     }
 }
 
+private final class MediaExploreScrollCoordinator: ObservableObject {
+    var sentinelDebounceTask: DispatchWorkItem?
+    var pendingLoadMoreTask: DispatchWorkItem?
+    var wasNearBottom = false
+
+    func cancelPendingWork() {
+        sentinelDebounceTask?.cancel()
+        pendingLoadMoreTask?.cancel()
+        sentinelDebounceTask = nil
+        pendingLoadMoreTask = nil
+        wasNearBottom = false
+    }
+}
+
 // MARK: - MediaExploreContentView - 媒体探索页
 
 struct MediaExploreContentView: View {
@@ -29,6 +43,7 @@ struct MediaExploreContentView: View {
     @ObservedObject private var videoWallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var wallpaperEngineBridge = WallpaperEngineXBridge.shared
     @StateObject private var translationBridge = SearchTranslationBridge()
+    @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
 
     @State private var selectedCategory: MediaCategory = .all
     @State private var selectedHotTag: MediaHotTag?
@@ -45,12 +60,10 @@ struct MediaExploreContentView: View {
     @State private var loadMoreTask: Task<Void, Never>?
     /// loadMore 世代计数器，防止过期 task 覆盖较新 task 的引用或 UI 状态
     @State private var loadMoreGeneration: UInt = 0
-    /// 增量瀑布流分配器：新 items 追加时不重算已有 item
-    @StateObject private var columnDistributor = ExploreIncrementalDistributor<MediaItem>()
     @State private var pendingSearchText: String?
     /// 翻译后的实际搜索词（英文），与 searchText（原始中文）分离
     @State private var mediaSearchQuery: String = ""
-    @State private var sentinelDebounceTask: DispatchWorkItem?
+    @StateObject private var scrollCoordinator = MediaExploreScrollCoordinator()
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
         (wallpaperEngineBridge.isControllingExternalEngine && !wallpaperEngineBridge.isExternalPaused)
@@ -147,6 +160,7 @@ struct MediaExploreContentView: View {
             } else {
                 // 恢复可见时复位 isLoadingMore，防止之前 task 被取消后状态卡死
                 isLoadingMore = false
+                _ = viewModel.restoreExploreFeedIfNeededAfterDetailReturn()
                 syncAtmosphereIfNeeded()
             }
         }
@@ -170,9 +184,7 @@ struct MediaExploreContentView: View {
         }
         .onChange(of: viewModel.libraryContentRevision) { _, _ in }
         .onChange(of: viewModel.items.count) { _, newCount in
-            if newCount == 0 {
-                columnDistributor.invalidate()
-            } else {
+            if newCount != 0 {
                 // 数据从 0→N（切换源后新数据到达）时同步大气层背景
                 syncAtmosphereIfNeeded()
             }
@@ -222,16 +234,22 @@ struct MediaExploreContentView: View {
                 .frame(width: fullWidth, alignment: .leading)
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             }
-            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
+            .onScrollGeometryChange(for: ScrollNearBottomState.self, of: { geometry in
                 let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return geometry.contentSize.height - bottomOffset
-            }, action: { _, distanceFromBottom in
-                guard isVisible, distanceFromBottom.isFinite else { return }
-                if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
-                    Task { @MainActor in
-                        triggerLoadMore()
-                    }
+                let distanceFromBottom = geometry.contentSize.height - bottomOffset
+                guard distanceFromBottom.isFinite else {
+                    return ScrollNearBottomState(isNearBottom: false)
+                }
+                return ScrollNearBottomState(
+                    isNearBottom: distanceFromBottom <= Self.loadMoreTriggerThreshold
+                )
+            }, action: { oldValue, newValue in
+                if newValue.isNearBottom && !oldValue.isNearBottom {
+                    guard !scrollCoordinator.wasNearBottom else { return }
+                    scrollCoordinator.wasNearBottom = true
+                    scheduleLoadMoreFromScroll()
+                } else if !newValue.isNearBottom && oldValue.isNearBottom {
+                    scrollCoordinator.wasNearBottom = false
                 }
             })
             .scrollDisabled(!isVisible)
@@ -261,11 +279,11 @@ struct MediaExploreContentView: View {
                 .coordinateSpace(name: Self.scrollCoordinateSpaceName)
             }
             .onPreferenceChange(MediaLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
-                sentinelDebounceTask?.cancel()
+                scrollCoordinator.sentinelDebounceTask?.cancel()
                 let task = DispatchWorkItem {
                     handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: viewportHeight)
                 }
-                sentinelDebounceTask = task
+                scrollCoordinator.sentinelDebounceTask = task
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
             }
             .scrollDisabled(!isVisible)
@@ -315,25 +333,15 @@ struct MediaExploreContentView: View {
             HStack {
                 Spacer()
                 if showScrollToTop {
-                    Button {
+                    ScrollToTopButton {
                         outerScrollToTopToken &+= 1
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .frame(width: 44, height: 44)
-                            .liquidGlassSurface(.regular, in: Circle())
                     }
-                    .buttonStyle(.plain)
                     .padding(.trailing, 28)
                     .padding(.bottom, 120)
-                    .contentShape(Rectangle())
-                    .zIndex(100)
                     .transition(.scale.combined(with: .opacity))
                 }
             }
         }
-        .zIndex(100)
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
 
@@ -356,7 +364,7 @@ struct MediaExploreContentView: View {
             }
             contentHeader.padding(.top, 12)
         }
-        .padding(.top, 80)
+        .padding(.top, mainTopBarContentPadding)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
@@ -1103,34 +1111,27 @@ struct MediaExploreContentView: View {
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         let cardWidth = max(1, floor((contentWidth - totalSpacing) / CGFloat(columnCount)))
         let items = viewModel.items
-
-        let columnItems: [[MediaItem]]
-        if items.isEmpty {
-            columnItems = Array(repeating: [], count: max(1, columnCount))
-        } else {
-            columnItems = columnDistributor.append(
-                items: items,
-                columnCount: columnCount,
-                cardWidth: cardWidth,
-                spacing: spacing,
-                height: { [cardWidth] item in
-                    let aspect = parsedMediaAspectRatio(item)
-                    let maxImageHeight = cardWidth * 1.8
-                    return min(cardWidth / aspect, maxImageHeight) + 44
-                }
-            )
-        }
+        let columnItems = ExploreGridLayout.waterfallColumns(
+            items: items,
+            columnCount: columnCount,
+            cardWidth: cardWidth,
+            spacing: spacing,
+            heightProvider: { [self] media in
+                let aspectRatio = parsedMediaAspectRatio(media)
+                return cardWidth / aspectRatio
+            }
+        )
 
         return HStack(alignment: .top, spacing: spacing) {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
-                let items = columnItems[safe: columnIndex] ?? []
                 LazyVStack(spacing: spacing) {
-                    ForEach(items) { media in
+                    ForEach(columnItems[safe: columnIndex] ?? []) { media in
                         MediaCardView(
                             media: media,
                             isFavorite: viewModel.isFavorite(media),
                             cardWidth: cardWidth
                         ) {
+                            viewModel.preserveExploreFeedForDetailNavigation()
                             selectedMedia = media
                         }
                     }
@@ -1215,10 +1216,13 @@ struct MediaExploreContentView: View {
 
     private func handleInitialLoad() async {
 
+        let restoredFeed = viewModel.restoreExploreFeedIfNeededAfterDetailReturn()
         if viewModel.items.isEmpty {
             isInitialLoading = true
         }
-        await viewModel.initialLoadIfNeeded()
+        if !restoredFeed {
+            await viewModel.initialLoadIfNeeded()
+        }
         if searchText.isEmpty {
             searchText = viewModel.currentQuery
         }
@@ -1458,6 +1462,7 @@ struct MediaExploreContentView: View {
                     isResolvingWorkshopURL = false
                     showWorkshopURLSheet = false
                     workshopURLInput = ""
+                    viewModel.preserveExploreFeedForDetailNavigation()
                     selectedMedia = item
                 }
             } catch {
@@ -1496,10 +1501,24 @@ struct MediaExploreContentView: View {
         }
     }
 
+    private func scheduleLoadMoreFromScroll() {
+        scrollCoordinator.pendingLoadMoreTask?.cancel()
+        let task = DispatchWorkItem { [self] in
+            triggerLoadMore()
+        }
+        scrollCoordinator.pendingLoadMoreTask = task
+        DispatchQueue.main.async(execute: task)
+    }
+
     private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
-            triggerLoadMore()
+        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
+        if isNearBottom {
+            guard !scrollCoordinator.wasNearBottom else { return }
+            scrollCoordinator.wasNearBottom = true
+            scheduleLoadMoreFromScroll()
+        } else {
+            scrollCoordinator.wasNearBottom = false
         }
     }
 
@@ -1561,22 +1580,20 @@ struct MediaExploreContentView: View {
 
     private func prepareForFeedReplacement() {
         loadMoreTask?.cancel()
-        sentinelDebounceTask?.cancel()
+        scrollCoordinator.cancelPendingWork()
         isLoadingMore = false
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
-        columnDistributor.invalidate()
     }
 
     private func cancelTasks() {
         searchTask?.cancel()
         loadMoreTask?.cancel()
-        sentinelDebounceTask?.cancel()
+        scrollCoordinator.cancelPendingWork()
 
         searchTask = nil
         loadMoreTask = nil
-        sentinelDebounceTask = nil
         isLoadingMore = false
     }
 

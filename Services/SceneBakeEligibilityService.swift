@@ -123,7 +123,7 @@ enum SceneBakeEligibilityAnalyzer {
 
     // MARK: scene.pkg（与 Python 脚本相同布局）
 
-    private static func extractSceneJSONData(fromPkg pkgURL: URL) throws -> Data {
+    private static func extractSceneJSONData(fromPkg pkgURL: URL, preferredSceneFileName: String? = nil) throws -> Data {
         let data = try Data(contentsOf: pkgURL)
         var o = 0
         let slen = try readU32LE(data, &o)
@@ -142,13 +142,46 @@ enum SceneBakeEligibilityAnalyzer {
             entries.append((name, fileOff, fileLen))
         }
         let base = o
-        for e in entries {
-            if e.name == "scene.json" || e.name.hasSuffix("/scene.json") {
-                let start = base + Int(e.offset)
-                let end = start + Int(e.length)
-                guard end <= data.count else { throw SceneBakeEligibilityError.truncatedPackage }
-                return data.subdata(in: start ..< end)
+
+        let fallbackSceneFileName = pkgURL.deletingPathExtension().lastPathComponent + ".json"
+        let candidateNames = [
+            preferredSceneFileName,
+            fallbackSceneFileName,
+            "scene.json"
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        .filter { !$0.isEmpty }
+
+        func entryMatches(_ entryName: String, candidate: String) -> Bool {
+            let normalized = entryName.lowercased()
+            return normalized == candidate || normalized.hasSuffix("/" + candidate)
+        }
+
+        func readEntry(_ entry: (name: String, offset: UInt32, length: UInt32)) throws -> Data {
+            let start = base + Int(entry.offset)
+            let end = start + Int(entry.length)
+            guard end <= data.count else { throw SceneBakeEligibilityError.truncatedPackage }
+            return data.subdata(in: start ..< end)
+        }
+
+        for candidate in candidateNames {
+            if let entry = entries.first(where: { entryMatches($0.name, candidate: candidate) }) {
+                return try readEntry(entry)
             }
+        }
+
+        // 兼容 gifscene.pkg 这类模板包：主 scene JSON 往往在包根，命名不是 scene.json。
+        if let entry = entries.first(where: {
+            let normalized = $0.name.lowercased()
+            return normalized.hasSuffix(".json")
+                && !normalized.contains("/materials/")
+                && !normalized.contains("/models/")
+                && !normalized.contains("/effects/")
+                && !normalized.contains("/particles/")
+                && !normalized.contains("/shaders/")
+                && !normalized.contains("/fonts/")
+        }) {
+            return try readEntry(entry)
         }
         throw SceneBakeEligibilityError.sceneNotFound
     }
@@ -171,6 +204,7 @@ enum SceneBakeEligibilityAnalyzer {
         }
 
         if isDir.boolValue {
+            // 1. 标准 scene.pkg
             let pkg = root.appendingPathComponent("scene.pkg")
             if fm.fileExists(atPath: pkg.path) {
                 let jsonData = try extractSceneJSONData(fromPkg: pkg)
@@ -179,6 +213,42 @@ enum SceneBakeEligibilityAnalyzer {
                 }
                 return (obj, pkg)
             }
+
+            // 2. project.json 中 "file" 字段指定的场景文件（如 gifscene.pkg）
+            let preferredSceneFileName = preferredSceneFileNameFromProject(root: root)
+            if let sceneFileURL = resolveSceneFileFromProject(root: root) {
+                if sceneFileURL.pathExtension.lowercased() == "pkg" {
+                    let jsonData = try extractSceneJSONData(
+                        fromPkg: sceneFileURL,
+                        preferredSceneFileName: preferredSceneFileName
+                    )
+                    guard let obj = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                        throw SceneBakeEligibilityError.jsonDecodeFailed
+                    }
+                    return (obj, sceneFileURL)
+                }
+                if sceneFileURL.lastPathComponent.lowercased() == "scene.json" {
+                    let jsonData = try Data(contentsOf: sceneFileURL)
+                    guard let obj = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                        throw SceneBakeEligibilityError.jsonDecodeFailed
+                    }
+                    return (obj, sceneFileURL)
+                }
+            }
+
+            // 3. 搜索目录下任意 .pkg 文件（自定义命名）
+            if let anyPkg = findAnyPkgFile(in: root) {
+                let jsonData = try extractSceneJSONData(
+                    fromPkg: anyPkg,
+                    preferredSceneFileName: preferredSceneFileName
+                )
+                guard let obj = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                    throw SceneBakeEligibilityError.jsonDecodeFailed
+                }
+                return (obj, anyPkg)
+            }
+
+            // 4. scene.json
             let sj = root.appendingPathComponent("scene.json")
             if fm.fileExists(atPath: sj.path) {
                 let jsonData = try Data(contentsOf: sj)
@@ -205,6 +275,42 @@ enum SceneBakeEligibilityAnalyzer {
             return (obj, root)
         }
         throw SceneBakeEligibilityError.invalidPath
+    }
+
+    /// 从 project.json 的 "file" 字段解析场景文件路径
+    private static func resolveSceneFileFromProject(root: URL) -> URL? {
+        let projectURL = root.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sceneFile = json["file"] as? String,
+              !sceneFile.isEmpty else { return nil }
+        let sceneURL = root.appendingPathComponent(sceneFile)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: sceneURL.path) else { return nil }
+        return sceneURL
+    }
+
+    private static func preferredSceneFileNameFromProject(root: URL) -> String? {
+        let projectURL = root.appendingPathComponent("project.json")
+        guard let data = try? Data(contentsOf: projectURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sceneFile = json["file"] as? String,
+              !sceneFile.isEmpty else { return nil }
+        return URL(fileURLWithPath: sceneFile).lastPathComponent
+    }
+
+    /// 递归搜索目录下第一个 .pkg 文件
+    private static func findAnyPkgFile(in directory: URL) -> URL? {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return nil
+        }
+        for case let fileURL as URL in enumerator {
+            if fileURL.pathExtension.lowercased() == "pkg" {
+                return fileURL
+            }
+        }
+        return nil
     }
 
     private static func loadProjectOptional(root: URL) -> [String: Any]? {

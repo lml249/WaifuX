@@ -12,6 +12,20 @@ private struct AnimeLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
     }
 }
 
+private final class AnimeExploreScrollCoordinator: ObservableObject {
+    var sentinelDebounceTask: DispatchWorkItem?
+    var pendingLoadMoreTask: DispatchWorkItem?
+    var wasNearBottom = false
+
+    func cancelPendingWork() {
+        sentinelDebounceTask?.cancel()
+        pendingLoadMoreTask?.cancel()
+        sentinelDebounceTask = nil
+        pendingLoadMoreTask = nil
+        wasNearBottom = false
+    }
+}
+
 // MARK: - AnimeExploreView - 动漫探索页
 
 struct AnimeExploreView: View {
@@ -31,6 +45,7 @@ struct AnimeExploreView: View {
     @ObservedObject private var arcSettings = ArcBackgroundSettings.shared
     @ObservedObject private var videoWallpaperManager = VideoWallpaperManager.shared
     @ObservedObject private var wallpaperEngineBridge = WallpaperEngineXBridge.shared
+    @Environment(\.mainTopBarContentPadding) private var mainTopBarContentPadding
 
     // MARK: State
     @State private var selectedCategory: AnimeCategory = .all
@@ -47,9 +62,8 @@ struct AnimeExploreView: View {
     @State private var isTagSearchActive = false
     @State private var suppressNextSearchChange = false
     @State private var lastSyncedFirstAnimeID: String?
-    @State private var sentinelDebounceTask: DispatchWorkItem?
-    /// 增量瀑布流分配器
-    @StateObject private var columnDistributor = ExploreIncrementalDistributor<AnimeSearchResult>()
+    @State private var loadMoreTask: Task<Void, Never>?
+    @StateObject private var scrollCoordinator = AnimeExploreScrollCoordinator()
 
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -116,9 +130,11 @@ struct AnimeExploreView: View {
         .onChange(of: isVisible) { _, visible in
             if !visible {
                 searchTask?.cancel()
-                sentinelDebounceTask?.cancel()
+                loadMoreTask?.cancel()
+                scrollCoordinator.cancelPendingWork()
                 searchTask = nil
-                sentinelDebounceTask = nil
+                loadMoreTask = nil
+                isLoadingMore = false
                 exploreAtmosphere.pause()
             } else {
                 syncAtmosphereIfNeeded()
@@ -143,7 +159,7 @@ struct AnimeExploreView: View {
                 body()
             }
             .padding(.horizontal, 28)
-            .padding(.top, 80)
+            .padding(.top, mainTopBarContentPadding)
             .padding(.bottom, 48)
             .frame(width: width, alignment: .leading)
             .environment(\.explorePageAtmosphereTint, exploreAtmosphere.tint)
@@ -181,25 +197,15 @@ struct AnimeExploreView: View {
             HStack {
                 Spacer()
                 if showScrollToTop {
-                    Button {
+                    ScrollToTopButton {
                         outerScrollToTopToken &+= 1
-                    } label: {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .frame(width: 44, height: 44)
-                            .liquidGlassSurface(.regular, in: Circle())
                     }
-                    .buttonStyle(.plain)
                     .padding(.trailing, 28)
                     .padding(.bottom, 120)
-                    .contentShape(Rectangle())
-                    .zIndex(100)
                     .transition(.scale.combined(with: .opacity))
                 }
             }
         }
-        .zIndex(100)
         .animation(.easeInOut(duration: 0.3), value: showScrollToTop)
     }
 
@@ -320,7 +326,7 @@ struct AnimeExploreView: View {
             contentHeader
                 .padding(.top, 12)
         }
-        .padding(.top, 80)
+        .padding(.top, mainTopBarContentPadding)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
@@ -336,27 +342,15 @@ struct AnimeExploreView: View {
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         let cardWidth = max(1, floor((contentWidth - totalSpacing) / CGFloat(columnCount)))
         let items = viewModel.animeItems
-
-        let columnItems: [[AnimeSearchResult]]
-        if items.isEmpty {
-            columnItems = Array(repeating: [], count: max(1, columnCount))
-        } else {
-            columnItems = columnDistributor.append(
-                items: items,
-                columnCount: columnCount,
-                cardWidth: cardWidth,
-                spacing: spacing,
-                height: { [cardWidth] (_: AnimeSearchResult) in
-                    cardWidth * 1.4 + 44
-                }
-            )
-        }
+        let columnItems = ExploreGridLayout.stableColumns(
+            items: items,
+            columnCount: columnCount
+        )
 
         return HStack(alignment: .top, spacing: spacing) {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
-                let items = columnItems[safe: columnIndex] ?? []
                 LazyVStack(spacing: spacing) {
-                    ForEach(items) { anime in
+                    ForEach(columnItems[safe: columnIndex] ?? []) { anime in
                         AnimeCardView(
                             anime: anime,
                             cardWidth: cardWidth
@@ -423,16 +417,22 @@ struct AnimeExploreView: View {
             .onChange(of: viewModel.animeItems.count) { _, count in
                 if count > 60 { showScrollToTop = true }
             }
-            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
+            .onScrollGeometryChange(for: ScrollNearBottomState.self, of: { geometry in
                 let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
-                return geometry.contentSize.height - bottomOffset
-            }, action: { _, distanceFromBottom in
-                guard isVisible, distanceFromBottom.isFinite else { return }
-                if distanceFromBottom <= Self.loadMoreTriggerThreshold {
-                    // 延迟触发，避免在 onScrollGeometryChange action 内同步修改 @State 导致帧循环
-                    Task { @MainActor in
-                        triggerLoadMore()
-                    }
+                let distanceFromBottom = geometry.contentSize.height - bottomOffset
+                guard distanceFromBottom.isFinite else {
+                    return ScrollNearBottomState(isNearBottom: false)
+                }
+                return ScrollNearBottomState(
+                    isNearBottom: distanceFromBottom <= Self.loadMoreTriggerThreshold
+                )
+            }, action: { oldValue, newValue in
+                if newValue.isNearBottom && !oldValue.isNearBottom {
+                    guard !scrollCoordinator.wasNearBottom else { return }
+                    scrollCoordinator.wasNearBottom = true
+                    scheduleLoadMoreFromScroll()
+                } else if !newValue.isNearBottom && oldValue.isNearBottom {
+                    scrollCoordinator.wasNearBottom = false
                 }
             })
             .scrollDisabled(!isVisible)
@@ -468,11 +468,11 @@ struct AnimeExploreView: View {
                 if count > 60 { showScrollToTop = true }
             }
             .onPreferenceChange(AnimeLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
-                sentinelDebounceTask?.cancel()
+                scrollCoordinator.sentinelDebounceTask?.cancel()
                 let task = DispatchWorkItem {
                     handleLoadMoreSentinelPosition(sentinelMinY, viewportHeight: geometry.size.height)
                 }
-                sentinelDebounceTask = task
+                scrollCoordinator.sentinelDebounceTask = task
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
             }
             .scrollDisabled(!isVisible)
@@ -653,21 +653,42 @@ struct AnimeExploreView: View {
               !isLoadingMore else { return }
 
         AppLogger.info(.anime, "加载更多", metadata: ["当前数量": viewModel.animeItems.count])
-        Task {
-            isLoadingMore = true
+        isLoadingMore = true
+        loadMoreFailed = false
+        loadMoreTask?.cancel()
+        loadMoreTask = Task { @MainActor in
+            defer {
+                isLoadingMore = false
+                loadMoreTask = nil
+            }
+            guard !Task.isCancelled else { return }
             loadMoreFailed = false
-            defer { isLoadingMore = false }
             await viewModel.loadMore()
+            guard !Task.isCancelled else { return }
             if viewModel.hasMorePages && viewModel.errorMessage != nil {
                 loadMoreFailed = true
             }
         }
     }
 
+    private func scheduleLoadMoreFromScroll() {
+        scrollCoordinator.pendingLoadMoreTask?.cancel()
+        let task = DispatchWorkItem { [self] in
+            triggerLoadMore()
+        }
+        scrollCoordinator.pendingLoadMoreTask = task
+        DispatchQueue.main.async(execute: task)
+    }
+
     private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
-            triggerLoadMore()
+        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
+        if isNearBottom {
+            guard !scrollCoordinator.wasNearBottom else { return }
+            scrollCoordinator.wasNearBottom = true
+            scheduleLoadMoreFromScroll()
+        } else {
+            scrollCoordinator.wasNearBottom = false
         }
     }
 
@@ -705,13 +726,13 @@ struct AnimeExploreView: View {
         if cancelSearchTask {
             searchTask?.cancel()
         }
+        loadMoreTask?.cancel()
         viewModel.prepareForFeedReplacement()
-        sentinelDebounceTask?.cancel()
+        scrollCoordinator.cancelPendingWork()
         isLoadingMore = false
         loadMoreFailed = false
         showScrollToTop = false
         outerScrollToTopToken &+= 1
-        columnDistributor.invalidate()
     }
 
     private func setSearchTextSilently(_ value: String) {
