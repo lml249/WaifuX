@@ -37,10 +37,6 @@ class AnimeViewModel: ObservableObject {
     private let pageSize = 20
     private var hasRegisteredMemoryPressure = false
 
-    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目触发 grid reload。
-    /// 用户在 AnimeExploreView 中持续滚动加载时，旧条目数据会保持不超此限，
-    /// 避免 items 数组无限制增长带动 Kingfisher/LRU 缓存无法回收图片内存。
-    private static let maxCachedItems = 300
     private var loadMoreTask: Task<Void, Never>?
 
     // MARK: - 预加载支持
@@ -141,8 +137,7 @@ class AnimeViewModel: ObservableObject {
         currentPage = 1
         currentQueryMode = .search(keyword: searchText)
         invalidatePreload()
-        // 清空旧搜索结果，避免新搜索时残留上一轮的图片
-        animeItems = []
+        // ⚠️ 不再清空 animeItems，新数据到达前保持旧列表可见。
 
         do {
             // 使用关键词搜索而不是标签搜索
@@ -192,8 +187,7 @@ class AnimeViewModel: ObservableObject {
         currentPage = 1
         currentQueryMode = .tag(tagName: tagName)
         invalidatePreload()
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        animeItems = []
+        // ⚠️ 不再清空 animeItems，新数据到达前保持旧列表可见。
 
         do {
             // 直接使用中文标签名进行搜索
@@ -244,8 +238,7 @@ class AnimeViewModel: ObservableObject {
         hasMorePages = true
         currentQueryMode = .trending
         invalidatePreload()
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        animeItems = []
+        // ⚠️ 不再清空 animeItems，新数据到达前保持旧列表可见。
 
         do {
             let (items, total) = try await bangumiService.getTrendingList(
@@ -306,8 +299,7 @@ class AnimeViewModel: ObservableObject {
         currentPage = 1
         currentQueryMode = .topRated
         invalidatePreload()
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        animeItems = []
+        // ⚠️ 不再清空 animeItems，新数据到达前保持旧列表可见。
 
         do {
             // 使用 trending 接口获取数据，然后按评分排序
@@ -359,8 +351,7 @@ class AnimeViewModel: ObservableObject {
         let currentYear = calendar.component(.year, from: Date())
         currentQueryMode = .newArrivals(year: String(currentYear))
         invalidatePreload()
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        animeItems = []
+        // ⚠️ 不再清空 animeItems，新数据到达前保持旧列表可见。
 
         do {
             // 获取当前年份的动漫作为新番
@@ -528,16 +519,11 @@ class AnimeViewModel: ObservableObject {
     /// 仅保留最近 2 页数据（约 40 条），同时取消所有网络请求与预加载任务。
     /// 不破坏分页游标，用户继续下滑时可正常加载更多。
     private func handleMemoryPressure() {
-        print("[AnimeViewModel] 内存压力，释放缓存: items=\(animeItems.count)")
-        // 取消当前网络任务
+        print("[AnimeViewModel] 内存压力，取消网络请求: items=\(animeItems.count)")
         loadMoreTask?.cancel()
         loadMoreTask = nil
         preloadTask?.cancel()
         invalidatePreload()
-        // 裁剪列表：仅保留最近 2 页（~40 条）
-        if animeItems.count > 40 {
-            animeItems = Array(animeItems.suffix(40))
-        }
     }
 
     /// 释放前台浏览态内存：取消任务并清空动漫列表/规则快照。

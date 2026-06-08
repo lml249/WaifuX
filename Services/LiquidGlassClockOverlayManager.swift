@@ -3,6 +3,7 @@ import SwiftUI
 import Combine
 import MetalKit
 import CoreText
+import JavaScriptCore
 
 // MARK: - 液态玻璃时钟 Overlay 管理器
 //
@@ -55,6 +56,9 @@ public final class LiquidGlassClockOverlayManager {
     private var cancellables = Set<AnyCancellable>()
 
     private init() {
+        // Dock 安全区域监听
+        setupDockObserver()
+
         // 监听配置变化 → 刷新所有窗口
         LiquidGlassClockSettings.shared.$config
             .receive(on: DispatchQueue.main)
@@ -231,6 +235,9 @@ public final class LiquidGlassClockOverlayManager {
         clockTickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self, self.currentConfig.enabled else { return }
 
+            // 轮询检测 Dock 区域变化（兜底：Dock 位置改变等无通知的变更）
+            self.pollDockInsets()
+
             if self.currentConfig.metalShaderEnabled {
                 // Metal 路径：手动触发重绘（shouldRedraw 内部会跳过无效帧）
                 for (_, mtkView) in self.metalViews {
@@ -392,10 +399,72 @@ public final class LiquidGlassClockOverlayManager {
 
     // MARK: - 时钟视图构建
 
+    /// Dock 当前安全区域（响应式，随 Dock 显隐/位置变化自动变化）
+    @Published private var dockInsets: DockInfo = .zero
+    private var dockCancellables = Set<AnyCancellable>()
+    /// 上次触发刷新时的 Dock 区域，用于轮询检测变化
+    private var lastDockInsetsForRefresh: DockInfo = .zero
+
+    /// 初始化 Dock 监听
+    private func setupDockObserver() {
+        // 初始值
+        dockInsets = DockInfo.current()
+        lastDockInsetsForRefresh = dockInsets
+
+        // 监听 Dock 显隐通知
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.publisher(for: NSNotification.Name("NSWorkspaceDidHideDockNotification"))
+            .merge(with: nc.publisher(for: NSNotification.Name("NSWorkspaceDidUnhideDockNotification")))
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                self.dockInsets = DockInfo.current()
+                self.lastDockInsetsForRefresh = self.dockInsets
+                self.updateAllWindows(config: LiquidGlassClockSettings.shared.config)
+            }
+            .store(in: &dockCancellables)
+
+        // 监听屏幕参数变化（分辨率、排列、Dock 位置改变等）
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                self.dockInsets = DockInfo.current()
+                self.lastDockInsetsForRefresh = self.dockInsets
+                self.updateAllWindows(config: LiquidGlassClockSettings.shared.config)
+            }
+            .store(in: &dockCancellables)
+
+        // 监听 Dock 位置变化分布式通知（用户手动改 Dock 位置时）
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(handleDockDidChangePosition),
+            name: NSNotification.Name("com.apple.dock.positionchanged"),
+            object: nil
+        )
+    }
+
+    @objc private func handleDockDidChangePosition() {
+        let newInsets = DockInfo.current()
+        guard newInsets != dockInsets else { return }
+        dockInsets = newInsets
+        lastDockInsetsForRefresh = dockInsets
+        updateAllWindows(config: LiquidGlassClockSettings.shared.config)
+    }
+
+    /// 在 clock tick 中轮询检测 Dock 区域变化（兜底，覆盖所有未捕获的变更）
+    private func pollDockInsets() {
+        let current = DockInfo.current()
+        guard current != lastDockInsetsForRefresh else { return }
+        dockInsets = current
+        lastDockInsetsForRefresh = current
+        updateAllWindows(config: LiquidGlassClockSettings.shared.config)
+    }
+
     /// 构建适配指定屏幕的时钟视图（含位置计算）
     private func makeClockView(for screen: NSScreen, config: LiquidGlassClockConfiguration, screenID: String = "") -> some View {
         let sidecarInfo = currentDynamicTextInfo()
-        let rendererEntries = sidecarInfo?.entries.filter { entry in
+        let rawEntries = sidecarInfo?.entries.filter { entry in
             guard entry.visible else { return false }
             // 未知行为的条目必须有实际文本内容才渲染，否则跳过（避免空白占位）
             if entry.behavior == "unknown" {
@@ -404,19 +473,49 @@ public final class LiquidGlassClockOverlayManager {
             return entry.finalOriginX != nil || entry.originX != nil || entry.finalX != nil ||
                    entry.finalOriginY != nil || entry.originY != nil || entry.finalY != nil
         } ?? []
+
+        // 按位置去重：多语言壁纸同一位置有多个语言版本的文本，只保留一个
+        let rendererEntries = Self.deduplicateByPosition(rawEntries)
+
         if !rendererEntries.isEmpty {
             return AnyView(
                 RendererDynamicTextOverlayView(
                     entries: rendererEntries,
                     sceneWidth: sidecarInfo?.sceneWidth,
                     sceneHeight: sidecarInfo?.sceneHeight,
-                    screenSize: screen.frame.size
+                    screenSize: screen.frame.size,
+                    dockInsets: dockInsets
                 )
             )
         }
 
         // 没有 sidecar 文本条目时，不显示任何默认时钟
         return AnyView(Color.clear.ignoresSafeArea())
+    }
+
+    /// 按位置去重：位置相近（5 scene units 以内）的条目视为同一位置的多语言版本，仅保留一个。
+    /// 保留策略：选择 renderOrder 更大的（即上层叠加的），避免阴影/描边层（通常 renderOrder 小、颜色暗）
+    /// 被保留而主文本层被丢弃导致文字不可见。
+    private static func deduplicateByPosition(_ entries: [DynamicTextEntry]) -> [DynamicTextEntry] {
+        var result: [DynamicTextEntry] = []
+        for entry in entries {
+            let ex = entry.finalOriginX ?? entry.originX ?? 0
+            let ey = entry.finalOriginY ?? entry.originY ?? 0
+            let existingIndex = result.firstIndex { existing in
+                let xx = existing.finalOriginX ?? existing.originX ?? 0
+                let yy = existing.finalOriginY ?? existing.originY ?? 0
+                return abs(xx - ex) < 5 && abs(yy - ey) < 5
+            }
+            if let idx = existingIndex {
+                // 位置重复时，保留 renderOrder 更大的（上层），丢弃下层（如阴影层）
+                if (entry.renderOrder ?? 0) > (result[idx].renderOrder ?? 0) {
+                    result[idx] = entry
+                }
+            } else {
+                result.append(entry)
+            }
+        }
+        return result
     }
 
     // MARK: - 通知处理
@@ -449,11 +548,46 @@ public final class LiquidGlassClockOverlayManager {
 // NSScreen.wallpaperScreenIdentifier 定义在 Utilities/NSScreen+Wallpaper.swift
 // 此处直接使用已有扩展
 
+// MARK: - Dock 安全区域
+
+/// 当前 Dock 的位置和尺寸
+private struct DockInfo: Equatable {
+    var bottom: CGFloat = 0
+    var left: CGFloat = 0
+    var right: CGFloat = 0
+
+    static let zero = DockInfo()
+
+    /// 从主屏幕的 frame/visibleFrame 差值计算 Dock 占用区域
+    static func current() -> DockInfo {
+        guard let screen = NSScreen.main else { return .zero }
+        let frame = screen.frame
+        let visible = screen.visibleFrame
+        var info = DockInfo()
+        // bottom Dock: visible 的 Y 起点比 frame 高
+        if visible.origin.y > frame.origin.y {
+            info.bottom = visible.origin.y - frame.origin.y
+        }
+        // left Dock: visible 的 X 起点比 frame 靠右
+        if visible.origin.x > frame.origin.x {
+            info.left = visible.origin.x - frame.origin.x
+        }
+        // right Dock: visible 的右边界比 frame 小
+        let frameRight = frame.origin.x + frame.width
+        let visibleRight = visible.origin.x + visible.width
+        if frameRight > visibleRight {
+            info.right = frameRight - visibleRight
+        }
+        return info
+    }
+}
+
 private struct RendererDynamicTextOverlayView: View {
     let entries: [DynamicTextEntry]
     let sceneWidth: Double?
     let sceneHeight: Double?
     let screenSize: CGSize
+    let dockInsets: DockInfo
 
     @State private var now = Date()
 
@@ -463,13 +597,42 @@ private struct RendererDynamicTextOverlayView: View {
         ZStack(alignment: .topLeading) {
             Color.clear.ignoresSafeArea()
             ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
-                RendererDynamicTextView(entry: entry, now: now)
-                    .position(position(for: entry))
-                    .zIndex(Double(entry.renderOrder ?? 0))
+                RendererDynamicTextView(
+                    entry: entry,
+                    now: now,
+                    fontSize: computeFontSize(for: entry)
+                )
+                .position(position(for: entry))
+                .zIndex(Double(entry.renderOrder ?? 0))
             }
         }
         .frame(width: screenSize.width, height: screenSize.height)
         .onReceive(timer) { now = $0 }
+    }
+
+    /// 按 C++ FreeType 实际渲染尺寸计算 SwiftUI pt 字号
+    /// 基于 rasterHeight（pixelSize × scaleY），经验修正因子 2.0 补偿
+    /// FreeType 的 ascent + descent + padding 使纹理高度大于 pixelSize。
+    private func computeFontSize(for entry: DynamicTextEntry) -> CGFloat {
+        let sourceHeight = sceneHeight ?? Double(screenSize.height)
+        let screenScale = NSScreen.main?.backingScaleFactor ?? 2.0
+
+        if let rh = entry.rasterHeight, rh > 0 {
+            // rasterHeight 仅含 pixelSize × scaleY，实际 FreeType 纹理高度
+            // 约为 pixelSize × 2.0（含 ascent + descent + padding×2）。
+            // 直接放大 2× 匹配 C++ 渲染尺寸。
+            let sceneTextHeight = rh * 2.0
+            let screenPx = sceneTextHeight / max(sourceHeight, 1) * Double(screenSize.height)
+            return CGFloat(screenPx / Double(screenScale))
+        }
+
+        // 保底：用 effectiveFontSize × multiplier
+        let isDay = (entry.name.lowercased().contains("day")
+                     || entry.name.contains("D a y"))
+        let multiplier: Double = isDay ? 5.0 : 3.0
+        let sceneTextHeight = (entry.effectiveFontSize ?? entry.fontSize ?? 32) * multiplier
+        let screenPx = sceneTextHeight / max(sourceHeight, 1) * Double(screenSize.height)
+        return CGFloat(screenPx / Double(screenScale))
     }
 
     private func position(for entry: DynamicTextEntry) -> CGPoint {
@@ -482,8 +645,11 @@ private struct RendererDynamicTextOverlayView: View {
         let rawX = entry.finalOriginX ?? entry.originX ?? entry.finalX ?? 0
         let rawY = entry.finalOriginY ?? entry.originY ?? entry.finalY ?? 0
 
-        let x = rawX / max(sourceWidth, 1) * Double(screenSize.width)
-        let y = (1 - rawY / max(sourceHeight, 1)) * Double(screenSize.height)
+        // 考虑 Dock 安全区域：将场景坐标映射到排除 Dock 后的可用区域
+        let availW = Double(screenSize.width) - Double(dockInsets.left) - Double(dockInsets.right)
+        let availH = Double(screenSize.height) - Double(dockInsets.bottom)
+        let x = Double(dockInsets.left) + rawX / max(sourceWidth, 1) * availW
+        let y = (1 - rawY / max(sourceHeight, 1)) * availH
         return CGPoint(x: x, y: y)
     }
 }
@@ -491,6 +657,7 @@ private struct RendererDynamicTextOverlayView: View {
 private struct RendererDynamicTextView: View {
     let entry: DynamicTextEntry
     let now: Date
+    let fontSize: CGFloat
 
     var body: some View {
         Text(renderedText)
@@ -506,6 +673,19 @@ private struct RendererDynamicTextView: View {
     }
 
     private var renderedText: String {
+        // 对于有时间类脚本的条目，用 JavaScriptCore 重新执行脚本获取当前时间
+        if let script = entry.script, !script.isEmpty,
+           entry.behavior == "clock" || entry.behavior == "date" || entry.behavior == "weekday" {
+            if let result = Self.executeWallpaperScript(script) {
+                return result
+            }
+        }
+
+        // 非时间类或脚本执行失败时，使用 stale resolvedText
+        if let resolved = entry.resolvedText, !resolved.isEmpty {
+            return resolved
+        }
+
         // 根据条目名称是否含中文选择对应语言的 formatter
         let useChinese = Self.isChineseName(entry.name)
 
@@ -597,18 +777,115 @@ private struct RendererDynamicTextView: View {
         }
     }
 
-    /// 字体：注册后用 Font.custom(psName, size:) 加载，失败用 system font
-    /// effectiveFontSize 是 C++ 渲染器在 3840×2160 场景下的像素值，
-    /// 加 15% 补偿屏幕比例差异。
+    /// 字体：按 C++ FreeType 实际尺寸计算的字号，优先 fontPath → fontFamily → system
     private var font: Font {
-        let ptSize = CGFloat(entry.effectiveFontSize ?? entry.fontSize ?? 32) * 1.15
-
+        // 1. 有 fontPath 时从文件注册加载
         if let path = entry.fontPath, !path.isEmpty,
            let psName = Self.registeredPSName(path: path) {
-            return .custom(psName, size: ptSize)
+            return .custom(psName, size: fontSize)
         }
 
-        return .system(size: ptSize)
+        // 2. 通过 fontFamily 名称加载（处理 systemfont_<name> 约定）
+        if let family = entry.fontFamily, !family.isEmpty {
+            let fontName: String
+            if family.lowercased().hasPrefix("systemfont_") {
+                fontName = String(family.dropFirst("systemfont_".count))
+            } else {
+                fontName = family
+            }
+            if !fontName.isEmpty {
+                return .custom(fontName, size: fontSize)
+            }
+        }
+
+        // 3. 保底：系统字体
+        return .system(size: fontSize)
+    }
+
+    /// 通过 JavaScriptCore 执行壁纸脚本，用当前时间生成正确文本
+    /// 每个唯一脚本只 eval 一次，之后只调用 update() 获取最新时间
+    private static var jsContextCache: [String: JSContext] = [:]
+    private static func executeWallpaperScript(_ script: String) -> String? {
+        // 用完整脚本内容做 key，不同语言的脚本各自独立缓存
+        let ctxCacheKey = script
+
+        let ctx: JSContext
+        if let cached = jsContextCache[ctxCacheKey] {
+            ctx = cached
+        } else {
+            ctx = JSContext()
+            ctx.exceptionHandler = { _, exception in
+                print("[JSError] \(exception?.toString() ?? "unknown")")
+            }
+            // createScriptProperties 和脚本合并到一次 eval 中
+            // 注意：必须智能处理各种 export 语法
+            let cleanedScript = Self.cleanScriptForJSContext(script)
+            let bundled = """
+            var createScriptProperties = function() {
+                var props = {};
+                return new Proxy({}, {
+                    get: function(target, name) {
+                        if (name === 'finish') return function() { return props; };
+                        return function(c) { if (c && c.name !== undefined) props[c.name] = c.value; return this; };
+                    }
+                });
+            };
+            \(cleanedScript)
+            """
+            ctx.exception = nil
+            ctx.evaluateScript(bundled)
+            if ctx.exception != nil {
+                print("[JSError] Failed to evaluate script")
+                return nil
+            }
+            jsContextCache[ctxCacheKey] = ctx
+        }
+
+        // 每次调用 update() 获取当前时间
+        guard let updateFn = ctx.objectForKeyedSubscript("update"), !updateFn.isUndefined else {
+            return nil
+        }
+        ctx.exception = nil
+        // 传 0 而非空字符串，避免 update(dt) 中 dt.toFixed() 等操作产生 NaN
+        let result = updateFn.call(withArguments: [0])
+        if ctx.exception != nil { return nil }
+        guard let text = result?.toString(), !text.isEmpty, text != "undefined" else {
+            return nil
+        }
+        return text
+    }
+
+    /// 清除脚本中的 ES module export 语法，使其能在 JSContext（无模块系统）中正常运行。
+    /// 处理模式：
+    ///   `export function name()` → `function name()`
+    ///   `export { foo, bar }`   → 移除该行（符号已全局定义）
+    ///   `export default X`      → 移除 export default，保留 X
+    ///   `export default { }`    → `{ }`（有效表达式）
+    private static func cleanScriptForJSContext(_ script: String) -> String {
+        script.components(separatedBy: .newlines).map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("export ") else { return line }
+
+            let afterExport = String(trimmed.dropFirst(7))
+            if afterExport.hasPrefix("default ") {
+                // export default function() {} → function() {}（匿名函数声明无效，需要特殊处理）
+                // export default { ... } → { ... }（有效）
+                // export default expression → 直接保留 expression
+                return line.replacingOccurrences(of: "export default ", with: "")
+            } else if afterExport.hasPrefix("{") || afterExport == "{" {
+                // export { update } → 移除整行，函数定义已存在全局作用域
+                return "" // 仅注释掉
+            } else if afterExport.hasPrefix("function ") || afterExport.hasPrefix("class ") {
+                // export function / export class → 保留定义
+                return line.replacingOccurrences(of: "export ", with: "")
+            } else if afterExport.hasPrefix("const ") || afterExport.hasPrefix("let ") || afterExport.hasPrefix("var ") {
+                // export const/let/var → 保留声明
+                return line.replacingOccurrences(of: "export ", with: "")
+            } else {
+                // export * from / export type 等 → 移除
+                return ""
+            }
+        }.joined(separator: "\n")
     }
 
     /// 注册字体并返回 PostScript 名称
@@ -682,44 +959,5 @@ private struct RendererDynamicTextView: View {
     /// 条目名称是否包含中文字符
     private static func isChineseName(_ name: String) -> Bool {
         name.unicodeScalars.contains(where: { $0.properties.isIdeographic })
-    }
-
-    /// 加载字体、注册、返回 PostScript 名称供 Font.custom 使用。
-    /// 先把字体写入临时文件，再用 CTFontManagerRegisterFontsForURL 注册，
-    /// 这是 macOS 上最标准的字体注册方式，能正确解析 cmap/OS2 等字体表。
-    private static var registeredPSNames = [String: String]()
-    private static func registeredCTFont(from path: String, size: CGFloat) -> CTFont? {
-        // 已有缓存 → 用缓存名称创建 CTFont
-        if let psName = registeredPSNames[path] {
-            return CTFontCreateWithName(psName as CFString, size, nil)
-        }
-
-        guard let fontData = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
-
-        // 写入临时文件再注册（CTFontManagerRegisterFontsForURL 是 macOS 最标准的 API）
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("otf")
-        do { try fontData.write(to: tempURL) } catch { return nil }
-
-        var error: Unmanaged<CFError>?
-        CTFontManagerRegisterFontsForURL(tempURL as CFURL, .process, &error)
-
-        // 获取 PostScript 名
-        guard let descArray = CTFontManagerCreateFontDescriptorsFromURL(tempURL as CFURL),
-              let descriptors = descArray as? [CTFontDescriptor],
-              let descriptor = descriptors.first else { return nil }
-
-        let ctFont = CTFontCreateWithFontDescriptor(descriptor, size, nil)
-        let psName = CTFontCopyPostScriptName(ctFont) as String? ?? ""
-        guard !psName.lowercased().hasPrefix("helvetica") else { return nil }
-
-        registeredPSNames[path] = psName
-        // 同时也用 RegisterGraphicsFont 注册（保险）
-        if let provider = CGDataProvider(data: fontData as CFData),
-           let cgFont = CGFont(provider) {
-            CTFontManagerRegisterGraphicsFont(cgFont, nil)
-        }
-        return ctFont
     }
 }

@@ -292,6 +292,7 @@ struct FullScreenWallpaperView: View {
                         shareWallpaper()
                     }
                 }
+                .glassContainer(spacing: 12)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 16)

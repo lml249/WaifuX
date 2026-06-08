@@ -1,5 +1,29 @@
 import SwiftUI
 import Kingfisher
+import QuartzCore
+
+@MainActor
+enum WallpaperExploreScrollActivity {
+    private static let idleDelay: CFTimeInterval = 0.22
+    private static var lastScrollEventTime: CFTimeInterval = 0
+
+    static func markActive() {
+        lastScrollEventTime = CACurrentMediaTime()
+    }
+
+    static var isActive: Bool {
+        CACurrentMediaTime() - lastScrollEventTime < idleDelay
+    }
+
+    static func waitUntilIdle() async {
+        while isActive {
+            let elapsed = CACurrentMediaTime() - lastScrollEventTime
+            let remaining = max(0.04, idleDelay - elapsed)
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+        }
+    }
+}
 
 // MARK: - SwiftUI 壁纸卡片
 
@@ -11,20 +35,36 @@ struct WallpaperCardView: View {
 
     @Environment(\.arcIsLightMode) private var isLightMode
     @State private var isHovered = false
+    @State private var hasStartedImageLoading = false
+    @State private var deferredImageLoadTask: Task<Void, Never>?
 
-    private let bottomBarHeight: CGFloat = 46
+    static let bottomBarHeight: CGFloat = 46
+    private static let maxAspectRatioClamp: ClosedRange<CGFloat> = 0.35...3.6
+
     private let cornerRadius: CGFloat = 22
 
+    static func effectiveAspectRatio(for wallpaper: Wallpaper) -> CGFloat {
+        min(max(CGFloat(wallpaper.effectiveAspectRatioValue), maxAspectRatioClamp.lowerBound), maxAspectRatioClamp.upperBound)
+    }
+
+    static func imageHeight(cardWidth: CGFloat, wallpaper: Wallpaper) -> CGFloat {
+        cardWidth / effectiveAspectRatio(for: wallpaper)
+    }
+
+    static func estimatedHeight(cardWidth: CGFloat, wallpaper: Wallpaper) -> CGFloat {
+        imageHeight(cardWidth: cardWidth, wallpaper: wallpaper) + bottomBarHeight
+    }
+
     private var effectiveAspectRatio: CGFloat {
-        min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
+        Self.effectiveAspectRatio(for: wallpaper)
     }
 
     private var imageHeight: CGFloat {
-        cardWidth / effectiveAspectRatio
+        Self.imageHeight(cardWidth: cardWidth, wallpaper: wallpaper)
     }
 
     private var cardHeight: CGFloat {
-        imageHeight + bottomBarHeight
+        Self.estimatedHeight(cardWidth: cardWidth, wallpaper: wallpaper)
     }
 
     private var primaryTextColor: Color {
@@ -54,26 +94,10 @@ struct WallpaperCardView: View {
         }
     }
 
-    /// 计算封面图 URL（静态方法，无捕获开销）
+    /// 探索网格优先滚动稳定性：只使用缩略图候选，避免高速滚动时触发原图下载/缓存。
     private static func computeCoverImageURL(wallpaper: Wallpaper) -> URL? {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let aspectRatio = min(max(CGFloat(wallpaper.effectiveAspectRatioValue), 0.35), 3.6)
-        let isExtremeAspect = aspectRatio < 0.7 || aspectRatio > 2.1
-        let preferHighRes = isExtremeAspect || (scale >= 2)
-
-        let candidates: [URL?]
-        if preferHighRes {
-            if wallpaper.source == "4kwallpapers" {
-                candidates = [wallpaper.thumbURL, wallpaper.originalThumbURL, wallpaper.fullImageURL, wallpaper.smallThumbURL]
-            } else {
-                candidates = [wallpaper.originalThumbURL, wallpaper.thumbURL, wallpaper.fullImageURL, wallpaper.smallThumbURL]
-            }
-        } else {
-            candidates = [wallpaper.thumbURL, wallpaper.originalThumbURL, wallpaper.smallThumbURL, wallpaper.fullImageURL]
-        }
-
         var seen: Set<String> = []
-        for candidate in candidates {
+        for candidate in [wallpaper.thumbURL, wallpaper.smallThumbURL, wallpaper.originalThumbURL] {
             guard let url = candidate else { continue }
             guard seen.insert(url.absoluteString).inserted else { continue }
             return url
@@ -88,7 +112,7 @@ struct WallpaperCardView: View {
                     .frame(width: cardWidth, height: imageHeight)
 
                 bottomBar
-                    .frame(height: bottomBarHeight)
+                    .frame(height: Self.bottomBarHeight)
             }
             .background(Color(hex: "1A1D24").opacity(0.6))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
@@ -107,7 +131,34 @@ struct WallpaperCardView: View {
         .onTapGesture { onTap?() }
         .scaleEffect(isHovered ? 1.01 : 1.0)
         .animation(.easeOut(duration: 0.2), value: isHovered)
-        .onHover { isHovered = $0 }
+        // ⚡ 使用节流 hover 替代 .onHover，避免快速滚动时大量 hover 事件引发 body 重建风暴
+        .modifier(WallpaperCardHoverModifier(isHovered: $isHovered))
+        .onAppear {
+            startImageLoadingWhenIdle()
+        }
+        .onDisappear {
+            deferredImageLoadTask?.cancel()
+            deferredImageLoadTask = nil
+        }
+    }
+
+    private func startImageLoadingWhenIdle() {
+        guard !hasStartedImageLoading else { return }
+        deferredImageLoadTask?.cancel()
+
+        if !WallpaperExploreScrollActivity.isActive {
+            hasStartedImageLoading = true
+            return
+        }
+
+        deferredImageLoadTask = Task { @MainActor in
+            await WallpaperExploreScrollActivity.waitUntilIdle()
+            guard !Task.isCancelled else { return }
+            if !hasStartedImageLoading {
+                hasStartedImageLoading = true
+            }
+            deferredImageLoadTask = nil
+        }
     }
 
     // MARK: - Cover Image
@@ -127,18 +178,28 @@ struct WallpaperCardView: View {
         )
         let processor = DownsamplingImageProcessor(size: targetSize)
 
-        KFImage(url)
-            .setProcessor(processor)
-            .backgroundDecode()
-            .cacheOriginalImage()
-            .memoryCacheExpiration(.seconds(300))
-            .diskCacheExpiration(.days(7))
-            .placeholder { Color.black.opacity(0.4) }
-            .fade(duration: 0.25)
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(width: cardWidth, height: imageHeight)
-            .clipped()
+        if hasStartedImageLoading {
+            KFImage(url)
+                .setProcessor(processor)
+                // DownsamplingImageProcessor 已通过 CGImageSourceCreateThumbnailAtIndex 解码
+                // ⚡ LazyVStack 中不能使用 cancelOnDisappear(true)，滚出屏幕的 View 被销毁时
+                // 图片下载被取消，滚回来时重新下载+解码，快速滚动下 CPU 100%。
+                .memoryCacheExpiration(.seconds(300))
+                .diskCacheExpiration(.days(7))
+                .placeholder { imagePlaceholder }
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: cardWidth, height: imageHeight)
+                .clipped()
+        } else {
+            imagePlaceholder
+                .frame(width: cardWidth, height: imageHeight)
+        }
+    }
+
+    private var imagePlaceholder: some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.4))
     }
 
     // MARK: - Bottom Bar
@@ -170,7 +231,7 @@ struct WallpaperCardView: View {
             )
         }
         .padding(.horizontal, 14)
-        .frame(height: bottomBarHeight)
+        .frame(height: Self.bottomBarHeight)
     }
 
     private func colorChip(hex: String) -> some View {
@@ -243,5 +304,21 @@ struct WallpaperCardView: View {
             return String(format: "%.1fK", Double(value) / 1_000)
         }
         return "\(value)"
+    }
+}
+
+private struct WallpaperCardHoverModifier: ViewModifier {
+    @Binding var isHovered: Bool
+
+    func body(content: Content) -> some View {
+        content.throttledHover(interval: 0.05) { hovering in
+            if WallpaperExploreScrollActivity.isActive {
+                if isHovered {
+                    isHovered = false
+                }
+                return
+            }
+            isHovered = hovering
+        }
     }
 }

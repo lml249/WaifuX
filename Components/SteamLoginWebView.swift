@@ -8,8 +8,12 @@ struct SteamLoginWebView: NSViewRepresentable {
     @Binding var isLoggedIn: Bool
     @Binding var steamID: String
     @Binding var isLoading: Bool
+    /// 当前 WebView URL，供 UI 显示
+    @Binding var currentURL: String
     /// 用户点击"前往订阅页面"时递增此值，Coordinator 据此触发导航
     @Binding var navigateToSubscriptionCount: Int
+    /// 设置为非空字符串时，WebView 导航到此 URL 并清空
+    @Binding var navigateToCustomURL: String
     var onLoginSuccess: ((String) -> Void)?
 
     func makeNSView(context: Context) -> WKWebView {
@@ -33,6 +37,8 @@ struct SteamLoginWebView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {
         // 检测用户点击了"前往订阅页面"（计数器递增）
         context.coordinator.checkNavigateTrigger(navigateToSubscriptionCount, webView: nsView)
+        // 检测用户从地址栏输入了自定义 URL
+        context.coordinator.checkNavigateToCustomURL(navigateToCustomURL, webView: nsView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -75,17 +81,50 @@ struct SteamLoginWebView: NSViewRepresentable {
             navigateToSubscription(webView: webView)
         }
 
+        private var lastCustomURL: String = ""
+
+        /// 由 updateNSView 调用，检测用户从地址栏输入了 URL
+        func checkNavigateToCustomURL(_ urlString: String, webView: WKWebView) {
+            let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != lastCustomURL else { return }
+            lastCustomURL = trimmed
+            // 清空 parent 的 binding，避免重复触发
+            DispatchQueue.main.async {
+                self.parent.currentURL = trimmed
+                self.parent.navigateToCustomURL = ""
+            }
+            guard let url = Self.makeURL(from: trimmed) else { return }
+            webView.load(URLRequest(url: url))
+        }
+
+        /// 将用户输入转为 URL，自动补全协议
+        private static func makeURL(from string: String) -> URL? {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return nil }
+            if let url = URL(string: trimmed), url.scheme != nil {
+                return url
+            }
+            // 没有协议前缀时补 https://
+            return URL(string: "https://\(trimmed)")
+        }
+
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.parent.isLoading = true
+                if let url = webView.url {
+                    self.parent.currentURL = url.absoluteString
+                }
             }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.parent.isLoading = false
+                if let url = webView.url {
+                    self.parent.currentURL = url.absoluteString
+                }
             }
 
             guard let url = webView.url else { return }
@@ -285,7 +324,10 @@ struct SteamLoginSheet: View {
     @State private var isLoggedIn = false
     @State private var steamID = ""
     @State private var isLoading = false
+    @State private var currentURL = ""
+    @State private var urlBarText = ""
     @State private var navigateToSubscriptionCount = 0
+    @State private var navigateToCustomURL = ""
     /// WebView 是否已到达订阅页面（onLoginSuccess 被调用）
     @State private var isOnSubscriptionPage = false
 
@@ -311,6 +353,59 @@ struct SteamLoginSheet: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 16)
 
+            // 浏览器风格地址栏
+            HStack(spacing: 8) {
+                Image(systemName: "lock")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.green.opacity(0.7))
+
+                TextField("输入网址...", text: $urlBarText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .onSubmit {
+                        navigateToCustomURL = urlBarText
+                    }
+
+                if !urlBarText.isEmpty {
+                    Button {
+                        urlBarText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.white.opacity(0.4))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    navigateToCustomURL = urlBarText
+                } label: {
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.accentColor.opacity(0.8))
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(urlBarText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+            )
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+
             Divider()
                 .background(Color.white.opacity(0.1))
 
@@ -320,7 +415,9 @@ struct SteamLoginSheet: View {
                     isLoggedIn: $isLoggedIn,
                     steamID: $steamID,
                     isLoading: $isLoading,
+                    currentURL: $currentURL,
                     navigateToSubscriptionCount: $navigateToSubscriptionCount,
+                    navigateToCustomURL: $navigateToCustomURL,
                     onLoginSuccess: { id in
                         // 到达订阅页面后保存 SteamID
                         workshopSourceManager.steamProfileID = id
@@ -415,6 +512,9 @@ struct SteamLoginSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
+        }
+        .onChange(of: currentURL) { _, newURL in
+            urlBarText = newURL
         }
         .frame(width: 800, height: 650)
         .background(Color(nsColor: .windowBackgroundColor))

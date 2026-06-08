@@ -1,7 +1,7 @@
 import SwiftUI
 import Kingfisher
 
-// MARK: - 作者壁纸弹出层
+// MARK: - 作者壁纸弹出层 - 液态玻璃底部弹窗
 struct AuthorWallpaperSheet: View {
     let uploader: Wallpaper.Uploader
     let wallpapers: [Wallpaper]
@@ -12,15 +12,17 @@ struct AuthorWallpaperSheet: View {
 
     @State private var isVisible = false
     private let cardSpacing: CGFloat = 14
-    private let cornerRadius: CGFloat = 18
+    private let cornerRadius: CGFloat = 22
 
     var body: some View {
         GeometryReader { geometry in
             let panelWidth = min(max(geometry.size.width * 0.72, 720), 1040)
             let panelHeight = min(max(geometry.size.height * 0.78, 620), 820)
+            let bottomOffset = panelHeight + 40
 
-            ZStack {
-                Color.black.opacity(0.36)
+            ZStack(alignment: .bottom) {
+                // 半透明背景
+                Color.black.opacity(0.5)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -28,10 +30,18 @@ struct AuthorWallpaperSheet: View {
                     }
                     .opacity(isVisible ? 1 : 0)
 
+                // 底部弹窗面板
                 VStack(spacing: 0) {
+                    // 拖拽指示条
+                    Capsule()
+                        .fill(LiquidGlassColors.textQuaternary)
+                        .frame(width: 36, height: 4)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+
                     authorHeader
                         .padding(.horizontal, 28)
-                        .padding(.top, 24)
+                        .padding(.top, 8)
                         .padding(.bottom, 18)
 
                     dividerLine
@@ -40,7 +50,7 @@ struct AuthorWallpaperSheet: View {
                     HStack {
                         Text(t("authorWallpapers"))
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.82))
+                            .foregroundStyle(LiquidGlassColors.textSecondary)
                         Spacer()
                         if isLoading {
                             ProgressView()
@@ -51,7 +61,7 @@ struct AuthorWallpaperSheet: View {
                         if !wallpapers.isEmpty {
                             Text("\(wallpapers.count)")
                                 .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.4))
+                                .foregroundStyle(LiquidGlassColors.textTertiary)
                         }
                     }
                     .padding(.horizontal, 28)
@@ -64,24 +74,20 @@ struct AuthorWallpaperSheet: View {
                 .frame(width: panelWidth, height: panelHeight)
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.ultraThickMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.38))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                                .stroke(.white.opacity(0.14), lineWidth: 0.5)
-                        )
+                        .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5))
                 )
-                .shadow(color: .black.opacity(0.28), radius: 42, y: 18)
-                .scaleEffect(isVisible ? 1 : 0.97)
+                .liquidGlassSurface(
+                    .prominent,
+                    in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 48, y: -8)
+                .offset(y: isVisible ? 0 : bottomOffset)
                 .opacity(isVisible ? 1 : 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
-            withAnimation(.spring(response: 0.42, dampingFraction: 0.88, blendDuration: 0)) {
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.82, blendDuration: 0)) {
                 isVisible = true
             }
         }
@@ -96,13 +102,13 @@ struct AuthorWallpaperSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(uploader.username)
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.95))
+                    .foregroundStyle(LiquidGlassColors.textPrimary)
                     .lineLimit(1)
 
                 HStack(spacing: 6) {
                     Label("wallhaven", systemImage: "photo.stack")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(LiquidGlassColors.textTertiary)
                 }
             }
 
@@ -113,11 +119,11 @@ struct AuthorWallpaperSheet: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(LiquidGlassColors.textSecondary)
                     .frame(width: 30, height: 30)
                     .background(
                         Circle()
-                            .fill(.white.opacity(0.09))
+                            .fill(LiquidGlassColors.glassTint)
                     )
             }
             .buttonStyle(.plain)
@@ -134,7 +140,7 @@ struct AuthorWallpaperSheet: View {
                 .placeholder { _ in
                     Image(systemName: "person.crop.circle.fill")
                         .font(.system(size: 28))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(LiquidGlassColors.textTertiary)
                 }
                 .resizable()
                 .scaledToFill()
@@ -142,16 +148,16 @@ struct AuthorWallpaperSheet: View {
                 .clipShape(Circle())
                 .overlay(
                     Circle()
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                        .stroke(LiquidGlassColors.borderSubtle, lineWidth: 1)
                 )
         } else {
             Image(systemName: "person.crop.circle.fill")
                 .font(.system(size: 28))
-                .foregroundStyle(.white.opacity(0.4))
+                .foregroundStyle(LiquidGlassColors.textTertiary)
                 .frame(width: 56, height: 56)
                 .background(
                     Circle()
-                        .fill(.white.opacity(0.08))
+                        .fill(LiquidGlassColors.glassTint)
                 )
         }
     }
@@ -202,11 +208,11 @@ struct AuthorWallpaperSheet: View {
         VStack(spacing: 12) {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 32))
-                .foregroundStyle(.white.opacity(0.2))
+                .foregroundStyle(LiquidGlassColors.textQuaternary)
 
             Text(t("noWallpapers"))
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(LiquidGlassColors.textTertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 60)
@@ -215,7 +221,7 @@ struct AuthorWallpaperSheet: View {
     // MARK: - 分隔线
     private var dividerLine: some View {
         Rectangle()
-            .fill(.white.opacity(0.08))
+            .fill(LiquidGlassColors.borderSubtle)
             .frame(height: 1)
     }
 
@@ -236,7 +242,7 @@ struct AuthorWallpaperSheet: View {
     }
 
     private func dismiss() {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.88, blendDuration: 0)) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85, blendDuration: 0)) {
             isVisible = false
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

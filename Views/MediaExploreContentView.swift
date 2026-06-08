@@ -63,6 +63,8 @@ struct MediaExploreContentView: View {
     @State private var pendingSearchText: String?
     /// 翻译后的实际搜索词（英文），与 searchText（原始中文）分离
     @State private var mediaSearchQuery: String = ""
+    /// loadMore 冷却期，防止 contentSize 增长 → isNearBottom 翻转 → 立即重试的无限级联。
+    @State private var loadMoreCooldownUntil: Date? = nil
     @StateObject private var scrollCoordinator = MediaExploreScrollCoordinator()
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -182,7 +184,8 @@ struct MediaExploreContentView: View {
                 syncAtmosphereIfNeeded()
             }
         }
-        .onChange(of: viewModel.libraryContentRevision) { _, _ in }
+        // ❌ 已移除 libraryContentRevision 的空 onChange，收藏状态改为视图直接读取
+        // viewModel.favoriteIDSet，无需 @State 中间赋值引发 body 重算。
         .onChange(of: viewModel.items.count) { _, newCount in
             if newCount != 0 {
                 // 数据从 0→N（切换源后新数据到达）时同步大气层背景
@@ -245,11 +248,16 @@ struct MediaExploreContentView: View {
                 )
             }, action: { oldValue, newValue in
                 if newValue.isNearBottom && !oldValue.isNearBottom {
+                    // ⛔ 冷却期内不触发 loadMore
+                    if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
                     guard !scrollCoordinator.wasNearBottom else { return }
                     scrollCoordinator.wasNearBottom = true
                     scheduleLoadMoreFromScroll()
                 } else if !newValue.isNearBottom && oldValue.isNearBottom {
-                    scrollCoordinator.wasNearBottom = false
+                    // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                        scrollCoordinator.wasNearBottom = false
+                    }
                 }
             })
             .scrollDisabled(!isVisible)
@@ -1128,17 +1136,42 @@ struct MediaExploreContentView: View {
                     ForEach(columnItems[safe: columnIndex] ?? []) { media in
                         MediaCardView(
                             media: media,
-                            isFavorite: viewModel.isFavorite(media),
+                            // ✅ 直接读取 viewModel.favoriteIDSet，O(1) 判断
+                            isFavorite: viewModel.favoriteIDSet.contains(media.id),
                             cardWidth: cardWidth
                         ) {
                             viewModel.preserveExploreFeedForDetailNavigation()
                             selectedMedia = media
                         }
+                        // ⚡ 显式设定卡片高度，让 LazyVStack 无需创建子视图即
+                        // 可估算列总高度，确保真正的懒加载行为。
+                        .frame(height: Self.mediaCardHeight(cardWidth: cardWidth, media: media))
                     }
                 }
                 .frame(width: cardWidth)
             }
         }
+    }
+
+    /// 计算 MediaCardView 的显式高度（与内部 cardHeight 保持一致）
+    private static func mediaCardHeight(cardWidth: CGFloat, media: MediaItem) -> CGFloat {
+        let bottomBarHeight: CGFloat = 44
+        let raw = media.exactResolution ?? media.resolutionLabel
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "X", with: "x")
+        let parts = raw.split(separator: "x")
+        let aspect: CGFloat
+        if parts.count == 2,
+           let w = Double(parts[0]), w > 0,
+           let h = Double(parts[1]), h > 0 {
+            let rawAspect = CGFloat(w / h)
+            aspect = min(max(rawAspect, 0.35), 3.6)
+        } else {
+            aspect = 1.6
+        }
+        let maxImageHeight: CGFloat = cardWidth * 1.8
+        let imageHeight = min(cardWidth / aspect, maxImageHeight)
+        return imageHeight + bottomBarHeight
     }
 
     private func parsedMediaAspectRatio(_ item: MediaItem) -> CGFloat {
@@ -1480,6 +1513,9 @@ struct MediaExploreContentView: View {
               !isLoadingMore,
               !viewModel.isLoadingMore else { return }
 
+        // ⛔ 冷却期内不触发 loadMore（防止 contentSize 增长后的无限级联）
+        if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
+
         isLoadingMore = true
         loadMoreFailed = false
         loadMoreTask?.cancel()
@@ -1494,6 +1530,8 @@ struct MediaExploreContentView: View {
                 if viewModel.hasMorePages && viewModel.errorMessage != nil {
                     loadMoreFailed = true
                 }
+                // ⚡ 设置 1.5s 冷却期 + 0.5s 延迟释放 isLoadingMore，双重防护
+                loadMoreCooldownUntil = Date().addingTimeInterval(1.5)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     isLoadingMore = false
                 }
@@ -1514,11 +1552,16 @@ struct MediaExploreContentView: View {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
         let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
         if isNearBottom {
+            // ⛔ 冷却期内不触发 loadMore
+            if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
             guard !scrollCoordinator.wasNearBottom else { return }
             scrollCoordinator.wasNearBottom = true
             scheduleLoadMoreFromScroll()
         } else {
-            scrollCoordinator.wasNearBottom = false
+            // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                scrollCoordinator.wasNearBottom = false
+            }
         }
     }
 

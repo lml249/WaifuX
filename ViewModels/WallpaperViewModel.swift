@@ -22,9 +22,6 @@ class WallpaperViewModel: ObservableObject {
     @Published var networkStatus: NetworkStatus = .unknown
     private let networkMonitor = NetworkMonitor.shared
 
-    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目。
-    private static let maxCachedItems = 300
-
     // MARK: - Task Cancellation Support
     private var searchTask: Task<Void, Never>?
     private var loadMoreTask: Task<Void, Never>?
@@ -209,18 +206,27 @@ class WallpaperViewModel: ObservableObject {
             }
         }
 
-        // 监听 Service 数据变化：递增 revision 立即触发 UI 刷新，缓存重建延迟执行避免阻塞主线程
+        // MARK: - 优化后的 Service 数据变更监听：保护主线程免受 I/O 阻塞
         Publishers.Merge3(
             wallpaperLibrary.$favoriteRecords.map { _ in () },
             wallpaperLibrary.$downloadRecords.map { _ in () },
             localScanner.$scanRevision.map { _ in () }
         )
-        .receive(on: DispatchQueue.main)
+        // 1. ⚙️ 不要在主线程接收原始通知，直接在当前的后台或默认管道处理
         .sink { [weak self] _ in
             guard let self else { return }
-            // 先递增 revision，触发 UI 立即使用 Set 索引做 O(1) 查询
-            self.libraryContentRevision &+= 1
-            self.scheduleLocalWallpaperCacheRebuild(delayNanoseconds: 100_000_000)
+
+            // 2. 🚀 调度缓存重建（scheduleLocalWallpaperCacheRebuild 本身只是取消旧 Task + 创建新 Task，
+            // 核心重算 rebuildLocalWallpaperCache 内部已用 Task.detached 投到后台 Utility 线程，
+            // 此处仅需轻量调度，不会阻塞主线程。）
+            Task { @MainActor [weak self] in
+                self?.scheduleLocalWallpaperCacheRebuild(delayNanoseconds: 100_000_000)
+            }
+
+            // 3. 🎨 仅仅将极其轻量的版本号递增（O(1) 状态变更）交还给主线程驱动 UI
+            Task { @MainActor [weak self] in
+                self?.libraryContentRevision &+= 1
+            }
         }
         .store(in: &cancellables)
 
@@ -380,6 +386,12 @@ class WallpaperViewModel: ObservableObject {
         wallpaperLibrary.favoriteRecords
     }
 
+    /// ✅ O(1) 收藏 ID 集合，供视图在 ForEach 中直接读取。
+    /// 依赖 `libraryContentRevision` 驱动 SwiftUI 自动重算，无需额外的 @State 中转。
+    var favoriteIDSet: Set<String> {
+        Set(favoriteSyncRecords.lazy.filter(\.isActive).map(\.wallpaper.id))
+    }
+
     var downloadSyncRecords: [WallpaperDownloadRecord] {
         wallpaperLibrary.downloadRecords
     }
@@ -521,8 +533,9 @@ class WallpaperViewModel: ObservableObject {
         currentPage = 1
         currentRandomSeed = nil
 
-        // 清空旧搜索结果，避免新搜索时残留上一轮的图片
-        wallpapers = []
+        // ⚠️ 不再清空 wallpapers，避免旧数据残留只是视觉上的取舍：
+        // 新数据到达前保持旧列表可见，防止 SwiftUI 全量销毁→重建视图树
+        // 导致的 AttributeGraph 主线程卡死。
 
         // 重置预加载状态
         preloadTask?.cancel()
@@ -553,7 +566,7 @@ class WallpaperViewModel: ObservableObject {
                     errorMessage = t("explore.noResults")
                 } else {
                     // 预加载前几张图片
-                    preloadImages(for: Array(results.data.prefix(6)))
+                    preloadImages(for: Array(results.data.prefix(4)))
                 }
             } catch is CancellationError {
                 isLoading = false
@@ -662,13 +675,26 @@ class WallpaperViewModel: ObservableObject {
 
                 var existingIDs = Set(wallpapers.map(\.id))
                 let appended = results.data.filter { existingIDs.insert($0.id).inserted }
-                wallpapers.append(contentsOf: appended)
+
+                // ⚡ 批量追加，减少中间 @Published 通知次数
+                // 如果追加数量较大，分批追加以避免单次 AttributeGraph 更新过重
+                if appended.count > 40 {
+                    let batchSize = 20
+                    for i in stride(from: 0, to: appended.count, by: batchSize) {
+                        let batch = Array(appended[i..<min(i + batchSize, appended.count)])
+                        wallpapers.append(contentsOf: batch)
+                        // 让出主线程，允许 SwiftUI 在批次间处理事件
+                        await Task.yield()
+                    }
+                } else {
+                    wallpapers.append(contentsOf: appended)
+                }
 
                 currentPage = nextPage
                 hasMorePages = currentPage < results.meta.lastPage
 
                 // 预加载新加载的图片
-                preloadImages(for: Array(appended.prefix(4)))
+                preloadImages(for: Array(appended.prefix(2)))
 
                 // 预加载下一页数据
                 if hasMorePages {
@@ -714,18 +740,14 @@ class WallpaperViewModel: ObservableObject {
 
     // MARK: - 内存压力处理
 
-    /// 系统内存压力时自动触发：裁剪列表并取消网络请求。
+    /// 系统内存压力时自动触发：取消网络请求，但保留已加载的列表数据（列表仅存元数据，内存开销极小）。
     private func handleMemoryPressure() {
-        print("[WallpaperViewModel] 内存压力，释放缓存: wallpapers=\(wallpapers.count)")
+        print("[WallpaperViewModel] 内存压力，取消网络请求: wallpapers=\(wallpapers.count)")
         searchTask?.cancel()
         loadMoreTask?.cancel()
         debounceTask?.cancel()
         preloadTask?.cancel()
         preloadedResponse = nil
-        // 裁剪列表：仅保留最近 2 页（~48 条）
-        if wallpapers.count > 48 {
-            wallpapers = Array(wallpapers.suffix(48))
-        }
     }
 
     // MARK: - 取消所有任务
@@ -770,7 +792,6 @@ class WallpaperViewModel: ObservableObject {
             options: [
                 .processor(DownsamplingImageProcessor(size: targetSize)),
                 .scaleFactor(NSScreen.main?.backingScaleFactor ?? 2),
-                .backgroundDecode
             ],
             namespace: "wallpaper-view-model"
         )

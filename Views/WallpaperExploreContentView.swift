@@ -3,6 +3,8 @@ import AppKit
 import Kingfisher
 @preconcurrency import Translation
 
+// MARK: - 滚动位置保存已移除（怀疑返回时回到顶部是因数据被清空导致）
+
 // MARK: - macOS 14 兼容：滚动加载更多哨兵
 
 private struct WallpaperLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
@@ -15,6 +17,12 @@ private struct WallpaperLoadMoreSentinelMinYPreferenceKey: PreferenceKey {
             value = next
         }
     }
+}
+
+private enum WallpaperLoadMoreScrollZone: Equatable {
+    case near
+    case armed
+    case far
 }
 
 private final class WallpaperExploreScrollCoordinator: ObservableObject {
@@ -36,6 +44,7 @@ private final class WallpaperExploreScrollCoordinator: ObservableObject {
 struct WallpaperExploreContentView: View {
     private static let scrollCoordinateSpaceName = "wallpaper-explore-scroll"
     private static let loadMoreTriggerThreshold: CGFloat = 120
+    private static let loadMoreResetThreshold: CGFloat = 520
 
     @ObservedObject var viewModel: WallpaperViewModel
     @Binding var selectedWallpaper: Wallpaper?
@@ -74,6 +83,7 @@ struct WallpaperExploreContentView: View {
     @State private var lastSyncedFirstWallpaperID: String?
     @State private var loadMoreTask: Task<Void, Never>?
 
+
     @State private var showWallpaperURLSheet = false
     @State private var wallpaperURLInput = ""
     @State private var isResolvingWallpaperURL = false
@@ -81,10 +91,19 @@ struct WallpaperExploreContentView: View {
     @StateObject private var scrollCoordinator = WallpaperExploreScrollCoordinator()
 
     /// 缓存筛选后的列表，避免每次 body 重绘时对 `wallpapers` 全表过滤（Wallhaven 分类）
-    /// 使用 @StateObject 包装容器避免值语义触发不必要的 body 重建
     @State private var visibleWallpapers: [Wallpaper] = []
-    /// 防止重复设置同一个 visibleWallpapers 值触发不必要重建
-    @State private var lastVisibleIDs: Set<Wallpaper.ID> = []
+    /// 防止重复设置同一个 visibleWallpapers 值触发不必要重建；必须保留顺序，排序变化也要刷新瀑布流。
+    @State private var lastVisibleIDs: [Wallpaper.ID] = []
+    /// 瀑布流分列缓存，避免每次 body 重绘时全量重算瀑布流列分配。
+    /// 收藏状态已移除 @State 缓存，改为视图在 ForEach 中直接读取 viewModel.favoriteIDSet。
+    @State private var waterfallLayoutCache = WallpaperWaterfallLayoutCache()
+    // MARK: - 渲染限流防御
+    /// 用于异步防抖执行 recomputeVisibleWallpapers，避免高频触发时主线程堆积。
+    @State private var recomputeTask: Task<Void, Never>? = nil
+    /// loadMore 冷却期，防止 contentSize 增长 → isNearBottom 翻转 → 立即重试的无限级联。
+    @State private var loadMoreCooldownUntil: Date? = nil
+    /// syncAtmosphereIfNeeded 节流时间戳，避免 loadMore 高频触发时反复下载缩略图+CoreImage 采样。
+    @State private var lastAtmosphereSyncTime: Date = .distantPast
 
     private var shouldUseLightweightEffects: Bool {
         (videoWallpaperManager.isVideoWallpaperActive && !videoWallpaperManager.isPaused) ||
@@ -92,13 +111,7 @@ struct WallpaperExploreContentView: View {
     }
 
     var body: some View {
-        if #available(macOS 15.0, *) {
-            TranslationTaskHost(bridge: translationBridge) {
-                mainContent
-            }
-        } else {
-            mainContent
-        }
+        mainContent
     }
 
     @ViewBuilder
@@ -169,13 +182,41 @@ struct WallpaperExploreContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .wallpaperDataSourceChanged)) { _ in
             handleDataSourceChange()
         }
-        .onChange(of: category) { _, _ in handleCategoryChange(); recomputeVisibleWallpapers(); syncAtmosphereIfNeeded() }
+        .onChange(of: category) { _, _ in
+            handleCategoryChange()
+            syncAtmosphereIfNeeded()
+            // 分类切换同步执行重算（无需防抖，用户主动操作频率低）
+            recomputeTask?.cancel()
+            recomputeTask = Task { @MainActor in
+                recomputeVisibleWallpapers()
+            }
+        }
         .onChange(of: fourKCategory) { _, _ in handle4KCategoryChange() }
         .onChange(of: hotTag) { _, _ in handleHotTagChange() }
         .onChange(of: viewModel.sortingOption) { _, _ in handleSortingChange() }
         .onChange(of: fourKSorting) { _, _ in handle4KSortingChange() }
         .onChange(of: konachanSorting) { _, _ in handleKonachanSortingChange() }
-        .onChange(of: viewModel.wallpapers) { _, _ in recomputeVisibleWallpapers(); syncAtmosphereIfNeeded() }
+        .onChange(of: viewModel.wallpapers) { _, _ in
+            // ⚡ 3s 节流：loadMore 时 wallpapers 高频追加，syncAtmosphereIfNeeded 会下载缩略图
+            // + CoreImage 颜色分析，不加节流会导致 CPU 持续满载。
+            let now = Date()
+            if now.timeIntervalSince(lastAtmosphereSyncTime) >= 3.0 {
+                lastAtmosphereSyncTime = now
+                syncAtmosphereIfNeeded()
+            }
+
+            // ✅ 异步防抖：取消上一次尚未执行的重算，开启新任务并等待 100ms 缓冲。
+            // scrollView 滚动加载（loadMore）时 wallpapers 高频追加，不加防抖会导致
+            // recomputeVisibleWallpapers 和瀑布流缓存重算在主线程堆积，引发卡死。
+            recomputeTask?.cancel()
+            recomputeTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms 缓冲
+                guard !Task.isCancelled else { return }
+                recomputeVisibleWallpapers()
+            }
+        }
+        // ❌ 已移除 .onChange(of: libraryContentRevision)，收藏状态改为视图在 ForEach 中
+        // 直接读取 viewModel.favoriteIDSet，避免 @State 中间赋值引发不必要的 body 重算。
         .overlay(alertOverlay)
         .sheet(isPresented: $showWallpaperURLSheet) {
             WorkshopURLInputSheet(
@@ -259,26 +300,36 @@ struct WallpaperExploreContentView: View {
             .onChange(of: viewModel.wallpapers.count) { _, count in
                 if count > 60 { showScrollToTop = true }
             }
-            .onScrollGeometryChange(for: ScrollNearBottomState.self, of: { geometry in
+            .onScrollGeometryChange(for: WallpaperLoadMoreScrollZone.self, of: { geometry in
                 let bottomOffset = geometry.contentOffset.y + geometry.containerSize.height
                 let distanceFromBottom = geometry.contentSize.height - bottomOffset
                 guard distanceFromBottom.isFinite else {
-                    return ScrollNearBottomState(isNearBottom: false)
+                    return .far
                 }
-                return ScrollNearBottomState(
-                    isNearBottom: distanceFromBottom <= Self.loadMoreTriggerThreshold
-                )
+                if distanceFromBottom <= Self.loadMoreTriggerThreshold { return .near }
+                if distanceFromBottom <= Self.loadMoreResetThreshold { return .armed }
+                return .far
             }, action: { oldValue, newValue in
-                if newValue.isNearBottom && !oldValue.isNearBottom {
+                if newValue == .near && oldValue != .near {
+                    // ⛔ 冷却期内不触发 loadMore，防止 contentSize 增长后的无限级联
+                    if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
                     guard !scrollCoordinator.wasNearBottom else { return }
                     scrollCoordinator.wasNearBottom = true
-                    scheduleLoadMoreFromScroll()
-                } else if !newValue.isNearBottom && oldValue.isNearBottom {
-                    scrollCoordinator.wasNearBottom = false
+                    self.scheduleLoadMoreFromScroll()
+                } else if newValue == .far {
+                    // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+                    let prevWasNearBottom = scrollCoordinator.wasNearBottom
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                        scrollCoordinator.wasNearBottom = false
+                    }
                 }
             })
+            .onScrollGeometryChange(for: CGFloat.self, of: { geometry in
+                geometry.contentOffset.y
+            }, action: { _, _ in
+                WallpaperExploreScrollActivity.markActive()
+            })
             .scrollDisabled(!isVisible)
-            .disabled(isInitialLoading || !isVisible)
             .onChange(of: outerScrollToTopToken) { _, _ in
                 withAnimation(nil) {
                     proxy.scrollTo("wp-scroll-top", anchor: .top)
@@ -310,6 +361,7 @@ struct WallpaperExploreContentView: View {
                 if count > 60 { showScrollToTop = true }
             }
             .onPreferenceChange(WallpaperLoadMoreSentinelMinYPreferenceKey.self) { sentinelMinY in
+                WallpaperExploreScrollActivity.markActive()
                 scrollCoordinator.sentinelDebounceTask?.cancel()
                 let task = DispatchWorkItem { [self] in
                     guard !Task.isCancelled else { return }
@@ -319,7 +371,6 @@ struct WallpaperExploreContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: task)
             }
             .scrollDisabled(!isVisible)
-            .disabled(isInitialLoading || !isVisible)
             .onChange(of: outerScrollToTopToken) { _, _ in
                 withAnimation(nil) {
                     proxy.scrollTo("wp-scroll-top", anchor: .top)
@@ -376,7 +427,18 @@ struct WallpaperExploreContentView: View {
 
     // MARK: - Sections
 
+    @ViewBuilder
     private var heroSection: some View {
+        if #available(macOS 15.0, *) {
+            TranslationTaskHost(bridge: translationBridge) {
+                heroSectionContent
+            }
+        } else {
+            heroSectionContent
+        }
+    }
+
+    private var heroSectionContent: some View {
         VStack(alignment: .leading, spacing: 18) {
             headerTitle
             searchRow
@@ -739,41 +801,24 @@ struct WallpaperExploreContentView: View {
     // MARK: - Grid & Cards
 
     private func wallpaperGrid(config: WallpaperGridConfig) -> some View {
-        let items = visibleWallpapers
-        let columnItems = ExploreGridLayout.waterfallColumns(
-            items: items,
-            columnCount: config.columnCount,
-            cardWidth: config.cardWidth,
-            spacing: config.spacing,
-            heightProvider: { wallpaper in
-                let safeAspectRatio: CGFloat
-                if wallpaper.dimensionX > 0, wallpaper.dimensionY > 0 {
-                    safeAspectRatio = CGFloat(wallpaper.dimensionX) / CGFloat(wallpaper.dimensionY)
-                } else {
-                    safeAspectRatio = 1.6 // 默认 16:10
+        WallpaperGridContainerView(
+            wallpapers: visibleWallpapers,
+            layoutKey: WallpaperWaterfallLayoutKey(
+                ids: lastVisibleIDs,
+                columnCount: config.columnCount,
+                cardWidth: config.cardWidth,
+                spacing: config.spacing
+            ),
+            layoutCache: waterfallLayoutCache,
+            config: config,
+            // ✅ 直接读取 viewModel.favoriteIDSet，无需 @State 缓存
+            favoriteIDs: viewModel.favoriteIDSet,
+            onSelect: { wallpaper in
+                if let index = visibleWallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
+                    selectedWallpaper = visibleWallpapers[index]
                 }
-                return config.cardWidth / safeAspectRatio
             }
         )
-
-        return HStack(alignment: .top, spacing: config.spacing) {
-            ForEach(0..<config.columnCount, id: \.self) { columnIndex in
-                LazyVStack(spacing: config.spacing) {
-                    ForEach(columnItems[safe: columnIndex] ?? []) { wallpaper in
-                        WallpaperCardView(
-                            wallpaper: wallpaper,
-                            isFavorite: viewModel.isFavorite(wallpaper),
-                            cardWidth: config.cardWidth
-                        ) {
-                            if let index = visibleWallpapers.firstIndex(where: { $0.id == wallpaper.id }) {
-                                selectedWallpaper = visibleWallpapers[index]
-                            }
-                        }
-                    }
-                }
-                .frame(width: config.cardWidth)
-            }
-        }
     }
 
     // MARK: - UI Components
@@ -1013,12 +1058,15 @@ struct WallpaperExploreContentView: View {
               !viewModel.isLoading,
               !isLoadingMore else { return }
 
+        // ⛔ 冷却期内不触发 loadMore（防止 contentSize 增长后的无限级联）
+        if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
+
         isLoadingMore = true
         loadMoreFailed = false
+        ForegroundPrefetchManager.shared.stop(namespace: "wallpaper-view-model")
         loadMoreTask?.cancel()
         loadMoreTask = Task { @MainActor in
             defer {
-                isLoadingMore = false
                 loadMoreTask = nil
             }
 
@@ -1026,9 +1074,14 @@ struct WallpaperExploreContentView: View {
             loadMoreFailed = false
             await viewModel.loadMore()
             guard !Task.isCancelled else { return }
-            // 检查是否加载失败（仍有更多页但没有新数据）
             if viewModel.hasMorePages && viewModel.errorMessage != nil {
                 loadMoreFailed = true
+            }
+            // ⚡ 设置 1.5s 冷却期 + 0.5s 延迟释放 isLoadingMore，双重防护防止 contentSize 增长 →
+            // isNearBottom 翻转 → 立即重试的无限级联。
+            loadMoreCooldownUntil = Date().addingTimeInterval(1.5)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                isLoadingMore = false
             }
         }
     }
@@ -1044,13 +1097,17 @@ struct WallpaperExploreContentView: View {
 
     private func handleLoadMoreSentinelPosition(_ sentinelMinY: CGFloat, viewportHeight: CGFloat) {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
-        let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
-        if isNearBottom {
+        if sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold {
+            // ⛔ 冷却期内不触发 loadMore
+            if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
             guard !scrollCoordinator.wasNearBottom else { return }
             scrollCoordinator.wasNearBottom = true
             scheduleLoadMoreFromScroll()
-        } else {
-            scrollCoordinator.wasNearBottom = false
+        } else if sentinelMinY > viewportHeight + Self.loadMoreResetThreshold {
+            // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                scrollCoordinator.wasNearBottom = false
+            }
         }
     }
 
@@ -1164,13 +1221,17 @@ struct WallpaperExploreContentView: View {
         } else {
             newVisible = viewModel.wallpapers
         }
-        // 仅当内容真正变化时才赋值，避免触发不必要的 body 重建
-        let newIDs = Set(newVisible.map(\.id))
+        // 仅当内容或顺序真正变化时才赋值，避免触发不必要的 body 重建
+        // 必须使用数组比较而非 Set，因为顺序变化（如排序变更）也需要触发重排
+        let newIDs = newVisible.map(\.id)
         if newIDs != lastVisibleIDs {
             lastVisibleIDs = newIDs
             visibleWallpapers = newVisible
         }
     }
+
+    // ❌ 已移除 refreshFavoriteIDs()，收藏状态改为视图在 ForEach 中
+    // 直接读取 viewModel.favoriteIDSet，避免 @State 中间赋值。
 
     private func prepareForFeedReplacement() {
         loadMoreTask?.cancel()
@@ -1229,7 +1290,87 @@ struct WallpaperExploreContentView: View {
 
 // MARK: - Grid Configuration
 
-private struct WallpaperGridConfig {
+/// 瀑布流网格容器。使用 HStack + 多列 LazyVStack 实现瀑布流效果。
+/// 每列内使用 LazyVStack 提供懒加载（仅创建可见区域内的卡片）。
+private struct WallpaperGridContainerView: View, Equatable {
+    let wallpapers: [Wallpaper]
+    let layoutKey: WallpaperWaterfallLayoutKey
+    let layoutCache: WallpaperWaterfallLayoutCache
+    let config: WallpaperGridConfig
+    let favoriteIDs: Set<Wallpaper.ID>
+    let onSelect: (Wallpaper) -> Void
+
+    var body: some View {
+        let columnItems = layoutCache.columns(for: wallpapers, key: layoutKey, config: config)
+
+        HStack(alignment: .top, spacing: config.spacing) {
+            ForEach(0..<config.columnCount, id: \.self) { columnIndex in
+                LazyVStack(spacing: config.spacing) {
+                    ForEach(columnItems[safe: columnIndex] ?? []) { wallpaper in
+                        WallpaperCardView(
+                            wallpaper: wallpaper,
+                            isFavorite: favoriteIDs.contains(wallpaper.id),
+                            cardWidth: config.cardWidth
+                        ) {
+                            onSelect(wallpaper)
+                        }
+                        // ⚡ 显式设定卡片高度，让 LazyVStack 无需创建子视图即
+                        // 可估算列总高度，确保真正的懒加载行为。
+                        .frame(height: WallpaperCardView.estimatedHeight(
+                            cardWidth: config.cardWidth,
+                            wallpaper: wallpaper
+                        ))
+                    }
+                }
+                .frame(width: config.cardWidth)
+            }
+        }
+    }
+
+    nonisolated static func == (lhs: WallpaperGridContainerView, rhs: WallpaperGridContainerView) -> Bool {
+        lhs.layoutKey == rhs.layoutKey &&
+        lhs.config == rhs.config &&
+        lhs.favoriteIDs == rhs.favoriteIDs
+    }
+}
+
+private struct WallpaperWaterfallLayoutKey: Equatable {
+    let ids: [Wallpaper.ID]
+    let columnCount: Int
+    let cardWidth: CGFloat
+    let spacing: CGFloat
+}
+
+@MainActor
+private final class WallpaperWaterfallLayoutCache {
+    private var cachedKey: WallpaperWaterfallLayoutKey?
+    private var cachedColumns: [[Wallpaper]] = []
+
+    func columns(
+        for wallpapers: [Wallpaper],
+        key: WallpaperWaterfallLayoutKey,
+        config: WallpaperGridConfig
+    ) -> [[Wallpaper]] {
+        if cachedKey == key {
+            return cachedColumns
+        }
+
+        let columns = ExploreGridLayout.waterfallColumns(
+            items: wallpapers,
+            columnCount: config.columnCount,
+            cardWidth: config.cardWidth,
+            spacing: config.spacing,
+            heightProvider: { wallpaper in
+                WallpaperCardView.estimatedHeight(cardWidth: config.cardWidth, wallpaper: wallpaper)
+            }
+        )
+        cachedKey = key
+        cachedColumns = columns
+        return columns
+    }
+}
+
+private struct WallpaperGridConfig: Equatable {
     let columnCount: Int
     let spacing: CGFloat
     let cardWidth: CGFloat
@@ -1242,12 +1383,15 @@ private struct WallpaperGridConfig {
         self.spacing = 16
         let totalSpacing = spacing * CGFloat(columnCount - 1)
         self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-        // 移除 cardHeight 计算，让卡片自动计算高度
-        // 使用 flexible 而非 fixed，让卡片自然布局
         self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
     }
 
-    // 移除强制高度计算方法
+    static func == (lhs: WallpaperGridConfig, rhs: WallpaperGridConfig) -> Bool {
+        lhs.columnCount == rhs.columnCount &&
+        lhs.spacing == rhs.spacing &&
+        lhs.cardWidth == rhs.cardWidth &&
+        lhs.contentWidth == rhs.contentWidth
+    }
 }
 
 // MARK: - Enums

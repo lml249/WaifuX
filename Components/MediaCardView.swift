@@ -120,7 +120,7 @@ struct MediaCardView: View {
             } else {
                 KFImage(staticDisplayURL)
                     .setProcessor(DownsamplingImageProcessor(size: targetSize))
-                    .backgroundDecode()
+                    // DownsamplingImageProcessor 已通过 CGImageSourceCreateThumbnailAtIndex 解码
                     .cacheMemoryOnly(false)
                     .memoryCacheExpiration(.seconds(300))
                     .fade(duration: 0.25)

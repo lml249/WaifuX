@@ -26,6 +26,11 @@ public struct DynamicTextEntry: Codable, Equatable, Sendable {
     /// 从 text.scriptproperties.format 提取；nil 表示未知（回退到完整时间 "HH:mm"）
     public var format: String? = nil
 
+    /// C++ V8 引擎执行脚本后的实际文本内容（优先于 value 使用）
+    public var resolvedText: String? = nil
+    /// C++ FreeType 实际渲染的像素高度（scene 坐标，已含 scaleY）
+    public var rasterHeight: Double? = nil
+
     /// renderer sidecar 中的原始文本对象字段（用于按 Wallpaper Engine 场景坐标恢复 overlay）。
     public var id: String? = nil
     public var x: Double? = nil
@@ -146,19 +151,52 @@ public enum WallpaperDynamicTextParser {
             let behavior = detectBehavior(name: name, script: script, format: format)
             // 不再过滤 "unknown" 行为：所有可见文本对象都应保留到 overlay 中，
             // 即使无法检测行为类型。renderedText 的 default 分支会显示原始 value。
-            entries.append(DynamicTextEntry(
+            var entry = DynamicTextEntry(
                 behavior: behavior,
                 name: name,
                 script: script,
                 value: value,
                 visible: visible,
                 format: format
-            ))
+            )
+            // 从 scene.json 对象层读取位置/变换信息
+            entry.id = obj["id"] as? String
+            entry.x = readDouble(obj["x"])
+            entry.y = readDouble(obj["y"])
+            entry.originX = readDouble(obj["originX"])
+            entry.originY = readDouble(obj["originY"])
+            entry.finalOriginX = readDouble(obj["finalOriginX"] ?? obj["originX"])
+            entry.finalOriginY = readDouble(obj["finalOriginY"] ?? obj["originY"])
+            entry.finalX = readDouble(obj["finalX"] ?? obj["x"])
+            entry.finalY = readDouble(obj["finalY"] ?? obj["y"])
+            entry.width = readDouble(obj["width"])
+            entry.height = readDouble(obj["height"])
+            entry.maxWidth = readDouble(obj["maxWidth"])
+            entry.scaleX = readDouble(obj["scaleX"])
+            entry.scaleY = readDouble(obj["scaleY"])
+            entry.finalScaleX = readDouble(obj["finalScaleX"] ?? obj["scaleX"])
+            entry.finalScaleY = readDouble(obj["finalScaleY"] ?? obj["scaleY"])
+            entry.rotation = readDouble(obj["rotation"])
+            entry.finalAngle = readDouble(obj["finalAngle"] ?? obj["rotation"])
+            // 从 textProperties 层读取字体/颜色
+            entry.fontFamily = (tp["font"] as? String) ?? (tp["fontFamily"] as? String)
+            entry.fontSize = readDouble(tp["fontSize"] ?? tp["size"])
+            entry.effectiveFontSize = readDouble(tp["effectiveFontSize"])
+            entry.fontPath = tp["fontPath"] as? String
+            entry.color = tp["color"] as? [Double] ?? (tp["color"] as? [NSNumber])?.map(\.doubleValue)
+            entry.alpha = readDouble(tp["alpha"])
+            entry.alignment = (tp["align"] as? String) ?? (tp["alignment"] as? String)
+            if let renderOrder = readDouble(obj["renderOrder"]) {
+                entry.renderOrder = Int(renderOrder)
+            }
+            entries.append(entry)
         }
 
         return WallpaperDynamicTextsInfo(
             hasDynamicText: !entries.isEmpty,
             entries: entries,
+            sceneWidth: readDouble(scene["width"]),
+            sceneHeight: readDouble(scene["height"]),
             extractedAt: Date()
         )
     }
@@ -240,6 +278,18 @@ public enum WallpaperDynamicTextParser {
     }
 
     // MARK: - Sidecar 文件管理
+
+    /// 从 JSON 值读取 Double（兼容 NSNumber / Double / Int）
+    private static func readDouble(_ value: Any?) -> Double? {
+        switch value {
+        case let d as Double: return d
+        case let f as Float: return Double(f)
+        case let i as Int: return Double(i)
+        case let n as NSNumber: return n.doubleValue
+        case let s as String: return Double(s.trimmingCharacters(in: .whitespacesAndNewlines))
+        default: return nil
+        }
+    }
 
     /// Sidecar JSON 路径约定：与 MP4 同目录同名 .json
     public static func sidecarPath(for videoURL: URL) -> URL {
@@ -362,6 +412,9 @@ private extension WallpaperDynamicTextParser {
             visible: legacyBool(object["visible"]) ?? true,
             format: format
         )
+        // 读取 C++ V8 已解析的文本结果
+        entry.resolvedText = legacyString(object["value"])
+        entry.rasterHeight = legacyDouble(object["rasterHeight"])
         entry.id = legacyString(object["id"])
         entry.x = legacyDouble(object["x"])
         entry.y = legacyDouble(object["y"])

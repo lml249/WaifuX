@@ -24,8 +24,6 @@ class WorkshopViewModel: ObservableObject {
 
     // MARK: - Internal State
 
-    /// 内存保护：列表缓存上限，超出上限时丢弃最旧条目。
-    private static let maxCachedItems = 300
     private var currentPage = 1
     private let pageSize = 20
     private var currentSearchTask: Task<Void, Never>?
@@ -155,12 +153,8 @@ class WorkshopViewModel: ObservableObject {
     // MARK: - 内存压力处理
 
     private func handleMemoryPressure() {
-        print("[WorkshopViewModel] 内存压力，释放缓存: wallpapers=\(wallpapers.count)")
+        print("[WorkshopViewModel] 内存压力，取消网络请求: wallpapers=\(wallpapers.count)")
         currentSearchTask?.cancel()
-        // 裁剪列表：仅保留最近 2 页（~40 条）
-        if wallpapers.count > 40 {
-            wallpapers = Array(wallpapers.suffix(40))
-        }
     }
 
     // MARK: - Download

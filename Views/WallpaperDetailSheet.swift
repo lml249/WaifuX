@@ -22,6 +22,10 @@ struct WallpaperDetailSheet: View {
     @State private var showInfoBubble = false
     @State private var isHeroContentHidden = false
     @State private var showDeleteConfirm = false
+    /// 竖图模式下全分辨率图加载一次，供模糊延伸层与主图层共用
+    @State private var sharedPortraitImage: NSImage?
+    /// 竖图加载任务跟踪，防止快速切换时旧任务覆盖新图片
+    @State private var portraitLoadTask: Task<Void, Never>?
 
     // MARK: - 键盘快捷键与滑动动画
     @State private var keyboardMonitor: Any?
@@ -344,38 +348,30 @@ struct WallpaperDetailSheet: View {
         ZStack {
             Color.black
 
-            // 左右延伸层：大幅降采样（模糊/拉伸后无需高清），节省解码开销
-            KFImage(heroImageURL)
-                .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 300, height: 300)))
-                .backgroundDecode()
-                .placeholder { _ in Color.clear }
-                .resizable()
-                .scaledToFit()
-                .frame(width: width, height: height)
-                .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
-                .blur(radius: 84)
-                .saturation(1.12)
-                .brightness(-0.08)
-                .mask(portraitWallpaperSideMask)
+            if let image = sharedPortraitImage {
+                // 左右延伸层：使用已加载的全分辨率图大幅降采样（模糊/拉伸后无需高清）
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.low)
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .scaleEffect(x: 2.25, y: 1.14, anchor: .center)
+                    .blur(radius: 84)
+                    .saturation(1.12)
+                    .brightness(-0.08)
+                    .mask(portraitWallpaperSideMask)
 
-            // 主图：降采样到屏幕分辨率，避免解码 4K/8K 全尺寸位图
-            let scale = NSScreen.main?.backingScaleFactor ?? 2
-            let downsampleSize = CGSize(width: width * scale, height: height * scale)
-            KFImage(heroImageURL)
-                .setProcessor(DownsamplingImageProcessor(size: downsampleSize))
-                .backgroundDecode()
-                .fade(duration: 0.3)
-                .onSuccess { _ in
-                    isImageLoaded = true
-                }
-                .onFailure { _ in
-                    isImageLoaded = true
-                }
-                .placeholder { _ in Color.clear }
-                .resizable()
-                .scaledToFit()
-                .frame(width: width, height: height)
-                .shadow(color: Color.black.opacity(0.32), radius: 42, y: 18)
+                // 主图：降采样到屏幕分辨率（用已加载的同一张图，不再重复请求网络）
+                let scale = NSScreen.main?.backingScaleFactor ?? 2
+                let downsampleSize = CGSize(width: width * scale, height: height * scale)
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFit()
+                    .frame(width: width, height: height)
+                    .shadow(color: Color.black.opacity(0.32), radius: 42, y: 18)
+            }
+            // 图片未加载时保持黑色背景（LoadingOverlay 覆盖期间不可见）
 
             LinearGradient(
                 stops: [
@@ -391,6 +387,57 @@ struct WallpaperDetailSheet: View {
         }
         .frame(width: width, height: height, alignment: .center)
         .clipped()
+        // 壁纸变化时重新加载；利用 Kingfisher 缓存，多数情况秒读
+        .onChange(of: wallpaper.id) { _, _ in
+            loadPortraitImage()
+        }
+        .onAppear {
+            loadPortraitImage()
+        }
+    }
+
+    /// 竖图专用：通过 Kingfisher 下载/缓存一次全分辨率图，供两个图层共用
+    private func loadPortraitImage() {
+        guard let url = heroImageURL else {
+            isImageLoaded = true
+            return
+        }
+        // 取消前一次加载任务，避免快速切换时旧结果覆盖新壁纸
+        portraitLoadTask?.cancel()
+        // 重置共享图片（触发黑色背景，LoadingOverlay 保持显示）
+        sharedPortraitImage = nil
+        isImageLoaded = false
+
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1512, height: 982)
+        let downsampleSize = CGSize(
+            width: max(screenSize.width, screenSize.height) * scale,
+            height: min(screenSize.width, screenSize.height) * scale
+        )
+
+        portraitLoadTask = Task {
+            do {
+                let result = try await KingfisherManager.shared.retrieveImage(
+                    with: url,
+                    options: [
+                        .processor(DownsamplingImageProcessor(size: downsampleSize)),
+                        .backgroundDecode
+                    ]
+                )
+                try Task.checkCancellation()
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    sharedPortraitImage = result.image
+                    isImageLoaded = true
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    isImageLoaded = true
+                }
+            }
+        }
     }
 
     private var portraitWallpaperSideMask: some View {

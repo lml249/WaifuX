@@ -61,7 +61,7 @@ struct AnimeCardView: View {
 
         KFImage(url)
             .setProcessor(DownsamplingImageProcessor(size: CGSize(width: targetWidth, height: targetHeight)))
-            .backgroundDecode()
+            // DownsamplingImageProcessor 已通过 CGImageSourceCreateThumbnailAtIndex 解码
             .cacheMemoryOnly(false)
             .memoryCacheExpiration(.seconds(300))
             .placeholder { Color.black.opacity(0.4) }

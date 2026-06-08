@@ -157,18 +157,27 @@ final class MediaExploreViewModel: ObservableObject {
             }
         }
 
-        // 监听 Service 数据变化：递增 revision 立即触发 UI 刷新，缓存重建延迟执行避免阻塞主线程
+        // MARK: - 优化后的 Service 数据变更监听：保护主线程免受 I/O 阻塞
         Publishers.Merge3(
             mediaLibrary.$favoriteRecords.map { _ in () },
             mediaLibrary.$downloadRecords.map { _ in () },
             localScanner.$scanRevision.map { _ in () }
         )
-        .receive(on: DispatchQueue.main)
+        // 1. ⚙️ 不要在主线程接收原始通知，直接在当前的后台或默认管道处理
         .sink { [weak self] _ in
             guard let self else { return }
-            // 先递增 revision，触发 UI 立即使用 Set 索引做 O(1) 查询
-            self.libraryContentRevision &+= 1
-            self.scheduleLocalMediaCacheRebuild(delayNanoseconds: 100_000_000)
+
+            // 2. 🚀 调度缓存重建（scheduleLocalMediaCacheRebuild 本身只是取消旧 Task + 创建新 Task，
+            // 核心重算 rebuildLocalMediaCache 内部已用 Task.detached 投到后台 Utility 线程，
+            // 此处仅需轻量调度，不会阻塞主线程。）
+            Task { @MainActor [weak self] in
+                self?.scheduleLocalMediaCacheRebuild(delayNanoseconds: 100_000_000)
+            }
+
+            // 3. 🎨 仅仅将极其轻量的版本号递增（O(1) 状态变更）交还给主线程驱动 UI
+            Task { @MainActor [weak self] in
+                self?.libraryContentRevision &+= 1
+            }
         }
         .store(in: &cancellables)
 
@@ -872,9 +881,8 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
-        invalidatePreservedExploreFeed()
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        items = []
+        // ⚠️ 不再清空 items，新数据到达前保持旧列表可见，
+        // 防止 SwiftUI 全量销毁→重建视图树导致的 AttributeGraph 主线程卡死。
 
         defer { isLoading = false }
         errorMessage = nil
@@ -920,9 +928,7 @@ final class MediaExploreViewModel: ObservableObject {
             return
         }
 
-        invalidatePreservedExploreFeed()
-        // 清空旧搜索结果，避免新搜索时残留上一轮的图片
-        items = []
+        // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
 
         defer { isLoading = false }
         errorMessage = nil
@@ -1730,8 +1736,7 @@ final class MediaExploreViewModel: ObservableObject {
         isLoading = true
         errorMessage = nil
 
-        // 清空旧结果，避免新请求时残留上一轮的图片
-        items = []
+        // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
 
         defer { isLoading = false }
 
@@ -1835,6 +1840,11 @@ final class MediaExploreViewModel: ObservableObject {
     }
 
     // MARK: - Dynamic Wallpaper (DongTai) 数据加载
+
+    /// ✅ O(1) 收藏 ID 集合，供视图在 ForEach 中直接读取。
+    var favoriteIDSet: Set<String> {
+        Set(mediaLibrary.favoriteItems.map(\.id))
+    }
 
     /// 检查当前是否使用 DongTai 数据源
     var isUsingDongTai: Bool {
@@ -2015,7 +2025,7 @@ final class MediaExploreViewModel: ObservableObject {
 
         isLoading = true
         errorMessage = nil
-        items = []
+        // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
 
         defer {
             // 只有当前世代（未被更新的请求覆盖）才清除加载状态
@@ -2144,7 +2154,7 @@ final class MediaExploreViewModel: ObservableObject {
 
         isLoading = true
         errorMessage = nil
-        items = []
+        // ⚠️ 不再清空 items，新数据到达前保持旧列表可见。
 
         defer { isLoading = false }
 

@@ -3,6 +3,49 @@ import Kingfisher
 import AppKit
 import AVFoundation
 
+// MARK: - Scroll 偏移量追踪 PreferenceKey
+private struct LibraryMainScrollOffsetPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Scroll 恢复辅助组件
+/// 嵌入 ScrollView 内容中，当 `restoreTrigger` 变化时查找父级 NSScrollView 并恢复滚动偏移。
+private struct LibraryScrollRestoreTrigger: NSViewRepresentable {
+    let targetOffset: CGFloat
+    let restoreTrigger: Int
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        scheduleRestore(from: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        scheduleRestore(from: nsView)
+    }
+
+    private func scheduleRestore(from view: NSView) {
+        guard targetOffset > 0 else { return }
+        DispatchQueue.main.async {
+            var current = view.superview
+            while current != nil {
+                if let scrollView = current as? NSScrollView {
+                    let currentY = scrollView.contentView.bounds.origin.y
+                    if abs(currentY - targetOffset) > 1 {
+                        scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+                        scrollView.reflectScrolledClipView(scrollView.contentView)
+                    }
+                    break
+                }
+                current = current?.superview
+            }
+        }
+    }
+}
+
 struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
@@ -36,6 +79,14 @@ struct MyLibraryContentView: View {
     @State private var selectedItems = Set<String>()
 
     // 图片预加载由 onAppear 直接触发，无需追踪可见卡片 ID
+
+    // MARK: - Scroll 恢复
+    /// 当前 ScrollView 的 contentOffset.y
+    @State private var libraryMainScrollOffset: CGFloat = 0
+    /// 详情页导航前保存的滚动位置（>=0 表示需要恢复）
+    @State private var savedLibraryScrollOffset: CGFloat = -1
+    /// 恢复成功后自增，驱动 LibraryScrollRestorer 重新触发
+    @State private var libraryScrollRestoreToken: Int = 0
 
     // 壁纸比例筛选
     @State private var wallpaperRatioFilter: WallpaperRatioFilter = .all
@@ -174,6 +225,27 @@ struct MyLibraryContentView: View {
                     .padding(.bottom, 80)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .frame(minHeight: geometry.size.height)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(
+                                    key: LibraryMainScrollOffsetPreferenceKey.self,
+                                    value: -proxy.frame(in: .named("library-main-scroll")).origin.y
+                                )
+                        }
+                    )
+                    // ✅ 零尺寸辅助视图：从详情返回时恢复滚动位置
+                    .background(
+                        LibraryScrollRestoreTrigger(
+                            targetOffset: savedLibraryScrollOffset,
+                            restoreTrigger: libraryScrollRestoreToken
+                        )
+                        .frame(width: 0, height: 0)
+                    )
+                }
+                .coordinateSpace(name: "library-main-scroll")
+                .onPreferenceChange(LibraryMainScrollOffsetPreferenceKey.self) { newOffset in
+                    libraryMainScrollOffset = newOffset
                 }
             }
         }
@@ -186,6 +258,12 @@ struct MyLibraryContentView: View {
             }
             updateWallpaperItems()
             updateMediaItems()
+        }
+        .onAppear {
+            // ✅ 从详情返回时触发 ScrollView 滚动位置恢复
+            if savedLibraryScrollOffset > 0 {
+                libraryScrollRestoreToken += 1
+            }
         }
         .onReceive(animeFavoriteStore.$favorites) { _ in
             Task {
@@ -209,7 +287,8 @@ struct MyLibraryContentView: View {
             updateMediaItems()
         }
         .onChange(of: selectedSubTab) { _, _ in
-            // 切换子标签时重置文件夹导航
+            // 切换子标签时重置文件夹导航和滚动位置
+            savedLibraryScrollOffset = -1
             currentWallpaperFolderID = nil
             currentMediaFolderID = nil
             wallpaperFolderStack.removeAll()
@@ -242,7 +321,8 @@ struct MyLibraryContentView: View {
             stopLibraryPrefetchers()
         }
         .onChange(of: selectedContentType) { _, _ in
-            // 切换内容类型时重置编辑状态和文件夹导航
+            // 切换内容类型时重置编辑状态、文件夹导航和滚动位置
+            savedLibraryScrollOffset = -1
             isEditing = false
             selectedItems.removeAll()
             currentWallpaperFolderID = nil
@@ -352,6 +432,8 @@ struct MyLibraryContentView: View {
         viewModel.releaseForegroundMemory()
         mediaViewModel.releaseForegroundMemory()
 
+        savedLibraryScrollOffset = -1
+        libraryScrollRestoreToken &+= 1
         selectedWallpaper = nil
         selectedMedia = nil
         selectedAnime = nil
@@ -1559,6 +1641,7 @@ struct MyLibraryContentView: View {
                 )
         }
         .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: true, vertical: false)
         .pointingHandCursor()
     }
 
@@ -1833,6 +1916,7 @@ struct MyLibraryContentView: View {
         if isEditing {
             toggleSelection(wallpaper.id)
         } else {
+            savedLibraryScrollOffset = libraryMainScrollOffset
             wallpaperContext = wallpaperItems.map(\.wallpaper)
             selectedWallpaper = wallpaper
         }
@@ -1875,6 +1959,7 @@ struct MyLibraryContentView: View {
         if isEditing {
             toggleSelection(item.id)
         } else {
+            savedLibraryScrollOffset = libraryMainScrollOffset
             mediaContext = mediaItems.map(\.mediaItem)
             selectedMedia = item
         }
@@ -1884,6 +1969,7 @@ struct MyLibraryContentView: View {
         if isEditing {
             toggleSelection(anime.id)
         } else {
+            savedLibraryScrollOffset = libraryMainScrollOffset
             selectedAnime = anime
         }
     }

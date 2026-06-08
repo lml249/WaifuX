@@ -538,6 +538,8 @@ struct HomeContentView: View {
             await MainActor.run {
                 heroMediaItems = detailedItems
             }
+        } catch is CancellationError {
+            return
         } catch {
             AppLogger.error(.general, "Failed to fetch hero media items: \(error.localizedDescription)")
         }

@@ -63,6 +63,8 @@ struct AnimeExploreView: View {
     @State private var suppressNextSearchChange = false
     @State private var lastSyncedFirstAnimeID: String?
     @State private var loadMoreTask: Task<Void, Never>?
+    /// loadMore 冷却期，防止 contentSize 增长 → isNearBottom 翻转 → 立即重试的无限级联。
+    @State private var loadMoreCooldownUntil: Date? = nil
     @StateObject private var scrollCoordinator = AnimeExploreScrollCoordinator()
 
     private var shouldUseLightweightEffects: Bool {
@@ -357,6 +359,8 @@ struct AnimeExploreView: View {
                         ) {
                             selectedAnime = anime
                         }
+                        // ⚡ 显式设定卡片高度，让 LazyVStack 实现真正的懒加载。
+                        .frame(height: cardWidth * 1.4 + 44)
                     }
                 }
                 .frame(width: cardWidth)
@@ -428,11 +432,16 @@ struct AnimeExploreView: View {
                 )
             }, action: { oldValue, newValue in
                 if newValue.isNearBottom && !oldValue.isNearBottom {
+                    // ⛔ 冷却期内不触发 loadMore
+                    if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
                     guard !scrollCoordinator.wasNearBottom else { return }
                     scrollCoordinator.wasNearBottom = true
                     scheduleLoadMoreFromScroll()
                 } else if !newValue.isNearBottom && oldValue.isNearBottom {
-                    scrollCoordinator.wasNearBottom = false
+                    // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                        scrollCoordinator.wasNearBottom = false
+                    }
                 }
             })
             .scrollDisabled(!isVisible)
@@ -652,13 +661,15 @@ struct AnimeExploreView: View {
               !viewModel.isLoading,
               !isLoadingMore else { return }
 
+        // ⛔ 冷却期内不触发 loadMore（防止 contentSize 增长后的无限级联）
+        if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
+
         AppLogger.info(.anime, "加载更多", metadata: ["当前数量": viewModel.animeItems.count])
         isLoadingMore = true
         loadMoreFailed = false
         loadMoreTask?.cancel()
         loadMoreTask = Task { @MainActor in
             defer {
-                isLoadingMore = false
                 loadMoreTask = nil
             }
             guard !Task.isCancelled else { return }
@@ -667,6 +678,12 @@ struct AnimeExploreView: View {
             guard !Task.isCancelled else { return }
             if viewModel.hasMorePages && viewModel.errorMessage != nil {
                 loadMoreFailed = true
+            }
+            // ⚡ 设置 1.5s 冷却期，防止 contentSize 增长后的无限级联
+            loadMoreCooldownUntil = Date().addingTimeInterval(1.5)
+            // 延迟释放 isLoadingMore 给 contentSize 稳定时间
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                isLoadingMore = false
             }
         }
     }
@@ -684,11 +701,16 @@ struct AnimeExploreView: View {
         guard isVisible, viewportHeight > 0, sentinelMinY.isFinite else { return }
         let isNearBottom = sentinelMinY <= viewportHeight + Self.loadMoreTriggerThreshold
         if isNearBottom {
+            // ⛔ 冷却期内不触发 loadMore
+            if let cooldown = loadMoreCooldownUntil, Date() < cooldown { return }
             guard !scrollCoordinator.wasNearBottom else { return }
             scrollCoordinator.wasNearBottom = true
             scheduleLoadMoreFromScroll()
         } else {
-            scrollCoordinator.wasNearBottom = false
+            // ⚡ 延迟重置 wasNearBottom，给 contentSize 足够时间稳定
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
+                scrollCoordinator.wasNearBottom = false
+            }
         }
     }
 
