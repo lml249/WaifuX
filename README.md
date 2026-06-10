@@ -78,24 +78,19 @@
 
 ## 📥 安装
 
-### 方式一：官网下载（推荐）
-
-👉 **[https://github.com/lml249/WaifuX](https://github.com/lml249/WaifuX)**
-
-### 方式二：GitHub Releases
+### 方式一：GitHub Releases（推荐）
 
 👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### 方式三：Homebrew
+### 方式二：源码构建
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
 
-### 方式四：夸克网盘
-
-👉 **[https://pan.quark.cn/s/aa3ed02db5cf](https://pan.quark.cn/s/aa3ed02db5cf)**
+在 Xcode 中选择 WaifuX scheme 后构建运行。
 
 > ⚠️ 首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行。
 
@@ -217,7 +212,8 @@ WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristj
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 

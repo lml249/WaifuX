@@ -78,20 +78,19 @@
 
 ## 📥 Installation
 
-### Method 1: Official Website (Recommended)
-
-👉 **[https://github.com/lml249/WaifuX](https://github.com/lml249/WaifuX)**
-
-### Method 2: GitHub Releases
+### Method 1: GitHub Releases (Recommended)
 
 👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### Method 3: Homebrew
+### Method 2: Build from Source
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
+
+Select the WaifuX scheme in Xcode, then build and run.
 
 > ⚠️ On first launch, you may need to allow execution in "System Settings → Privacy & Security".
 
@@ -209,7 +208,8 @@ This application is provided **"AS IS"**, and the developer assumes no liability
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 

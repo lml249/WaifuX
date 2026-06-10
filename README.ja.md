@@ -78,20 +78,19 @@
 
 ## 📥 インストール
 
-### 方法1：公式ウェブサイト（推奨）
-
-👉 **[https://github.com/lml249/WaifuX](https://github.com/lml249/WaifuX)**
-
-### 方法2：GitHub Releases
+### 方法1：GitHub Releases（推奨）
 
 👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### 方法3：Homebrew
+### 方法2：ソースからビルド
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
+
+Xcode で WaifuX scheme を選択してビルド・実行してください。
 
 > ⚠️ 初回起動時、「システム設定 → プライバシーとセキュリティ」で実行許可が必要な場合があります。
 
@@ -209,7 +208,8 @@ WaifuX は **Wallpaper Engine の公式製品ではありません**。Valve Cor
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 
