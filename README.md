@@ -17,22 +17,22 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/lml249/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/WaifuX/forks">
-    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/lml249/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/lml249/WaifuX?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/lml249/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/WaifuX">
+  <a href="https://github.com/lml249/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -80,11 +80,11 @@
 
 ### 方式一：官网下载（推荐）
 
-👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
+👉 **[https://github.com/lml249/WaifuX](https://github.com/lml249/WaifuX)**
 
 ### 方式二：GitHub Releases
 
-👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
+👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
 ### 方式三：Homebrew
 
@@ -120,7 +120,7 @@ WaifuX 的主要数据源 [Wallhaven](https://wallhaven.cc) 托管在海外服�
 
 WaifuX 采用动态规则机制，爬取逻辑与客户端分离：
 
-- 规则托管于独立仓库：**[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
+- 规则托管于独立仓库：**[WaifuX-Profiles](https://github.com/lml249/WaifuX-Profiles)**
 - 应用启动时自动同步最新规则
 - 支持用户自定义导入规则
 - 源站页面结构调整时，仅需更新规则即可适配，无需发版
@@ -210,7 +210,7 @@ WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristj
 ## 🌟 Star 历史
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=lml249/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
@@ -222,7 +222,7 @@ WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristj
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?style=social" alt="Stars">
   </a>
 </p>

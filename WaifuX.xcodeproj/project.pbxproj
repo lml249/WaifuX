@@ -1101,7 +1101,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.110;
+				MARKETING_VERSION = 38.0.117;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"$(SRCROOT)/Resources/zip_data.o",
@@ -1199,7 +1199,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.110;
+				MARKETING_VERSION = 38.0.117;
 				PRODUCT_BUNDLE_IDENTIFIER = com.claretmoon.waifux.app.wallpaperextension;
 				PRODUCT_NAME = WaifuXWallpaperExtension;
 				SDKROOT = macosx;
@@ -1225,7 +1225,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.110;
+				MARKETING_VERSION = 38.0.117;
 				PRODUCT_BUNDLE_IDENTIFIER = com.claretmoon.waifux.app.wallpaperextension;
 				PRODUCT_NAME = WaifuXWallpaperExtension;
 				SDKROOT = macosx;
@@ -1311,7 +1311,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 38.0.110;
+				MARKETING_VERSION = 38.0.117;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"$(SRCROOT)/Resources/zip_data.o",
