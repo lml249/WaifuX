@@ -350,10 +350,12 @@ class ExploreGridItem: NSCollectionViewItem {
         }
         let dur = max(animatedFrames[currentFrameIndex].duration, 0.05)
         animationTimer = Timer.scheduledTimer(withTimeInterval: dur, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            currentFrameIndex = (currentFrameIndex + 1) % animatedFrames.count
-            coverImageView.image = animatedFrames[currentFrameIndex].image
-            advanceFrameRepeating()
+            Task { @MainActor [weak self] in
+                guard let self, !self.animatedFrames.isEmpty else { return }
+                self.currentFrameIndex = (self.currentFrameIndex + 1) % self.animatedFrames.count
+                self.coverImageView.image = self.animatedFrames[self.currentFrameIndex].image
+                self.advanceFrameRepeating()
+            }
         }
     }
 
@@ -610,7 +612,7 @@ class ExploreGridItem: NSCollectionViewItem {
 enum ExploreGridSkeletonStyle {
     case wallpaper
     case media
-    case anime
+    case portrait
 }
 
 final class ExploreGridSkeletonCell: ExploreGridItem {
@@ -619,10 +621,10 @@ final class ExploreGridSkeletonCell: ExploreGridItem {
         static let imageCornerRadius: CGFloat = 14
         static let bottomBarHeight: CGFloat = 44
         static let horizontalPadding: CGFloat = 14
-        static let animeTitleY: CGFloat = 18
-        static let animeEpisodeY: CGFloat = 8
-        static let animeBadgeTop: CGFloat = 10
-        static let animeBadgeTrailing: CGFloat = 8
+        static let portraitTitleY: CGFloat = 18
+        static let portraitSubtitleY: CGFloat = 8
+        static let portraitBadgeTop: CGFloat = 10
+        static let portraitBadgeTrailing: CGFloat = 8
     }
 
     private let imageSkeletonView: NSView = {
@@ -683,7 +685,7 @@ final class ExploreGridSkeletonCell: ExploreGridItem {
         guard let style = item as? ExploreGridSkeletonStyle else { return }
         skeletonStyle = style
         switch style {
-        case .wallpaper, .anime:
+        case .wallpaper, .portrait:
             imageSkeletonView.layer?.backgroundColor = NSColor(calibratedRed: 0.11, green: 0.14, blue: 0.19, alpha: 1).cgColor
             bottomBar.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.46).cgColor
         case .media:
@@ -712,35 +714,35 @@ final class ExploreGridSkeletonCell: ExploreGridItem {
         case .media:
             leadingWidth = min(max(72, bounds.width * 0.34), bounds.width - 100)
             trailingWidth = 50
-        case .anime:
+        case .portrait:
             leadingWidth = min(max(80, bounds.width * 0.48), bounds.width - 90)
             trailingWidth = 40
         }
 
-        if skeletonStyle == .anime {
+        if skeletonStyle == .portrait {
             leadingSkeleton.frame = CGRect(
                 x: Layout.horizontalPadding,
-                y: Layout.animeTitleY,
+                y: Layout.portraitTitleY,
                 width: max(56, min(bounds.width - Layout.horizontalPadding * 2, leadingWidth)),
                 height: 12
             ).integral
             secondaryDotSkeleton.frame = CGRect(
                 x: Layout.horizontalPadding,
-                y: Layout.animeEpisodeY + 1,
+                y: Layout.portraitSubtitleY + 1,
                 width: 10,
                 height: 10
             ).integral
             secondaryDotSkeleton.cornerRadius = 5
             secondaryLeadingSkeleton.frame = CGRect(
                 x: secondaryDotSkeleton.frame.maxX + 6,
-                y: Layout.animeEpisodeY,
+                y: Layout.portraitSubtitleY,
                 width: max(44, min(bounds.width - Layout.horizontalPadding * 2 - 16, bounds.width * 0.34)),
                 height: 10
             ).integral
             trailingSkeleton.frame = .zero
             topTrailingBadgeSkeleton.frame = CGRect(
-                x: bounds.width - Layout.animeBadgeTrailing - trailingWidth,
-                y: imageHeight - Layout.animeBadgeTop - 22,
+                x: bounds.width - Layout.portraitBadgeTrailing - trailingWidth,
+                y: imageHeight - Layout.portraitBadgeTop - 22,
                 width: trailingWidth,
                 height: 22
             ).integral

@@ -53,7 +53,7 @@ final class WallpaperState: Sendable {
                 let state = Unmanaged<WallpaperState>.fromOpaque(observer).takeUnretainedValue()
                 state.clearCaches()
             },
-            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            "com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
             .deliverImmediately
         )

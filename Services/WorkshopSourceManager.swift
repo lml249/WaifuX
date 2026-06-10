@@ -346,7 +346,7 @@ class WorkshopSourceManager: ObservableObject {
     /// 获取 SteamCMD 工作目录
     func steamCMDWorkingDirectory() -> URL? {
         if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
+            let destDir = appSupport.appendingPathComponent("com.claretmoon.waifux.app/steamcmd", isDirectory: true)
             if FileManager.default.fileExists(atPath: destDir.path) {
                 return destDir
             }
@@ -388,7 +388,7 @@ class WorkshopSourceManager: ObservableObject {
     // 用户侧：安装/打开 App 即可，无需自己找路径。首次使用 Workshop 下载时，若尚未准备可写副本，
     // 会自动把 **App 内已打包的** `Contents/Resources/steamcmd/` 复制到 Application Support（见 `steamCMDExecutableURL()`）。
     // 原因：Valve 的 `steamcmd.sh` 会在运行目录写入更新与 `config/` 登录缓存，`.app` 内 Resources 在正式安装环境下通常不可写，
-    // 因此工作副本固定在 `~/Library/Application Support/com.waifux.app/steamcmd/`，避免自更新/登录失败。
+    // 因此工作副本固定在 `~/Library/Application Support/com.claretmoon.waifux.app/steamcmd/`，避免自更新/登录失败。
     //
     // 开发侧：`Resources/steamcmd/` 已随仓库提交即可直接构建；更新二进制时运行 `scripts/sync-steamcmd-into-resources.sh`（默认拉官方包）。
 
@@ -432,7 +432,7 @@ class WorkshopSourceManager: ObservableObject {
             steamCMDLastSetupError = "无法定位用户 Application Support 目录"
             return nil
         }
-        let destDir = appSupport.appendingPathComponent("com.waifux.app/steamcmd", isDirectory: true)
+        let destDir = appSupport.appendingPathComponent("com.claretmoon.waifux.app/steamcmd", isDirectory: true)
         let script = destDir.appendingPathComponent("steamcmd.sh")
 
         // 如果 Application Support 中已有可工作的副本，直接返回

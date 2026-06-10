@@ -36,7 +36,7 @@ final class WallpaperPrefs: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: PrefsFile())
 
     private static var sharedContainerURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app")
     }
 
     private static var prefsURL: URL? {
@@ -128,7 +128,7 @@ final class WallpaperPrefs: @unchecked Sendable {
             { _, _, _, _, _ in
                 WallpaperPrefs.shared.reload()
             },
-            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            "com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
             .deliverImmediately
         )
@@ -183,7 +183,7 @@ final class WallpaperPrefs: @unchecked Sendable {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
-            CFNotificationName("com.waifux.app.wallpaper.stateChanged" as CFString),
+            CFNotificationName("com.claretmoon.waifux.app.wallpaper.stateChanged" as CFString),
             nil, nil, true
         )
     }

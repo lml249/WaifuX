@@ -1,7 +1,7 @@
 import Foundation
 import Accelerate
 import Combine
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import AVFoundation
 
 // MARK: - 系统音频捕获服务

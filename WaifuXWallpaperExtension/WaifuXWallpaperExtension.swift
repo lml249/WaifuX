@@ -174,7 +174,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                     exit(0)
                 }
             },
-            "com.waifux.app.wallpaper.appWillTerminate" as CFString,
+            "com.claretmoon.waifux.app.wallpaper.appWillTerminate" as CFString,
             nil,
             .deliverImmediately
         )
@@ -296,7 +296,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
 
     @discardableResult
     private static func pollAndHandleSocketCommand() -> Bool {
-        guard let socketPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+        guard let socketPath = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app")?
             .appendingPathComponent("socket/extension.ipc").path
         else { return false }
 
@@ -419,7 +419,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
                     WaifuXWallpaperExtension.drainPendingSocketCommands(reason: "prefsChanged")
                 }
             },
-            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            "com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
             .deliverImmediately
         )
@@ -455,7 +455,7 @@ final class WaifuXWallpaperExtension: NSObject, AppExtension {
 // MARK: - Logging
 
 private var extLogFileURL: URL {
-    if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+    if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") {
         return container.appendingPathComponent("waifux-extension.log")
     }
     return URL(fileURLWithPath: "/tmp/waifux-extension.log")

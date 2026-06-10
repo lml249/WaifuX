@@ -13,8 +13,8 @@ import AVFoundation
 import Foundation
 import os
 
-private let appLog = OSLog(subsystem: "com.waifux.app", category: "ExtensionIPC")
-private let appWillTerminateNotificationName = "com.waifux.app.wallpaper.appWillTerminate"
+private let appLog = OSLog(subsystem: "com.claretmoon.waifux.app", category: "ExtensionIPC")
+private let appWillTerminateNotificationName = "com.claretmoon.waifux.app.wallpaper.appWillTerminate"
 
 // MARK: - IPC 协议类型（与服务端兼容）
 
@@ -53,7 +53,7 @@ struct IPCCommand: Codable {
 
 /// Socket 文件路径
 private var socketURL: URL? {
-    FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+    FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app")?
         .appendingPathComponent("socket/extension.ipc")
 }
 
@@ -502,7 +502,7 @@ final class WallpaperExtensionSocketServer: @unchecked Sendable {
             return nil
         }
 
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
             return nil
         }
 

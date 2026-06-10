@@ -41,7 +41,7 @@ final class LockScreenWallpaperService {
     /// 已写入共享容器的视频 ID 集合（兼容旧缓存清理）
     private var deployedVideoIDs: Set<String> = []
 
-    private let appGroupID = "group.com.waifux.app"
+    private let appGroupID = "group.com.claretmoon.waifux.app"
     private let prefsFileName = "waifux-wallpaper-prefs.json"
     private let videoDirName = "WallpaperVideos"
     private let imageDirName = "WallpaperImages"
@@ -343,7 +343,7 @@ final class LockScreenWallpaperService {
         let center = CFNotificationCenterGetDarwinNotifyCenter()
         CFNotificationCenterPostNotification(
             center,
-            CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
+            CFNotificationName("com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString),
             nil, nil, true
         )
     }

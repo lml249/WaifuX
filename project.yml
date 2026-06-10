@@ -1,6 +1,6 @@
 name: WaifuX
 options:
-  bundleIdPrefix: com.waifux
+  bundleIdPrefix: com.claretmoon.waifux
   deploymentTarget:
     macOS: "14.0"
   xcodeVersion: "26.4"
@@ -34,7 +34,7 @@ packages:
 settings:
   base:
     CODE_SIGN_STYLE: Automatic
-    DEVELOPMENT_TEAM: H6W325NJX2
+    DEVELOPMENT_TEAM: C34THSBXT4
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: YES
 
@@ -64,21 +64,18 @@ targets:
           - zip_data.o
           - zip_accessor.c
           - zip_accessor.o
-      - path: AnimeRules
-        type: folder
-        buildPhase: resources
       # 根目录源文件（未被以上子目录覆盖）
       - path: WallpaperEngineEmbeddedAssets.swift
     settings:
       base:
         PRODUCT_NAME: WaifuX
-        PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.claretmoon.waifux.app
         MARKETING_VERSION: 38.0.116
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: H6W325NJX2
+        DEVELOPMENT_TEAM: C34THSBXT4
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_FILE: App/Info.plist
@@ -295,23 +292,23 @@ targets:
       properties:
         com.apple.security.network.client: true
         com.apple.security.application-groups:
-          - group.com.waifux.app
+          - group.com.claretmoon.waifux.app
 
   WaifuXWallpaperExtension:
-    type: app-extension
+    type: extensionkit-extension
     platform: macOS
     sources:
       - path: WaifuXWallpaperExtension
     settings:
       base:
         PRODUCT_NAME: WaifuXWallpaperExtension
-        PRODUCT_BUNDLE_IDENTIFIER: com.waifux.app.wallpaperextension
+        PRODUCT_BUNDLE_IDENTIFIER: com.claretmoon.waifux.app.wallpaperextension
         MARKETING_VERSION: 38.0.116
         CURRENT_PROJECT_VERSION: 38
         SWIFT_VERSION: "6.0"
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: H6W325NJX2
+        DEVELOPMENT_TEAM: C34THSBXT4
         ENABLE_HARDENED_RUNTIME: YES
         INFOPLIST_FILE: WaifuXWallpaperExtension/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: WaifuXWallpaperExtension/WallpaperExtension-Bridging-Header.h

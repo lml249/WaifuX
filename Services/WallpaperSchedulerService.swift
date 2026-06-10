@@ -419,7 +419,8 @@ class WallpaperSchedulerService: ObservableObject {
                             from: videoURL,
                             posterURL: posterURL,
                             muted: VideoWallpaperManager.shared.isMuted,
-                            targetScreen: screen
+                            targetScreen: screen,
+                            pendingClearPolicy: .none
                         )
                         print("\(logTag) Auto-switch disabled for screen \(screenID) (was on-end mode), re-enabled looping")
                     }
@@ -455,7 +456,8 @@ class WallpaperSchedulerService: ObservableObject {
                             from: videoURL,
                             posterURL: posterURL,
                             muted: VideoWallpaperManager.shared.isMuted,
-                            targetScreen: screen
+                            targetScreen: screen,
+                            pendingClearPolicy: .none
                         )
                         print("\(logTag) Switched to on-end mode, reapplied wallpaper for screen \(screenID)")
                         return
@@ -480,7 +482,8 @@ class WallpaperSchedulerService: ObservableObject {
                             from: videoURL,
                             posterURL: posterURL,
                             muted: VideoWallpaperManager.shared.isMuted,
-                            targetScreen: screen
+                            targetScreen: screen,
+                            pendingClearPolicy: .none
                         )
                         print("\(logTag) Switched from on-end mode, reapplied wallpaper with looping for screen \(screenID)")
                     }
@@ -629,6 +632,10 @@ class WallpaperSchedulerService: ObservableObject {
 
         let displayConfig = config.resolvedDisplayConfig(for: screenID)
         let isOnEndMode = displayConfig.isOnEndMode
+        guard let schedulerSlotID = SpaceWallpaperCoordinator.shared.schedulerSlotIDIfAllowed(for: screen) else {
+            print("\(logTag) Screen \(screenID): current desktop slot is unavailable or has user pending action")
+            return false
+        }
 
         let fileURL = item.fileURL
         let ext = fileURL.pathExtension.lowercased()
@@ -658,10 +665,17 @@ class WallpaperSchedulerService: ObservableObject {
                     posterURL: posterURL,
                     muted: true,
                     targetScreen: screen,
-                    animatedTransition: true
+                    animatedTransition: true,
+                    pendingClearPolicy: .none
                 )
                 if let posterURL = posterURL {
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                    try await SpaceWallpaperCoordinator.shared.registerAppliedWallpaper(
+                        posterURL,
+                        for: screen,
+                        preferredSlotID: schedulerSlotID,
+                        pendingKind: .pendingSchedulerSet,
+                        runtimeState: .activeDynamic
+                    )
                 }
             } else if isDirectory || ext == "pkg" {
                 // 2. Workshop 目录 → 根据 project.json 类型分发
@@ -698,7 +712,9 @@ class WallpaperSchedulerService: ObservableObject {
                             // 通过 CLI web 渲染器渲染
                             try await WallpaperEngineXBridge.shared.setWallpaper(
                                 path: resolvedRoot.path,
-                                targetScreens: [screen]
+                                targetScreens: [screen],
+                                preferredSlotIDByScreenID: [screenID: schedulerSlotID],
+                                pendingKind: .pendingSchedulerSet
                             )
                             // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                             return true
@@ -721,10 +737,17 @@ class WallpaperSchedulerService: ObservableObject {
                                 posterURL: posterURL,
                                 muted: true,
                                 targetScreen: screen,
-                                animatedTransition: true
+                                animatedTransition: true,
+                                pendingClearPolicy: .none
                             )
                             if let posterURL = posterURL {
-                                DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                                try await SpaceWallpaperCoordinator.shared.registerAppliedWallpaper(
+                                    posterURL,
+                                    for: screen,
+                                    preferredSlotID: schedulerSlotID,
+                                    pendingKind: .pendingSchedulerSet,
+                                    runtimeState: .activeDynamic
+                                )
                             }
                         } else {
                             print("\(logTag) Video type but no video file found in project, falling back to CLI")
@@ -735,7 +758,9 @@ class WallpaperSchedulerService: ObservableObject {
                             }
                             try await WallpaperEngineXBridge.shared.setWallpaper(
                                 path: resolvedRoot.path,
-                                targetScreens: [screen]
+                                targetScreens: [screen],
+                                preferredSlotIDByScreenID: [screenID: schedulerSlotID],
+                                pendingKind: .pendingSchedulerSet
                             )
                             // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                         }
@@ -749,7 +774,9 @@ class WallpaperSchedulerService: ObservableObject {
                         print("\(logTag) Using CLI renderer for WE \(type): \(resolvedRoot.path)")
                         try await WallpaperEngineXBridge.shared.setWallpaper(
                             path: resolvedRoot.path,
-                            targetScreens: [screen]
+                            targetScreens: [screen],
+                            preferredSlotIDByScreenID: [screenID: schedulerSlotID],
+                            pendingKind: .pendingSchedulerSet
                         )
                         // 注：CLI 壁纸由 daemon 自身管理桌面 capture，不注册到 DesktopWallpaperSyncManager
                     }
@@ -760,8 +787,11 @@ class WallpaperSchedulerService: ObservableObject {
                         return false
                     }
                     print("\(logTag) Using static image from directory: \(fileURL.path)")
-                    let vm = WallpaperViewModel()
-                    try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
+                    guard let imageURL = enumerateImages(in: fileURL).first else {
+                        print("\(logTag) Static image directory has no supported images: \(fileURL.path)")
+                        return false
+                    }
+                    try await SpaceWallpaperCoordinator.shared.setSchedulerStaticWallpaper(imageURL, to: screen)
                 }
             } else if videoExtensions.contains(ext) {
                 // 3. 视频文件 → VideoWallpaperManager
@@ -775,22 +805,32 @@ class WallpaperSchedulerService: ObservableObject {
                     posterURL: posterURL,
                     muted: true,
                     targetScreen: screen,
-                    animatedTransition: true
+                    animatedTransition: true,
+                    pendingClearPolicy: .none
                 )
                 if let posterURL = posterURL {
-                    DesktopWallpaperSyncManager.shared.registerWallpaperSet(posterURL, for: screen)
+                    try await SpaceWallpaperCoordinator.shared.registerAppliedWallpaper(
+                        posterURL,
+                        for: screen,
+                        preferredSlotID: schedulerSlotID,
+                        pendingKind: .pendingSchedulerSet,
+                        runtimeState: .activeDynamic
+                    )
                 }
             } else {
-                // 4. 静态图 → WallpaperViewModel
+                // 4. 静态图 → 当前槽位的调度器入口
                 if isOnEndMode {
                     print("\(logTag) Skipping static image '\(item.title)' in on-end mode")
                     return false
                 }
+                guard imageExtensions.contains(ext) else {
+                    print("\(logTag) Unsupported scheduled item extension: \(fileURL.lastPathComponent)")
+                    return false
+                }
                 print("\(logTag) Using static image: \(fileURL.lastPathComponent)")
-                let vm = WallpaperViewModel()
-                try await vm.setWallpaper(from: fileURL, option: .desktop, for: screen)
+                try await SpaceWallpaperCoordinator.shared.setSchedulerStaticWallpaper(fileURL, to: screen)
             }
-            // com.apple.desktop 通知已由 setDesktopImageURLForAllSpaces 内部发送，无需重复触发
+            // 当前 Space 壁纸写入和通知由 SpaceWallpaperCoordinator / VideoWallpaperManager 负责。
             return true
         } catch {
             print("\(logTag) applyItem failed for '\(item.title)' (\(fileURL.lastPathComponent)): \(error)")

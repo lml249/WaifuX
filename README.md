@@ -10,9 +10,9 @@
 
 <p align="center">
   <samp>
-    <b>macOS 开源 ACG 一站式应用</b><br>
-    <b>静态壁纸 · 动态壁纸 · 动漫视频</b><br>
-    <b>多源聚合，全场景覆盖</b>
+    <b>macOS 开源壁纸管理应用</b><br>
+    <b>静态壁纸 · 动态壁纸 · 桌面槽位</b><br>
+    <b>多源聚合，多桌面覆盖</b>
   </samp>
 </p>
 
@@ -52,10 +52,6 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">动态壁纸 - MotionBG</p></td>
-    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">动漫详情 - 多源解析</p></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
     <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">我的库 - 设置</p></td>
   </tr>
 </table>
@@ -68,7 +64,7 @@
 |------|:----:|------|
 | 🖼 **静态壁纸** | ✅ | 双源切换：Wallhaven + 4K Wall，4K/8K 全分辨率覆盖 |
 | 🎬 **动态壁纸** | ✅ | 支持 MotionBGs 等动态背景源，让桌面"活"起来 |
-| 📺 **动漫视频** | ✅ | 内置多源解析引擎，追番观影一站式完成 |
+| 🖥 **桌面槽位** | ✅ | 为 macOS 多个桌面分别维护壁纸槽位，例如桌面 1、桌面 2 |
 | 🔍 **智能搜索与筛选** | ✅ | 关键词、标签、分类、颜色、分辨率等多维度筛选 |
 | ⭐ **收藏系统** | ✅ | 收藏喜欢的壁纸、视频，建立个人 ACG 资源库 |
 | ⚡️ **一键设为桌面** | ✅ | 浏览中即可快速设置为桌面壁纸或动态桌面 |
@@ -180,7 +176,6 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 WaifuX 本身**不存储、不托管任何内容**，仅作为第三方内容的聚合与展示工具：
 - [Wallhaven](https://wallhaven.cc) 壁纸通过其公开 API 获取
 - [MotionBGs](https://motionbgs.com) 内容由用户自行配置源地址
-- 动漫视频解析源由用户自行提供与配置
 - 所有内容的版权归原网站及原作者所有
 
 ### 2. Wallpaper Engine 兼容性声明（实验性 / Beta）

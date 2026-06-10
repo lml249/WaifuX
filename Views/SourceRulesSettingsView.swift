@@ -4,7 +4,6 @@ struct SourceRulesSettingsView: View {
     @StateObject private var viewModel = SourceRulesViewModel()
     @State private var showAddRuleSheet = false
     @State private var showGitHubImportSheet = false
-    @State private var showAnimeRulesMarket = false
 
     var body: some View {
         settingsPage {
@@ -55,22 +54,6 @@ struct SourceRulesSettingsView: View {
                 }
             }
 
-            // 动漫规则市场
-            SettingsSection(
-                title: t("sourceRules.animeRules"),
-                subtitle: t("sourceRules.kazumiSource"),
-                accentColor: .pink
-            ) {
-                AddRuleButton(
-                    icon: "play.tv",
-                    title: t("sourceRules.market"),
-                    subtitle: t("sourceRules.kazumiOfficial"),
-                    color: .pink
-                ) {
-                    showAnimeRulesMarket = true
-                }
-            }
-
             // 添加按钮
             SettingsSection(
                 title: t("sourceRules.add"),
@@ -103,10 +86,6 @@ struct SourceRulesSettingsView: View {
         }
         .sheet(isPresented: $showGitHubImportSheet) {
             GitHubImportSheet(viewModel: viewModel)
-        }
-        .sheet(isPresented: $showAnimeRulesMarket) {
-            AnimeRulesMarketView()
-                .frame(minWidth: 700, minHeight: 500)
         }
         .task {
             await viewModel.loadRules()
@@ -208,7 +187,6 @@ struct RuleCard: View {
     private var iconForContentType: String {
         switch rule.contentType {
         case .wallpaper: return "photo"
-        case .anime: return "play.tv"
         case .video: return "film"
         }
     }
@@ -216,7 +194,6 @@ struct RuleCard: View {
     private var iconBackgroundColor: Color {
         switch rule.contentType {
         case .wallpaper: return .blue
-        case .anime: return .pink
         case .video: return .purple
         }
     }
@@ -420,8 +397,8 @@ struct AddRuleSheet: View {
 struct GitHubImportSheet: View {
     @ObservedObject var viewModel: SourceRulesViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var owner = "Predidit"
-    @State private var repo = "KazumiRules"
+    @State private var owner = ""
+    @State private var repo = ""
     @State private var path = ""
     @State private var branch = "main"
     @State private var isLoading = false

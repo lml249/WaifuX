@@ -57,7 +57,7 @@ final class VideoLibrary: Sendable {
             return cached
         }
         // 2. 在共享容器中查找（App 只复制当前选中的视频）
-        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") {
             let url = container.appendingPathComponent("WallpaperVideos/\(entry.id)/\(entry.filename)")
             if FileManager.default.fileExists(atPath: url.path) {
                 WallpaperState.shared.cachedVideoURL = url
@@ -70,7 +70,7 @@ final class VideoLibrary: Sendable {
 
     /// 获取视频文件 URL（通过 ID）
     func videoURL(for id: String) -> URL? {
-        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") {
             let videoDir = container.appendingPathComponent("WallpaperVideos")
             let candidates = ["\(id).mp4", "\(id).mov", "\(id).m4v"]
             for name in candidates {
@@ -131,7 +131,7 @@ final class VideoLibrary: Sendable {
 
     /// 回退方案：扫描共享容器中的视频文件
     private func scanFiles() {
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else { return }
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else { return }
         let videoDir = container.appendingPathComponent("WallpaperVideos")
         guard let files = try? FileManager.default.contentsOfDirectory(at: videoDir, includingPropertiesForKeys: nil) else {
             lock.withLock { $0 = [] }
@@ -183,7 +183,7 @@ func findVideoURL(videoID: String? = nil) -> URL? {
             return url
         }
         // 旧格式回退：平面目录
-        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") {
             let videoDir = container.appendingPathComponent("WallpaperVideos")
             for name in ["\(videoID).mp4", "\(videoID).mov", "\(videoID).m4v"] {
                 let url = videoDir.appendingPathComponent(name)
@@ -226,7 +226,7 @@ func findImageURL(sourceID: String? = nil) -> URL? {
                 return url
             }
         }
-        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") {
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") {
             let imageDir = container.appendingPathComponent("WallpaperImages")
             for ext in ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"] {
                 let url = imageDir.appendingPathComponent("\(sourceID).\(ext)")
@@ -252,7 +252,7 @@ private func currentMirroringSourceURL() -> URL? {
         let currentVideoPath: String?
     }
 
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
         return nil
     }
     let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
@@ -276,7 +276,7 @@ private func currentMirroringImageURL() -> URL? {
         let currentImagePath: String?
     }
 
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
         return nil
     }
     let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")

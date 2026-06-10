@@ -6,7 +6,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.waifux.app</string>
+		<string>group.com.claretmoon.waifux.app</string>
 	</array>
 </dict>
 </plist>

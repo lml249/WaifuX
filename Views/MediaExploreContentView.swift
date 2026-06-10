@@ -1133,7 +1133,7 @@ struct MediaExploreContentView: View {
         return HStack(alignment: .top, spacing: spacing) {
             ForEach(0..<columnCount, id: \.self) { columnIndex in
                 LazyVStack(spacing: spacing) {
-                    ForEach(columnItems[safe: columnIndex] ?? []) { media in
+                    ForEach(columnIndex < columnItems.count ? columnItems[columnIndex] : []) { media in
                         MediaCardView(
                             media: media,
                             // ✅ 直接读取 viewModel.favoriteIDSet，O(1) 判断

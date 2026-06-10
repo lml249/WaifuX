@@ -10,6 +10,14 @@ import QuartzCore
 extension CALayer: @unchecked @retroactive Sendable {}
 extension CAContext: @unchecked @retroactive Sendable {}
 
+private final class WallpaperUncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
 final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
     var agentProxy: (any WallpaperExtensionProxyXPCProtocol)?
     private var previousPresentationMode = "default"
@@ -29,7 +37,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
     // MARK: - Lifecycle
 
-    func acquire(withId id: Any?, request: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func acquire(withId id: Any?, request: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
         extLog("=== ACQUIRE ===")
 
         var wallpaperIDString: String?
@@ -227,6 +235,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         }
 
         nonisolated(unsafe) let unsafeReplyObj = replyObj
+        let replyBox = WallpaperUncheckedSendableBox(reply)
         let hasReplied = OSAllocatedUnfairLock(initialState: false)
         let doReply: @Sendable (String) -> Void = { source in
             let shouldReply = hasReplied.withLock { replied in
@@ -236,7 +245,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             }
             if shouldReply {
                 extLog("  Replying to acquire [\(source)] (contextId: \(contextId))")
-                reply(unsafeReplyObj, nil)
+                replyBox.value(unsafeReplyObj, nil)
             }
         }
 
@@ -409,7 +418,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         struct MirroringPrefs: Decodable {
             let currentVideoPath: String?
         }
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
             return nil
         }
         let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
@@ -432,7 +441,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         struct MirroringPrefs: Decodable {
             let currentImagePath: String?
         }
-        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
             return nil
         }
         let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")
@@ -525,7 +534,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         extLog("[Commands] ✅ 已热切换显示器 \(displayID) 到静态图: \(sourceID)")
     }
 
-    func update(withId _: Any?, request: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func update(withId _: Any?, request: Any?, reply: @escaping ((any Error)?) -> Void) {
         var presentationMode = "?"
         var activityState = "?"
         if let reqObj = request as? NSObject {
@@ -583,7 +592,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func invalidate(withId id: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func invalidate(withId id: Any?, reply: @escaping ((any Error)?) -> Void) {
         var cleaned = false
         if let idObj = id as? NSObject {
             let idStr = String(describing: Mirror(reflecting: idObj).children.first?.value ?? "")
@@ -603,12 +612,13 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func snapshot(withId _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func snapshot(withId _: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
         extLog("=== SNAPSHOT ===")
         var currentTime: CMTime?
         WallpaperState.shared.forEachRenderer { renderer in
             currentTime = CMTimebaseGetTime(renderer.timebase)
         }
+        let replyBox = WallpaperUncheckedSendableBox(reply)
         Task {
             if let snapshotXPC = await createSnapshotViaRuntime(currentTime: currentTime) {
                 // 验证 XPC 编码可行性：尝试 NSKeyedArchiver 测试编码
@@ -619,16 +629,16 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                     canEncode = true
                 }
                 if canEncode {
-                    reply(snapshotXPC, nil)
+                    replyBox.value(snapshotXPC, nil)
                     extLog("  Snapshot replied (IOSurface)")
                 } else {
                     // XPC 编码会失败（WallpaperSnapshotXPC 缺少 encodeWithCoder:），
                     // 返回 nil 防止 XPC 异常阻断壁纸系统
                     extLog("  ⚠️ Snapshot XPC encode would fail, replying nil to avoid XPC exception")
-                    reply(nil, nil)
+                    replyBox.value(nil, nil)
                 }
             } else {
-                reply(nil, nil)
+                replyBox.value(nil, nil)
                 extLog("  Snapshot replied nil")
             }
         }
@@ -649,7 +659,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
                 let handler = Unmanaged<WallpaperXPCHandler>.fromOpaque(observer).takeUnretainedValue()
                 handler.handlePrefsChanged()
             },
-            "com.waifux.app.wallpaper.prefsChanged" as CFString,
+            "com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString,
             nil,
             .deliverImmediately
         )
@@ -671,7 +681,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             return
         }
 
-        nonisolated(unsafe) let unsafeProxy = proxy
+        let proxyBox = WallpaperUncheckedSendableBox(proxy)
 
         Task {
             // 构建最新的 SettingsViewModels（包含刚部署的视频）
@@ -683,7 +693,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
             // 通知系统刷新壁纸设置。系统收到后会重新调用 provideSettingsViewModels，
             // 从而看到最新部署的视频。
             do {
-                try await unsafeProxy.updateSettingsViewModels(viewModels)
+                try await proxyBox.value.updateSettingsViewModels(viewModels)
                 extLog("[XPCHandler] ✅ 已通知系统刷新壁纸设置")
             } catch {
                 extLog("[XPCHandler] ❌ updateSettingsViewModels 失败: \(error)")
@@ -693,19 +703,20 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
 
     // MARK: - Stubs
 
-    func provideSettingsViewModels(withContentTypes _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func provideSettingsViewModels(withContentTypes _: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
+        let replyBox = WallpaperUncheckedSendableBox(reply)
         Task {
             let result = await buildSettingsViewModelsXPC()
-            reply(result ?? makeEmptyGroupsResponse(), nil)
+            replyBox.value(result ?? makeEmptyGroupsResponse(), nil)
         }
     }
 
-    func addChoiceRequest(withChoiceRequest request: Any?, onBehalfOfProcess _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func addChoiceRequest(withChoiceRequest request: Any?, onBehalfOfProcess _: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
         extLog("=== ADD CHOICE REQUEST ===")
         reply(nil, nil)
     }
 
-    func removeChoiceRequest(withChoiceRequest request: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func removeChoiceRequest(withChoiceRequest request: Any?, reply: @escaping ((any Error)?) -> Void) {
         extLog("=== REMOVE CHOICE REQUEST ===")
 
         // 显示器实例不支持从扩展侧移除；这里只做日志并返回成功。
@@ -724,7 +735,7 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func selectedChoicesDidChange(for id: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func selectedChoicesDidChange(for id: Any?, reply: @escaping ((any Error)?) -> Void) {
         extLog("=== SELECTED CHOICES DID CHANGE ===")
 
         // 从 WallpaperChoiceID 中提取 choice identifier
@@ -755,13 +766,13 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         reply(nil)
     }
 
-    func invokeContextMenuAction(withMenuItemID menuItemID: Any?, groupItemID _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func invokeContextMenuAction(withMenuItemID menuItemID: Any?, groupItemID _: Any?, reply: @escaping ((any Error)?) -> Void) {
         let identifier = (menuItemID as? String) ?? String(describing: menuItemID ?? "nil")
         extLog("=== CONTEXT MENU ACTION === identifier: \(identifier)")
         reply(nil)
     }
 
-    func isChoiceDownloaded(with _: Any?, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+    func isChoiceDownloaded(with _: Any?, reply: @escaping (Bool, (any Error)?) -> Void) {
         extLog("isChoiceDownloaded")
         reply(true, nil)
     }
@@ -772,36 +783,36 @@ final class WallpaperXPCHandler: NSObject, WallpaperExtensionXPCProtocol {
         return nil
     }
 
-    func pauseDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func cancelDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func resumeDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func removeDownload(for _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) { reply(nil) }
-    func migrateSelectedChoice(for _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func pauseDownload(for _: Any?, reply: @escaping ((any Error)?) -> Void) { reply(nil) }
+    func cancelDownload(for _: Any?, reply: @escaping ((any Error)?) -> Void) { reply(nil) }
+    func resumeDownload(for _: Any?, reply: @escaping ((any Error)?) -> Void) { reply(nil) }
+    func removeDownload(for _: Any?, reply: @escaping ((any Error)?) -> Void) { reply(nil) }
+    func migrateSelectedChoice(for _: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
         extLog("migrateSelectedChoice")
         reply(nil, nil)
     }
 
-    func migrate(from _: Any?, to _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func migrate(from _: Any?, to _: Any?, reply: @escaping ((any Error)?) -> Void) {
         extLog("migrate")
         reply(nil)
     }
 
-    func skipShuffledContent(withId _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func skipShuffledContent(withId _: Any?, reply: @escaping ((any Error)?) -> Void) {
         extLog("skipShuffledContent")
         reply(nil)
     }
 
-    func canSkipShuffledContent(withId _: Any?, reply: @escaping @Sendable (Bool, (any Error)?) -> Void) {
+    func canSkipShuffledContent(withId _: Any?, reply: @escaping (Bool, (any Error)?) -> Void) {
         extLog("canSkipShuffledContent")
         reply(false, nil)
     }
 
-    func handleDebugRequest(for _: Any?, reply: @escaping @Sendable (Any?, (any Error)?) -> Void) {
+    func handleDebugRequest(for _: Any?, reply: @escaping (Any?, (any Error)?) -> Void) {
         extLog("handleDebugRequest")
         reply(nil, nil)
     }
 
-    func handleNotification(withNamed _: Any?, reply: @escaping @Sendable ((any Error)?) -> Void) {
+    func handleNotification(withNamed _: Any?, reply: @escaping ((any Error)?) -> Void) {
         reply(nil)
     }
     private func createRemoteContextXPC(contextId: UInt32) -> AnyObject? {

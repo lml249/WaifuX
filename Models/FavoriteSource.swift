@@ -82,7 +82,6 @@ struct DataSourceProfile: Identifiable, Codable, Hashable {
     var description: String?
     var wallpaper: WallpaperSourceProfile
     var media: MediaSourceProfile
-    var anime: AnimeSourceProfile?
 }
 
 struct WallpaperSourceProfile: Codable, Hashable {
@@ -126,30 +125,6 @@ struct MediaParsingProfile: Codable, Hashable {
     var tagName: String?          // 标签名称 XPath
     var downloadPattern: String?  // 下载选项正则 (带回退方案)
     var durationPattern: String?  // 时长正则 (带回退方案)
-}
-
-// MARK: - Anime Source Profile (参考 Kazumi 插件格式)
-struct AnimeSourceProfile: Codable, Hashable {
-    var enabled: Bool
-    var provider: String
-    var displayName: String
-    var baseURL: String
-    var headers: [String: String]?
-    var userAgent: String?
-    var searchURL: String          // 搜索 URL，使用 @keyword 占位符
-    var parsing: AnimeParsingProfile
-}
-
-struct AnimeParsingProfile: Codable, Hashable {
-    var searchList: String         // 搜索结果列表 XPath
-    var searchName: String         // 标题 XPath
-    var searchResult: String       // 详情链接 XPath
-    var searchCover: String?       // 封面图 XPath
-    var chapterRoads: String?      // 剧集列表页 XPath (进入详情页后)
-    var chapterResult: String?     // 剧集链接 XPath
-    var chapterName: String?       // 剧集名称 XPath
-    var detailCover: String?       // 详情页封面 XPath
-    var detailDescription: String? // 详情页描述 XPath
 }
 
 enum DataSourceProfileError: LocalizedError {
@@ -223,8 +198,7 @@ enum DataSourceProfileStore {
                     tagList: nil,
                     tagName: nil
                 )
-            ),
-            anime: nil
+            )
         )
     }
 

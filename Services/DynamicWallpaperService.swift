@@ -11,7 +11,7 @@ import AppKit
 ///
 /// 数据文件预期位置（按优先级）：
 /// 1. App Bundle 内的 Resources/dongtai/ 目录
-/// 2. Application Support/com.waifux.app/dongtai/ 目录
+/// 2. Application Support/com.claretmoon.waifux.app/dongtai/ 目录
 /// 3. 用户指定的自定义路径
 @MainActor
 final class DynamicWallpaperService: ObservableObject {
@@ -352,7 +352,7 @@ final class DynamicWallpaperService: ObservableObject {
             return false
         }
 
-        let dataDir = appSupport.appendingPathComponent("com.waifux.app").appendingPathComponent(dataSubdirectory)
+        let dataDir = appSupport.appendingPathComponent("com.claretmoon.waifux.app").appendingPathComponent(dataSubdirectory)
         let collectionURL = dataDir.appendingPathComponent(collectionFileName)
         let exclusiveURL = dataDir.appendingPathComponent(exclusiveFileName)
 

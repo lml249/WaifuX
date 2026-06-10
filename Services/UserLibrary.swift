@@ -11,16 +11,12 @@ actor UserLibrary {
 
     // 文件路径
     private var wallpaperFavoritesPath: URL { libraryDirectory.appendingPathComponent("wallpaper_favorites.json") }
-    private var animeFavoritesPath: URL { libraryDirectory.appendingPathComponent("anime_favorites.json") }
     private var videoFavoritesPath: URL { libraryDirectory.appendingPathComponent("video_favorites.json") }
-    private var watchHistoryPath: URL { libraryDirectory.appendingPathComponent("watch_history.json") }
     private var downloadsPath: URL { libraryDirectory.appendingPathComponent("downloads.json") }
 
     // 内存缓存
     private var wallpaperFavorites: [UniversalContentItem] = []
-    private var animeFavorites: [UniversalContentItem] = []
     private var videoFavorites: [UniversalContentItem] = []
-    private var watchHistory: [WatchProgress] = []
     private var downloads: [DownloadRecord] = []
 
     init() {
@@ -47,11 +43,23 @@ actor UserLibrary {
     // MARK: - 加载数据
 
     private func loadAllData() async {
-        wallpaperFavorites = loadItems(from: wallpaperFavoritesPath)
-        animeFavorites = loadItems(from: animeFavoritesPath)
-        videoFavorites = loadItems(from: videoFavoritesPath)
-        watchHistory = loadData(from: watchHistoryPath) ?? []
-        downloads = loadData(from: downloadsPath) ?? []
+        let loadedWallpaperFavorites = loadUniversalItemsExcludingLegacyAnime(from: wallpaperFavoritesPath)
+        let loadedVideoFavorites = loadUniversalItemsExcludingLegacyAnime(from: videoFavoritesPath)
+        let loadedDownloads = loadDownloadsExcludingLegacyAnime(from: downloadsPath)
+
+        wallpaperFavorites = loadedWallpaperFavorites.items
+        videoFavorites = loadedVideoFavorites.items
+        downloads = loadedDownloads.items
+
+        if loadedWallpaperFavorites.removedLegacyAnime {
+            try? saveItems(wallpaperFavorites, to: wallpaperFavoritesPath)
+        }
+        if loadedVideoFavorites.removedLegacyAnime {
+            try? saveItems(videoFavorites, to: videoFavoritesPath)
+        }
+        if loadedDownloads.removedLegacyAnime {
+            try? saveItems(downloads, to: downloadsPath)
+        }
     }
 
     private func loadItems<T: Codable>(from url: URL) -> [T] {
@@ -69,6 +77,38 @@ actor UserLibrary {
         try data.write(to: url)
     }
 
+    private func loadUniversalItemsExcludingLegacyAnime(from url: URL) -> (items: [UniversalContentItem], removedLegacyAnime: Bool) {
+        loadArrayExcludingLegacyAnimeContentType(from: url)
+    }
+
+    private func loadDownloadsExcludingLegacyAnime(from url: URL) -> (items: [DownloadRecord], removedLegacyAnime: Bool) {
+        loadArrayExcludingLegacyAnimeContentType(from: url)
+    }
+
+    private func loadArrayExcludingLegacyAnimeContentType<T: Codable>(from url: URL) -> (items: [T], removedLegacyAnime: Bool) {
+        guard let data = try? Data(contentsOf: url) else {
+            return ([], false)
+        }
+
+        guard let objects = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return ((try? JSONDecoder().decode([T].self, from: data)) ?? [], false)
+        }
+
+        let filtered = objects.filter { object in
+            guard let rawType = object["contentType"] as? String else { return true }
+            return rawType.caseInsensitiveCompare("anime") != .orderedSame
+        }
+
+        guard filtered.count != objects.count else {
+            return ((try? JSONDecoder().decode([T].self, from: data)) ?? [], false)
+        }
+
+        guard let filteredData = try? JSONSerialization.data(withJSONObject: filtered) else {
+            return ([], true)
+        }
+        return ((try? JSONDecoder().decode([T].self, from: filteredData)) ?? [], true)
+    }
+
     // MARK: - 收藏管理
 
     func addToFavorites(_ item: UniversalContentItem) async throws {
@@ -77,11 +117,6 @@ actor UserLibrary {
             guard !wallpaperFavorites.contains(where: { $0.id == item.id }) else { return }
             wallpaperFavorites.append(item)
             try saveItems(wallpaperFavorites, to: wallpaperFavoritesPath)
-
-        case .anime:
-            guard !animeFavorites.contains(where: { $0.id == item.id }) else { return }
-            animeFavorites.append(item)
-            try saveItems(animeFavorites, to: animeFavoritesPath)
 
         case .video:
             guard !videoFavorites.contains(where: { $0.id == item.id }) else { return }
@@ -96,10 +131,6 @@ actor UserLibrary {
             wallpaperFavorites.removeAll { $0.id == id }
             try saveItems(wallpaperFavorites, to: wallpaperFavoritesPath)
 
-        case .anime:
-            animeFavorites.removeAll { $0.id == id }
-            try saveItems(animeFavorites, to: animeFavoritesPath)
-
         case .video:
             videoFavorites.removeAll { $0.id == id }
             try saveItems(videoFavorites, to: videoFavoritesPath)
@@ -109,7 +140,6 @@ actor UserLibrary {
     func getFavorites(for contentType: ContentType) async -> [UniversalContentItem] {
         switch contentType {
         case .wallpaper: return wallpaperFavorites
-        case .anime: return animeFavorites
         case .video: return videoFavorites
         }
     }
@@ -117,7 +147,6 @@ actor UserLibrary {
     func isFavorite(id: String, contentType: ContentType) async -> Bool {
         switch contentType {
         case .wallpaper: return wallpaperFavorites.contains(where: { $0.id == id })
-        case .anime: return animeFavorites.contains(where: { $0.id == id })
         case .video: return videoFavorites.contains(where: { $0.id == id })
         }
     }
@@ -131,39 +160,6 @@ actor UserLibrary {
             try await addToFavorites(item)
             return true
         }
-    }
-
-    // MARK: - 观看进度（动漫专用）
-
-    func saveWatchProgress(animeId: String, episodeNumber: Int, progress: Double) async throws {
-        if let index = watchHistory.firstIndex(where: { $0.animeId == animeId }) {
-            watchHistory[index].currentEpisode = episodeNumber
-            watchHistory[index].episodeProgress = progress
-            watchHistory[index].lastWatchedAt = Date()
-        } else {
-            watchHistory.append(WatchProgress(
-                animeId: animeId,
-                currentEpisode: episodeNumber,
-                episodeProgress: progress,
-                lastWatchedAt: Date()
-            ))
-        }
-
-        try saveItems(watchHistory, to: watchHistoryPath)
-    }
-
-    func getWatchProgress(animeId: String) async -> WatchProgress? {
-        return watchHistory.first(where: { $0.animeId == animeId })
-    }
-
-    func getWatchHistory() async -> [WatchProgress] {
-        // 按最后观看时间排序
-        return watchHistory.sorted { $0.lastWatchedAt > $1.lastWatchedAt }
-    }
-
-    func clearWatchHistory() async throws {
-        watchHistory.removeAll()
-        try saveItems(watchHistory, to: watchHistoryPath)
     }
 
     // MARK: - 下载记录
@@ -216,10 +212,8 @@ actor UserLibrary {
     func getStats() async -> LibraryStats {
         return LibraryStats(
             wallpaperCount: wallpaperFavorites.count,
-            animeCount: animeFavorites.count,
             videoCount: videoFavorites.count,
-            totalDownloads: downloads.count,
-            watchHistoryCount: watchHistory.count
+            totalDownloads: downloads.count
         )
     }
 }
@@ -254,12 +248,10 @@ struct LibraryItems {
 
 struct LibraryStats {
     let wallpaperCount: Int
-    let animeCount: Int
     let videoCount: Int
     let totalDownloads: Int
-    let watchHistoryCount: Int
 
     var totalItems: Int {
-        wallpaperCount + animeCount + videoCount
+        wallpaperCount + videoCount
     }
 }

@@ -126,38 +126,9 @@ actor ContentService {
                 detailXPath: detailXPath,
                 baseItem: item
             )
-        case .anime:
-            return try await htmlParser.parseAnimeDetail(
-                html: html,
-                rule: rule,
-                detailXPath: detailXPath,
-                baseItem: item
-            )
         case .video:
             return item
         }
-    }
-
-    // MARK: - 获取特定集数视频
-
-    func fetchEpisodeVideo(
-        animeId: String,
-        episodeNumber: Int,
-        sourceType: String
-    ) async throws -> [VideoSource] {
-        // 获取动漫详情
-        guard let rule = await ruleLoader.rule(for: sourceType) else {
-            throw ContentError.ruleNotFound(sourceType)
-        }
-
-        // 从缓存或网络获取详情
-        let detailURL = animeId
-        _ = try await fetchHTML(url: detailURL, headers: rule.headers, useWebview: rule.useWebview)
-
-        // 解析剧集视频链接
-        // 不同的源可能有不同的视频提取逻辑
-        // 这里需要根据具体规则实现视频链接提取
-        return []
     }
 
     // MARK: - 私有方法：获取 HTML

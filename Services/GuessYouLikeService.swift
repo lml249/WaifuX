@@ -11,7 +11,7 @@ final class GuessYouLikeService {
     private let lastUpdateKey = "gyl_lastUpdate"
     private let cachedItemsKey = "gyl_cachedItems"
     private let cacheVersionKey = "gyl_cacheVersion"
-    private let currentCacheVersion = 3
+        private let currentCacheVersion = 4
     private let targetCount = 12
     private let primaryItemsPerSource = 2
     private let sourceFetchCount = 4
@@ -252,16 +252,6 @@ final class GuessYouLikeService {
         for item in MediaLibraryService.shared.recentItems.prefix(20) {
             addMedia(item, weight: 1)
         }
-        for (_, anime) in AnimeFavoriteStore.shared.favorites {
-            for tag in anime.tags {
-                addTag(tag, weight: 3, toStatic: true, toVideo: true)
-            }
-            addTag("anime", weight: 2, toStatic: true, toVideo: true)
-            sourceScores[.wallhaven, default: 0] += 1
-            sourceScores[.fourK, default: 0] += 1
-            sourceScores[.workshop, default: 0] += 1
-        }
-
         return PreferenceSnapshot(
             allTags: rankedTerms(allScores),
             staticTags: rankedTerms(staticScores),

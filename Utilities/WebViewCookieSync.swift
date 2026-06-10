@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 
 /// 将 WKWebView 使用的默认 `WKWebsiteDataStore` 中的 Cookie 同步到 `HTTPCookieStorage.shared`，
-/// 使 `URLSession` / `AnimeParser` 后续请求能带上用户刚完成的验证码会话。
+/// 使 `URLSession` 后续请求能带上用户刚完成的验证码会话。
 enum WebViewCookieSync {
 
     @MainActor

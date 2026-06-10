@@ -10,9 +10,9 @@
 
 <p align="center">
   <samp>
-    <b>Open Source All-in-One ACG App for macOS</b><br>
-    <b>Static Wallpapers · Dynamic Wallpapers · Anime Videos</b><br>
-    <b>Multi-source Aggregation, Full-scenario Coverage</b>
+    <b>Open Source Wallpaper Manager for macOS</b><br>
+    <b>Static Wallpapers · Dynamic Wallpapers · Desktop Slots</b><br>
+    <b>Multi-source Aggregation, Multi-desktop Coverage</b>
   </samp>
 </p>
 
@@ -52,10 +52,6 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">Live Wallpapers - MotionBG</p></td>
-    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">Anime Detail - Multi-source</p></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">Video Player - Episode Select</p></td>
     <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">My Library - Settings</p></td>
   </tr>
 </table>
@@ -68,7 +64,7 @@
 |---------|:------:|-------------|
 | 🖼 **Static Wallpapers** | ✅ | Dual source switching: Wallhaven + 4K Wall, full 4K/8K resolution coverage |
 | 🎬 **Dynamic Wallpapers** | ✅ | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
-| 📺 **Anime Videos** | ✅ | Built-in multi-source parsing engine for streaming and watching anime |
+| 🖥 **Desktop Slots** | ✅ | Maintain separate wallpaper slots for macOS Spaces, such as Desktop 1 and Desktop 2 |
 | 🔍 **Smart Search & Filter** | ✅ | Keywords, tags, categories, color, resolution — find exactly what you want |
 | ⭐ **Collections** | ✅ | Save favorite wallpapers and videos to build your personal ACG library |
 | ⚡️ **One-click Apply** | ✅ | Set as desktop wallpaper or dynamic desktop directly while browsing |
@@ -172,7 +168,6 @@ This project is open-sourced under the [GNU General Public License v3.0 (GPL-3.0
 WaifuX does **not store or host any content** itself — it acts solely as an aggregator and viewer for third-party content:
 - [Wallhaven](https://wallhaven.cc) wallpapers are fetched via their public API
 - [MotionBGs](https://motionbgs.com) content is configured by users themselves
-- Anime video parsing sources are provided and configured by users
 - All content copyrights belong to the original websites and authors
 
 ### 2. Wallpaper Engine Compatibility (Experimental / Beta)

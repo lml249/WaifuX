@@ -1174,19 +1174,18 @@ class WallpaperViewModel: ObservableObject {
             return
         }
 
-        let workspace = NSWorkspace.shared
         let screens = NSScreen.screens
 
         let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
             .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
             .allowClipping: true
         ]
-        for screen in screens {
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: screen, options: fillOptions)
-        }
-
-        // 注册壁纸以便跨 Space 同步
-        DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL)
+        try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+            imageURL,
+            option: option,
+            targetScreen: nil,
+            options: fillOptions
+        )
 
         // 更新静态壁纸颗粒蒙层（独立窗口，不受壁纸切换影响）
         StaticWallpaperGrainManager.shared.updateOverlay()
@@ -1196,8 +1195,6 @@ class WallpaperViewModel: ObservableObject {
     /// - Note: macOS 的锁屏壁纸即桌面壁纸，没有独立的锁屏壁纸 API。
     ///   `.lockScreen` 和 `.both` 最终都等同于设置桌面壁纸。
     func setWallpaper(from imageURL: URL, option: WallpaperOption, for targetScreen: NSScreen?) async throws {
-        let workspace = NSWorkspace.shared
-
         // 如果指定了特定屏幕，只设置到该屏幕
         if let targetScreen = targetScreen {
             // 切到静态图前如果目标屏幕被 CLI 管理则停 CLI 引擎
@@ -1233,8 +1230,12 @@ class WallpaperViewModel: ObservableObject {
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
                 .allowClipping: true
             ]
-            try workspace.setDesktopImageURLForAllSpaces(imageURL, for: targetScreen, options: fillOptions)
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: targetScreen)
+            try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+                imageURL,
+                option: option,
+                targetScreen: targetScreen,
+                options: fillOptions
+            )
         } else {
             try await setWallpaper(from: imageURL, option: option)
         }

@@ -82,7 +82,7 @@ actor NetworkService {
     // MARK: - Public API with Retry
 
     /// 获取 API 数据（⚠️ 禁用缓存，每次重新请求）
-    func fetch<T: Decodable>(
+    func fetch<T: Decodable & Sendable>(
         _ type: T.Type,
         from url: URL,
         headers: [String: String] = [:],
@@ -306,7 +306,7 @@ actor NetworkService {
 
     // MARK: - Retry Logic
 
-    private func executeWithRetry<T>(
+    private func executeWithRetry<T: Sendable>(
         config: RetryConfiguration,
         operation: (Int) async throws -> T
     ) async throws -> T {

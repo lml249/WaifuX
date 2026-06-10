@@ -67,7 +67,7 @@ final class LockScreenFramePusher {
 
 extension LockScreenFramePusher {
     final class Session: @unchecked Sendable {
-        fileprivate static let sessionLog = OSLog(subsystem: "com.waifux.app", category: "FramePusher")
+        fileprivate static let sessionLog = OSLog(subsystem: "com.claretmoon.waifux.app", category: "FramePusher")
         let displayID: UInt32
         let videoURL: URL
         let surfaceIDs: [IOSurfaceID]

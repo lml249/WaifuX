@@ -214,7 +214,7 @@ final class FrameChannel: @unchecked Sendable {
     }
 
     private func socketPath() -> String? {
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app")?
             .appendingPathComponent("socket/extension.ipc")
             .path
     }

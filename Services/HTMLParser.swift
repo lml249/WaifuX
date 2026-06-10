@@ -121,113 +121,6 @@ actor HTMLParser {
         )
     }
 
-    /// 解析动漫详情页
-    func parseAnimeDetail(
-        html: String,
-        rule: DataSourceRule,
-        detailXPath: DetailXPath,
-        baseItem: UniversalContentItem
-    ) throws -> UniversalContentItem {
-        let document = try SwiftSoup.parse(html)
-
-        let title = try? evaluateSelector(document, selector: detailXPath.title)
-            .first?.text()
-            ?? baseItem.title
-
-        let cover = try? evaluateSelector(document, selector: detailXPath.cover ?? "")
-            .first?
-            .attr("src")
-
-        let description = try? evaluateSelector(document, selector: detailXPath.description ?? "")
-            .first?.text()
-
-        // 解析剧集列表
-        var episodes: [AnimeEpisode] = []
-        if let episodesSelector = detailXPath.episodes,
-           let selector = convertXPathToCSS(episodesSelector) {
-            episodes = try parseEpisodes(
-                document: document,
-                containerSelector: selector,
-                namePattern: detailXPath.episodeName ?? "",
-                linkPattern: detailXPath.episodeLink ?? "",
-                thumbPattern: detailXPath.episodeThumb,
-                baseURL: rule.baseURL
-            )
-        }
-
-        let metadata = ContentMetadata.AnimeMetadata(
-            episodes: episodes,
-            currentEpisode: nil,
-            totalEpisodes: episodes.count,
-            status: nil,
-            aired: nil,
-            rating: nil
-        )
-
-        return UniversalContentItem(
-            id: baseItem.id,
-            contentType: baseItem.contentType,
-            title: title ?? baseItem.title,
-            thumbnailURL: baseItem.thumbnailURL,
-            coverURL: cover ?? baseItem.coverURL,
-            description: description,
-            tags: baseItem.tags,
-            sourceType: baseItem.sourceType,
-            sourceURL: baseItem.sourceURL,
-            sourceName: baseItem.sourceName,
-            metadata: .anime(metadata),
-            createdAt: baseItem.createdAt,
-            updatedAt: Date()
-        )
-    }
-
-    // MARK: - 解析剧集列表
-
-    private func parseEpisodes(
-        document: Document,
-        containerSelector: String,
-        namePattern: String,
-        linkPattern: String,
-        thumbPattern: String?,
-        baseURL: String
-    ) throws -> [AnimeEpisode] {
-        let episodeElements = try document.select(containerSelector)
-        var episodes: [AnimeEpisode] = []
-
-        for (index, element) in episodeElements.array().enumerated() {
-            // 提取链接
-            let elements = (try? evaluateXPathInContext(element, xpath: linkPattern)) ?? Elements()
-            let link = try? elements.first()?.attr("href")
-
-            guard let link = link, !link.isEmpty else { continue }
-
-            // 提取名称
-            let nameEls = (try? evaluateXPathInContext(element, xpath: namePattern)) ?? Elements()
-            let name = (try? nameEls.first()?.text()) ?? "Episode \(index + 1)"
-
-            // 提取缩略图（可选）
-            var thumb: String? = nil
-            if let thumbPattern = thumbPattern {
-                let thumbEls = (try? evaluateXPathInContext(element, xpath: thumbPattern)) ?? Elements()
-                thumb = try? thumbEls.first()?.attr("src")
-            }
-
-            let fullLink = makeAbsoluteURL(link, baseURL: baseURL) ?? link
-
-            let episode = AnimeEpisode(
-                id: fullLink,
-                episodeNumber: index + 1,
-                title: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                thumbnailURL: thumb,
-                videoURLs: [],
-                duration: nil
-            )
-            episodes.append(episode)
-        }
-
-        return episodes
-    }
-
     // MARK: - XPath 到 CSS 选择器的转换
 
     /// 将简化的 XPath 表达式转换为 CSS Selector
@@ -535,10 +428,14 @@ actor HTMLParser {
             ?? (try? element.text())
             ?? "Untitled"
 
-        // 提取封面
-        let cover = extractAttr(element: element, xpath: coverSelector, attr: "src")
-            ?? extractAttr(element: element, xpath: coverSelector, attr: "data-src")
-            ?? (try? element.select("img").first()?.attr("src"))
+        // 提取封面。避免 `??` 的 autoclosure 捕获 SwiftSoup Element 触发 Swift 6 sendability 检查。
+        var cover = extractAttr(element: element, xpath: coverSelector, attr: "src")
+        if cover == nil {
+            cover = extractAttr(element: element, xpath: coverSelector, attr: "data-src")
+        }
+        if cover == nil {
+            cover = try? element.select("img").first()?.attr("src")
+        }
 
         // 提取详情链接
         let detail = extractAttr(element: element, xpath: detailSelector, attr: "href")
@@ -565,28 +462,28 @@ actor HTMLParser {
         )
     }
 
-    // MARK: - 辅助提取方法 (简化版, 用于 AnimeParser)
+    // MARK: - 辅助提取方法 (简化版, 用于共享解析器)
 
-    /// 从文档中提取文本 (简化版,用于 AnimeParser)
+    /// 从文档中提取文本 (简化版)
     nonisolated func simpleExtractText(document: Document, selector: String) throws -> String? {
         let cssSelector = convertXPathToCSS(selector) ?? selector
         return try? document.select(cssSelector).first()?.text()
     }
     
-    /// 从元素中提取文本 (简化版,用于 AnimeParser)
+    /// 从元素中提取文本 (简化版)
     nonisolated func simpleExtractText(element: Element, selector: String) throws -> String? {
         let cssSelector = convertXPathToCSS(selector) ?? selector
         return try? element.select(cssSelector).first()?.text()
     }
     
-    /// 从文档中提取属性 (简化版,用于 AnimeParser)
+    /// 从文档中提取属性 (简化版)
     nonisolated func simpleExtractAttr(document: Document, selector: String, attr: String) -> String? {
         let cssSelector = convertXPathToCSS(selector) ?? selector
         guard let element = try? document.select(cssSelector).first() else { return nil }
         return (try? element.attr(attr)) ?? ""
     }
     
-    /// 从元素中提取属性 (简化版,用于 AnimeParser)
+    /// 从元素中提取属性 (简化版)
     nonisolated func simpleExtractAttr(element: Element, selector: String, attr: String) -> String? {
         let cssSelector = convertXPathToCSS(selector) ?? selector
         guard let el = try? element.select(cssSelector).first() else { return nil }
@@ -752,15 +649,6 @@ actor HTMLParser {
         switch contentType {
         case .wallpaper:
             return .wallpaper(.init(fullImageURL: "", resolution: nil, fileSize: nil, fileType: nil, purity: nil, uploader: nil, category: nil))
-        case .anime:
-            return .anime(.init(
-                episodes: [],
-                currentEpisode: nil,
-                totalEpisodes: nil,
-                status: nil,
-                aired: nil,
-                rating: nil
-            ))
         case .video:
             return .video(.init(videoURL: "", duration: nil, resolution: nil, fileSize: nil, format: nil))
         }

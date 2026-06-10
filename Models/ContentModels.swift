@@ -5,13 +5,11 @@ import Foundation
 enum ContentType: String, CaseIterable, Codable {
     case wallpaper = "wallpaper"
     case video = "video"
-    case anime = "anime"
 
     var displayName: String {
         switch self {
         case .wallpaper: return LocalizationService.shared.t("content.wallpaper")
         case .video: return LocalizationService.shared.t("content.video")
-        case .anime: return LocalizationService.shared.t("content.anime")
         }
     }
 
@@ -19,12 +17,28 @@ enum ContentType: String, CaseIterable, Codable {
         switch self {
         case .wallpaper: return "photo"
         case .video: return "film"
-        case .anime: return "play.tv"
         }
+    }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        switch value {
+        case Self.wallpaper.rawValue:
+            self = .wallpaper
+        case Self.video.rawValue, "anime":
+            self = .video
+        default:
+            self = .wallpaper
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
-// MARK: - 通用内容项（壁纸 + 动漫 + 视频）
+// MARK: - 通用内容项（壁纸 + 视频）
 
 struct UniversalContentItem: Identifiable, Codable {
     let id: String
@@ -54,7 +68,6 @@ struct UniversalContentItem: Identifiable, Codable {
 
 enum ContentMetadata: Codable {
     case wallpaper(WallpaperMetadata)
-    case anime(AnimeMetadata)
     case video(VideoMetadata)
 
     struct WallpaperMetadata: Codable {
@@ -65,15 +78,6 @@ enum ContentMetadata: Codable {
         let purity: String?
         let uploader: String?
         let category: String?
-    }
-
-    struct AnimeMetadata: Codable {
-        let episodes: [AnimeEpisode]
-        let currentEpisode: Int?
-        let totalEpisodes: Int?
-        let status: String?
-        let aired: String?
-        let rating: String?
     }
 
     struct VideoMetadata: Codable {
@@ -100,11 +104,11 @@ enum ContentMetadata: Codable {
         case "wallpaper":
             self = .wallpaper(try decoder.decode(WallpaperMetadata.self, from: data))
         case "anime":
-            self = .anime(try decoder.decode(AnimeMetadata.self, from: data))
+            self = .video(VideoMetadata(videoURL: "", duration: nil, resolution: nil, fileSize: nil, format: nil))
         case "video":
             self = .video(try decoder.decode(VideoMetadata.self, from: data))
         default:
-            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown type: \(type)")
+            self = .video(VideoMetadata(videoURL: "", duration: nil, resolution: nil, fileSize: nil, format: nil))
         }
     }
 
@@ -116,9 +120,6 @@ enum ContentMetadata: Codable {
         case .wallpaper(let metadata):
             try container.encode("wallpaper", forKey: .type)
             try container.encode(encoder.encode(metadata), forKey: .data)
-        case .anime(let metadata):
-            try container.encode("anime", forKey: .type)
-            try container.encode(encoder.encode(metadata), forKey: .data)
         case .video(let metadata):
             try container.encode("video", forKey: .type)
             try container.encode(encoder.encode(metadata), forKey: .data)
@@ -126,29 +127,9 @@ enum ContentMetadata: Codable {
     }
 }
 
-// MARK: - 动漫剧集
-
-struct AnimeEpisode: Identifiable, Codable {
-    let id: String
-    let episodeNumber: Int
-    let title: String?
-    let thumbnailURL: String?
-    let videoURLs: [VideoSource]
-    let duration: String?
-}
-
 struct VideoSource: Codable {
     let quality: String
     let url: String
     let type: String
     let label: String?
-}
-
-// MARK: - 观看进度
-
-struct WatchProgress: Codable {
-    let animeId: String
-    var currentEpisode: Int
-    var episodeProgress: Double
-    var lastWatchedAt: Date
 }

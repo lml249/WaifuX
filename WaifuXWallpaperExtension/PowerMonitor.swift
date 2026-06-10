@@ -87,7 +87,7 @@ final class PowerMonitor: Sendable {
         // 亮度需要轮询因为 IODisplay 在用户拖动滑块时不会广播通知，
         // 且手动将亮度拖到零时 screensDidSleep 不会触发。
         let scheduler = NSBackgroundActivityScheduler(
-            identifier: "com.waifux.app.powerCheck"
+            identifier: "com.claretmoon.waifux.app.powerCheck"
         )
         scheduler.interval = 30
         scheduler.tolerance = 15

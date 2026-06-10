@@ -33,7 +33,7 @@ final class LockScreenWallpaperService {
 	/// 已部署的视频 ID 集合（用于清理不再需要的视频）
 	private var deployedVideoIDs: Set<String> = []
 
-	private let appGroupID = "group.com.waifux.app"
+	private let appGroupID = "group.com.claretmoon.waifux.app"
 	private let prefsFileName = "waifux-wallpaper-prefs.json"
 	private let videoDirName = "WallpaperVideos"
 
@@ -333,7 +333,7 @@ final class LockScreenWallpaperService {
 		} else {
 			plist = [:]
 		}
-		let bundleID = "com.waifux.app.wallpaperextension"
+		let bundleID = "com.claretmoon.waifux.app.wallpaperextension"
 		let newChoice: [String: Any] = [
 			"Provider": bundleID,
 			"Identifier": videoID
@@ -413,7 +413,7 @@ final class LockScreenWallpaperService {
 		}
 	}
 
-	    let bundleID = "com.waifux.app.wallpaperextension"
+	    let bundleID = "com.claretmoon.waifux.app.wallpaperextension"
 	    var changed = false
 
 	    for (displayUUID, displayValue) in displaysDict {
@@ -509,7 +509,7 @@ final class LockScreenWallpaperService {
 	    let center = CFNotificationCenterGetDarwinNotifyCenter()
 	    CFNotificationCenterPostNotification(
 	        center,
-	        CFNotificationName("com.waifux.app.wallpaper.prefsChanged" as CFString),
+	        CFNotificationName("com.claretmoon.waifux.app.wallpaper.prefsChanged" as CFString),
 	        nil, nil, true
 	    )
 	}

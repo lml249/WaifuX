@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 PLIST_PATH = Path.home() / "Library/Application Support/com.apple.wallpaper/Store/Index.plist"
-BUNDLE_ID = "com.waifux.app.wallpaperextension"
+BUNDLE_ID = "com.claretmoon.waifux.app.wallpaperextension"
 
 def main():
     if not PLIST_PATH.exists():

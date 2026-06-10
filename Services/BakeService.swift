@@ -1,11 +1,11 @@
 import Foundation
 import AppKit
 import ApplicationServices
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreGraphics
 import CoreMedia
 import CoreVideo
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
 struct BakeVideoResult: Sendable {
     let outputURL: URL
@@ -1365,12 +1365,18 @@ final class BakeService: ObservableObject {
             .fillColor: NSColor.black
         ]
         for screen in NSScreen.screens {
-            do {
-                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(fileURL, for: screen, options: fillOptions)
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(fileURL, for: screen, options: fillOptions)
-                print("[BakeService] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName))")
-            } catch {
-                print("[BakeService] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
+            Task { @MainActor in
+                do {
+                    try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+                        fileURL,
+                        option: .desktop,
+                        targetScreen: screen,
+                        options: fillOptions
+                    )
+                    print("[BakeService] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName))")
+                } catch {
+                    print("[BakeService] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
+                }
             }
         }
     }

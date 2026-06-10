@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 
 /// 视频预加载器 - 使用 AVAsset 预加载视频元数据，加快视频播放启动速度

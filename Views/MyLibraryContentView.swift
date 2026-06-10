@@ -1,7 +1,7 @@
 import SwiftUI
 import Kingfisher
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 
 // MARK: - Scroll 偏移量追踪 PreferenceKey
 private struct LibraryMainScrollOffsetPreferenceKey: PreferenceKey {
@@ -50,7 +50,6 @@ struct MyLibraryContentView: View {
     @StateObject private var viewModel = WallpaperViewModel()
     @StateObject private var mediaViewModel = MediaExploreViewModel()
     @StateObject private var downloadTaskViewModel = DownloadTaskViewModel()
-    @ObservedObject private var animeFavoriteStore = AnimeFavoriteStore.shared
     @ObservedObject private var folderStore = LibraryFolderStore.shared
     @ObservedObject private var gridOrderStore = LibraryGridOrderStore.shared
     @ObservedObject private var folderLockService = FolderLockService.shared
@@ -62,11 +61,9 @@ struct MyLibraryContentView: View {
     @State private var selectedContentType: ContentType = .wallpaper
     @Binding var selectedWallpaper: Wallpaper?
     @Binding var selectedMedia: MediaItem?
-    @Binding var selectedAnime: AnimeSearchResult?
     @Binding var wallpaperContext: [Wallpaper]
     @Binding var mediaContext: [MediaItem]
     let isVisible: Bool
-    @State private var animeFavorites: [AnimeSearchResult] = []
 
     // 子标签：收藏 / 已下载
     @State private var selectedSubTab: SubTab = .downloads
@@ -100,10 +97,8 @@ struct MyLibraryContentView: View {
     @State private var mediaFolderDisplay: [String: FolderDisplayInfo] = [:]
     @State private var lastWallpaperPrefetchBucket: Int?
     @State private var lastMediaPrefetchBucket: Int?
-    @State private var lastAnimePrefetchBucket: Int?
     private let wallpaperPrefetchNamespace = "library.wallpapers"
     private let mediaPrefetchNamespace = "library.media"
-    private let animePrefetchNamespace = "library.anime"
 
     // 文件夹导航
     @State private var currentWallpaperFolderID: String? = nil
@@ -163,14 +158,6 @@ struct MyLibraryContentView: View {
             return .wallpaperFallback
         case .video:
             return .mediaFallback
-        case .anime:
-            return ExploreAtmosphereTint(
-                primary: Color(hex: "FF5A7D"),
-                secondary: Color(hex: "8A5CFF"),
-                tertiary: Color(hex: "20C1FF"),
-                baseTop: Color(hex: "1D2128"),
-                baseBottom: Color(hex: "0E1116")
-            )
         }
     }
 
@@ -209,14 +196,13 @@ struct MyLibraryContentView: View {
             GeometryReader { geometry in
                 let contentWidth = max(0, geometry.size.width - 56)
                 let gridConfig = LibraryGridConfig(contentWidth: contentWidth)
-                let animeGridConfig = AnimeGridConfig(contentWidth: contentWidth)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         mediaHero
                         libraryControlPanel
                             .padding(.top, 36)
-                        contentSections(config: gridConfig, animeConfig: animeGridConfig)
+                        contentSections(config: gridConfig)
                             .padding(.top, 10)
                         Spacer(minLength: 0)
                     }
@@ -252,7 +238,6 @@ struct MyLibraryContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
             await viewModel.initialLoad()
-            await loadAnimeFavorites()
             Task {
                 await LocalWallpaperScanner.shared.forceRescan()
             }
@@ -263,11 +248,6 @@ struct MyLibraryContentView: View {
             // ✅ 从详情返回时触发 ScrollView 滚动位置恢复
             if savedLibraryScrollOffset > 0 {
                 libraryScrollRestoreToken += 1
-            }
-        }
-        .onReceive(animeFavoriteStore.$favorites) { _ in
-            Task {
-                await loadAnimeFavorites()
             }
         }
         .onChange(of: librarySearchQuery) { _, _ in
@@ -393,41 +373,6 @@ struct MyLibraryContentView: View {
         }
     }
 
-    // MARK: - 加载动漫收藏
-    private func loadAnimeFavorites() async {
-        let favorites = animeFavoriteStore.allFavorites
-        let progressStore = AnimeProgressStore.shared
-        lastAnimePrefetchBucket = nil
-        animeFavorites = favorites.map { favorite in
-            // 尝试从进度存储中获取观看信息
-            let summary = progressStore.animeSummaries[favorite.id]
-            let latestEp: String?
-            if let summary, let epNum = summary.lastEpisodeNumber {
-                latestEp = "第 \(epNum) 集"
-            } else {
-                latestEp = nil
-            }
-
-            return AnimeSearchResult(
-                id: favorite.id,
-                title: favorite.title,
-                coverURL: favorite.coverURL,
-                detailURL: "",
-                sourceId: "bangumi",
-                sourceName: "Bangumi",
-                latestEpisode: latestEp,
-                rating: nil,
-                summary: nil,
-                rank: nil,
-                airDate: nil,
-                airWeekday: nil,
-                tags: favorite.tags.map { AnimeTag(name: $0, count: nil) },
-                originalName: nil
-            )
-        }
-        syncSelectionWithVisibleItems()
-    }
-
     private func releaseForegroundMemory() {
         viewModel.releaseForegroundMemory()
         mediaViewModel.releaseForegroundMemory()
@@ -436,10 +381,8 @@ struct MyLibraryContentView: View {
         libraryScrollRestoreToken &+= 1
         selectedWallpaper = nil
         selectedMedia = nil
-        selectedAnime = nil
         wallpaperContext.removeAll()
         mediaContext.removeAll()
-        animeFavorites.removeAll()
         wallpaperItems.removeAll()
         mediaItems.removeAll()
         wallpaperFolderDisplay.removeAll()
@@ -454,14 +397,12 @@ struct MyLibraryContentView: View {
         newFolderName = ""
         lastWallpaperPrefetchBucket = nil
         lastMediaPrefetchBucket = nil
-        lastAnimePrefetchBucket = nil
         stopLibraryPrefetchers()
     }
 
     private func stopLibraryPrefetchers() {
         ForegroundPrefetchManager.shared.stop(namespace: wallpaperPrefetchNamespace)
         ForegroundPrefetchManager.shared.stop(namespace: mediaPrefetchNamespace)
-        ForegroundPrefetchManager.shared.stop(namespace: animePrefetchNamespace)
     }
 
     // MARK: - Hero
@@ -496,8 +437,6 @@ struct MyLibraryContentView: View {
             } else {
                 return (mediaViewModel.allLocalMedia.count, "arrow.down.circle.fill", LiquidGlassColors.accentCyan, "item.downloads")
             }
-        case .anime:
-            return (animeFavorites.count, "heart.fill", LiquidGlassColors.primaryPink, "item.favorites")
         }
     }
 
@@ -507,8 +446,6 @@ struct MyLibraryContentView: View {
             return LiquidGlassColors.primaryPink
         case .video:
             return LiquidGlassColors.secondaryViolet
-        case .anime:
-            return LiquidGlassColors.tertiaryBlue
         }
     }
 
@@ -519,10 +456,7 @@ struct MyLibraryContentView: View {
             HStack(alignment: .center, spacing: 12) {
                 ContentTypePicker(selected: $selectedContentType)
                 librarySearchControl
-
-                if selectedContentType != .anime {
-                    subTabDropdown
-                }
+                subTabDropdown
             }
 
             Spacer(minLength: 0)
@@ -540,14 +474,12 @@ struct MyLibraryContentView: View {
 
     // MARK: - Content Sections
     @ViewBuilder
-    private func contentSections(config: LibraryGridConfig, animeConfig: AnimeGridConfig) -> some View {
+    private func contentSections(config: LibraryGridConfig) -> some View {
         switch selectedContentType {
         case .wallpaper:
             wallpaperSection(config: config)
         case .video:
             mediaSection(config: config)
-        case .anime:
-            animeSection(config: animeConfig)
         }
     }
 
@@ -1027,26 +959,6 @@ struct MyLibraryContentView: View {
         )
     }
 
-    private func preloadNearbyAnime(around anime: AnimeSearchResult, config: AnimeGridConfig) {
-        guard let index = currentAnimeItems.firstIndex(where: { $0.id == anime.id }) else { return }
-        let bucket = prefetchBucket(for: index)
-        guard lastAnimePrefetchBucket != bucket else { return }
-        lastAnimePrefetchBucket = bucket
-
-        let targetSize = CGSize(width: 512, height: 512)
-        let range = prefetchRange(around: index, totalCount: currentAnimeItems.count)
-        let urls = range
-            .filter { $0 != index }
-            .compactMap { URL(string: currentAnimeItems[$0].coverURL ?? "") }
-
-        ForegroundPrefetchManager.shared.stop(namespace: animePrefetchNamespace)
-        ForegroundPrefetchManager.shared.start(
-            urls: urls,
-            options: [.processor(DownsamplingImageProcessor(size: targetSize))],
-            namespace: animePrefetchNamespace
-        )
-    }
-
     private func prefetchBucket(for index: Int) -> Int {
         index / 6
     }
@@ -1159,45 +1071,6 @@ struct MyLibraryContentView: View {
             )
         }
         mediaFolderDisplay = next
-    }
-
-    // MARK: - Anime Section
-    private func animeSection(config: AnimeGridConfig) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if currentAnimeItems.isEmpty {
-                emptyMediaSurface(
-                    title: hasActiveLibrarySearch ? t("error.empty.title") : t("no.anime.favorites"),
-                    subtitle: hasActiveLibrarySearch ? t("error.empty.message") : t("no.anime.favorites.hint"),
-                    icon: hasActiveLibrarySearch ? "magnifyingglass" : "heart.slash",
-                    accent: LiquidGlassColors.tertiaryBlue
-                )
-            } else {
-                batchDeleteToolbar(count: currentAnimeItems.count)
-
-                LazyVGrid(columns: config.gridItems, alignment: .leading, spacing: config.spacing) {
-                    ForEach(currentAnimeItems) { anime in
-                        AnimeLibraryCard(
-                            anime: anime,
-                            isEditing: isEditing,
-                            isSelected: selectedItems.contains(anime.id),
-                            cardWidth: config.cardWidth
-                        ) {
-                            handleAnimeTap(anime)
-                        }
-                        .onAppear {
-                            preloadNearbyAnime(around: anime, config: config)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private var currentAnimeItems: [AnimeSearchResult] {
-        // 动漫目前只有收藏
-        guard hasActiveLibrarySearch else { return animeFavorites }
-        let query = trimmedLibrarySearchQuery
-        return animeFavorites.filter { matchesLibrarySearch(for: $0, query: query) }
     }
 
     // MARK: - Section Header
@@ -1599,15 +1472,13 @@ struct MyLibraryContentView: View {
                 }
             }
 
-            if selectedContentType != .anime {
-                toolbarCapsuleButton(
-                    title: t("new.folder"),
-                    systemImage: "folder.badge.plus",
-                    tint: tint,
-                    prominence: .secondary
-                ) {
-                    showNewFolderSheet = true
-                }
+            toolbarCapsuleButton(
+                title: t("new.folder"),
+                systemImage: "folder.badge.plus",
+                tint: tint,
+                prominence: .secondary
+            ) {
+                showNewFolderSheet = true
             }
 
             libraryUtilityMenu(tint: tint)
@@ -1719,8 +1590,6 @@ struct MyLibraryContentView: View {
                         } label: {
                             Label(t("open.in.finder"), systemImage: "folder")
                         }
-                    case .anime:
-                        EmptyView()
                     }
                 }
             } label: {
@@ -1965,15 +1834,6 @@ struct MyLibraryContentView: View {
         }
     }
 
-    private func handleAnimeTap(_ anime: AnimeSearchResult) {
-        if isEditing {
-            toggleSelection(anime.id)
-        } else {
-            savedLibraryScrollOffset = libraryMainScrollOffset
-            selectedAnime = anime
-        }
-    }
-
     private func toggleSelection(_ id: String) {
         if selectedItems.contains(id) {
             selectedItems.remove(id)
@@ -1997,8 +1857,6 @@ struct MyLibraryContentView: View {
             return orderedWallpaperGridItems.map(\.id)
         case .video:
             return orderedMediaGridItems.map(\.id)
-        case .anime:
-            return currentAnimeItems.map(\.id)
         }
     }
 
@@ -2016,8 +1874,6 @@ struct MyLibraryContentView: View {
                 folderStore.deleteFolder(id: realID, contentType: .wallpaper)
             case .video:
                 folderStore.deleteFolder(id: realID, contentType: .media)
-            case .anime:
-                break
             }
         }
 
@@ -2053,17 +1909,8 @@ struct MyLibraryContentView: View {
                 }
             }
 
-        case .anime:
-            for id in itemIDs {
-                AnimeFavoriteStore.shared.removeFavorite(animeId: id)
-            }
-            Task {
-                await loadAnimeFavorites()
-            }
         }
-        if selectedContentType != .anime {
-            gridOrderStore.removeIDs(removedOrderIDs, from: currentGridOrderScope)
-        }
+        gridOrderStore.removeIDs(removedOrderIDs, from: currentGridOrderScope)
         selectedItems.removeAll()
         isEditing = false
         updateWallpaperItems()
@@ -2116,21 +1963,6 @@ struct MyLibraryContentView: View {
             return true
         }
         return media.tags.contains { $0.localizedCaseInsensitiveContains(query) }
-    }
-
-    private func matchesLibrarySearch(for anime: AnimeSearchResult, query: String) -> Bool {
-        let directMatches = [
-            anime.title,
-            anime.originalName,
-            anime.sourceName,
-            anime.latestEpisode,
-            anime.summary,
-            anime.rating
-        ]
-        if directMatches.contains(where: { $0?.localizedCaseInsensitiveContains(query) == true }) {
-            return true
-        }
-        return anime.tags?.contains(where: { $0.name.localizedCaseInsensitiveContains(query) }) ?? false
     }
 
     /// 删除本地壁纸（含物理文件删除）
@@ -2195,22 +2027,6 @@ struct MyLibraryContentView: View {
             self.contentWidth = contentWidth
             self.columnCount = contentWidth > 1200 ? 4 : (contentWidth > 800 ? 3 : 2)
             self.spacing = 16
-            let totalSpacing = spacing * CGFloat(columnCount - 1)
-            self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
-            self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
-        }
-    }
-
-    /// 动漫列表专用网格配置，列数更多使封面更小
-    private struct AnimeGridConfig {
-        let columnCount: Int
-        let spacing: CGFloat
-        let cardWidth: CGFloat
-        let gridItems: [GridItem]
-
-        init(contentWidth: CGFloat) {
-            self.spacing = 12
-            self.columnCount = contentWidth > 1200 ? 5 : (contentWidth > 800 ? 4 : 3)
             let totalSpacing = spacing * CGFloat(columnCount - 1)
             self.cardWidth = floor((contentWidth - totalSpacing) / CGFloat(columnCount))
             self.gridItems = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columnCount)
@@ -2768,224 +2584,6 @@ struct ContentTypePicker: View {
             )
             .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
             .matchedGeometryEffect(id: "libraryContentTypeGlass", in: selectionNamespace)
-    }
-}
-
-// MARK: - Anime Library Card
-
-struct AnimeLibraryCard: View {
-    let anime: AnimeSearchResult
-    let isEditing: Bool
-    let isSelected: Bool
-    var cardWidth: CGFloat = LibraryCardMetrics.cardWidth
-    let action: () -> Void
-
-    @State private var isHovered = false
-    @State private var progressText: String? = nil
-    @State private var progressValue: Double? = nil
-
-    /// 竖版封面（10:14 比例）
-    private var imageHeight: CGFloat {
-        cardWidth * 1.4
-    }
-
-    /// 底部信息栏高度
-    private let bottomBarHeight: CGFloat = 52
-
-    private var totalCardHeight: CGFloat {
-        imageHeight + bottomBarHeight
-    }
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 0) {
-                // 图片区域
-                ZStack {
-                    KFImage(URL(string: anime.coverURL ?? ""))
-                        .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 512, height: 512)))
-                        .cacheMemoryOnly(false)
-                        .fade(duration: 0.3)
-                        .placeholder { _ in
-                            SkeletonCard(
-                                width: cardWidth,
-                                height: imageHeight,
-                                cornerRadius: 0
-                            )
-                        }
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: cardWidth, height: imageHeight)
-                        .clipped()
-
-                    // 左上角复选框（编辑模式下显示）
-                    if isEditing {
-                        VStack {
-                            HStack {
-                                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 22, weight: .semibold))
-                                    .foregroundStyle(isSelected ? LiquidGlassColors.secondaryViolet : .white.opacity(0.8))
-                                    .background(
-                                        Circle()
-                                            .fill(isSelected ? .white : Color.black.opacity(0.4))
-                                            .frame(width: 20, height: 20)
-                                    )
-                                    .padding(12)
-
-                                Spacer()
-                            }
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    }
-
-                    // 右上角评分/排名（非编辑模式）
-                    if !isEditing {
-                        VStack {
-                            HStack {
-                                Spacer()
-                                if let rating = anime.rating, let score = Double(rating), score > 0 {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "star.fill")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundStyle(.yellow)
-                                        Text(String(format: "%.1f", score))
-                                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                            .foregroundStyle(.white.opacity(0.95))
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .frame(height: 24)
-                                    .background(
-                                        Capsule(style: .continuous)
-                                            .fill(Color.black.opacity(0.45))
-                                    )
-                                    .padding(12)
-                                } else if let rank = anime.rank {
-                                    Text("#\(rank)")
-                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.95))
-                                        .padding(.horizontal, 10)
-                                        .frame(height: 24)
-                                        .background(
-                                            Capsule(style: .continuous)
-                                                .fill(Color.black.opacity(0.45))
-                                        )
-                                        .padding(12)
-                                }
-                            }
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    }
-
-                    // 选中遮罩
-                    if isEditing && isSelected {
-                        Color.black.opacity(0.3)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                }
-                .frame(width: cardWidth, height: imageHeight)
-
-                // 底部信息栏（半透明黑底，与 AnimeGridCell 风格一致）
-                bottomInfoBar
-            }
-            .frame(width: cardWidth, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(Color(hex: "1A1D24").opacity(0.6))
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Color.white.opacity(isHovered ? 0.18 : 0.08), lineWidth: isHovered ? 1.5 : 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .animation(.easeOut(duration: 0.16), value: isHovered)
-        .throttledHover(interval: 0.05) { hovering in
-            if !isEditing {
-                isHovered = hovering
-            }
-        }
-        .onAppear {
-            loadProgress()
-        }
-    }
-
-    // MARK: - 底部信息栏
-
-    private var bottomInfoBar: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 3) {
-                // 标题
-                Text(anime.title)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.95))
-                    .lineLimit(1)
-
-                // 进度 / 集数信息
-                if let progressText {
-                    HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 8, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.5))
-                        Text(progressText)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(1)
-                    }
-                } else if let episode = anime.latestEpisode?.trimmingCharacters(in: .whitespacesAndNewlines),
-                          !episode.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 8, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.5))
-                        Text(episode)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(1)
-                    }
-                }
-
-                // 进度条（有进度时显示）
-                if let progressValue {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(.white.opacity(0.15))
-                                .frame(height: 3)
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(LiquidGlassColors.tertiaryBlue.opacity(0.8))
-                                .frame(width: geo.size.width * CGFloat(min(max(progressValue, 0), 1)), height: 3)
-                        }
-                    }
-                    .frame(height: 3)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-
-            Spacer(minLength: 0)
-        }
-        .frame(width: cardWidth, height: bottomBarHeight, alignment: .leading)
-    }
-
-    // MARK: - 加载进度
-
-    private func loadProgress() {
-        let summary = AnimeProgressStore.shared.animeSummaries[anime.id]
-        if let summary {
-            if summary.watchedEpisodes > 0 {
-                progressText = summary.continueWatchingText
-            } else {
-                progressText = "开始观看"
-            }
-            if summary.totalEpisodes > 0 {
-                progressValue = summary.overallProgress
-            } else if let lastEp = summary.lastEpisodeNumber {
-                progressText = "看到第 \(lastEp) 集"
-            }
-        }
     }
 }
 

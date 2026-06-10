@@ -24,6 +24,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case download
     case workshop
     case scheduler
+    case desktopSlots
     case about
 
     var id: Self { self }
@@ -34,6 +35,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .download: return t("download")
         case .workshop: return t("wallpaperEngine")
         case .scheduler: return t("scheduler")
+        case .desktopSlots: return "桌面槽位"
         case .about: return t("about")
         }
     }
@@ -44,6 +46,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .download: return "arrow.down.circle"
         case .workshop: return "gearshape.2" // Steam/Workshop 风格
         case .scheduler: return "clock.arrow.circlepath"
+        case .desktopSlots: return "rectangle.3.group"
         case .about: return "info.circle"
         }
     }
@@ -146,6 +149,8 @@ struct SettingsView: View {
                         WorkshopSettingsTab(viewModel: viewModel)
                     case .scheduler:
                         SchedulerSettingsTab(viewModel: viewModel)
+                    case .desktopSlots:
+                        DesktopSlotSettingsTab()
                     case .about:
                         AboutSettingsTab(viewModel: viewModel)
                     }
@@ -185,6 +190,14 @@ struct SettingsView: View {
                     .allowsHitTesting(false)
             }
         )
+    }
+}
+
+private struct DesktopSlotSettingsTab: View {
+    var body: some View {
+        MacSettingsForm {
+            DesktopSlotSettingsView()
+        }
     }
 }
 
@@ -289,6 +302,8 @@ private struct GeneralSettingsTab: View {
                     MacToggle(isOn: $arcSettings.compactMode)
                 }
             }
+
+            DesktopSlotSettingsView()
 
             // 动态壁纸设置组
             MacSettingsSection(header: t("videoWallpaper")) {
@@ -976,7 +991,6 @@ private struct AboutSettingsTab: View {
                 MacSettingsSection(header: t("projectInfo")) {
                     infoRow(title: t("developer"), value: "jipika", isLast: false)
                     infoRow(title: t("wallpaperRuleSource"), value: wallpaperRuleSourceText, isLast: false)
-                    infoRow(title: t("animeRuleSource"), value: "KazumiRules", isLast: false)
                     infoRow(title: t("techStack"), value: "SwiftUI + AppKit", isLast: true)
                 }
 

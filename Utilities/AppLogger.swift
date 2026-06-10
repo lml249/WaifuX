@@ -44,7 +44,6 @@ enum AppLogModule: String, CaseIterable {
     case grid        = "Grid"        // RecyclableGridView 相关
     case wallpaper   = "Wallpaper"
     case media       = "Media"
-    case anime       = "Anime"
     case video       = "Video"
     case network     = "Network"
     case storage     = "Storage"
@@ -70,7 +69,7 @@ final class AppLogger: @unchecked Sendable {
     }()
 
     // os.log subsystem
-    private static let subsystem = "com.waifux.app"
+    private static let subsystem = "com.claretmoon.waifux.app"
     private static let oslog = OSLog(subsystem: subsystem, category: "WaifuX")
 
     // 队列保证线程安全写入文件

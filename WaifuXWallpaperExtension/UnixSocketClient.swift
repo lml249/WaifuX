@@ -49,7 +49,7 @@ final class UnixSocketClient: Sendable {
 
     /// Socket 文件路径
     private static var socketPath: String? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app")?
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app")?
             .appendingPathComponent("socket/extension.ipc")
             .path
     }

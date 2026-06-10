@@ -5,7 +5,7 @@ import Combine
 ///
 /// 为静态桌面壁纸提供独立的颗粒蒙层 overlay 窗口。
 /// 与视频壁纸的颗粒蒙层类似，作为独立窗口覆盖在桌面上，
-/// 自动切换壁纸时蒙层不受影响。
+/// 跟随当前桌面槽位显示，避免跨 Space 泄漏到未配置的桌面。
 @MainActor
 final class StaticWallpaperGrainManager {
     static let shared = StaticWallpaperGrainManager()
@@ -45,9 +45,9 @@ final class StaticWallpaperGrainManager {
     }
 
     @objc private func handleSpaceChanged() {
-        // Space 切换后延迟更新，确保窗口层级正确
+        // Space 切换后重建窗口，避免复用仍附着在旧 Space 的桌面层窗口。
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.updateOverlay()
+            self?.recreateWindowsForCurrentSpace()
         }
     }
 
@@ -91,10 +91,11 @@ final class StaticWallpaperGrainManager {
 
     /// 隐藏所有屏幕的颗粒蒙层
     private func hideOverlay() {
-        for (screenID, window) in grainWindows {
+        let windows = grainWindows
+        grainWindows.removeAll()
+        for (_, window) in windows {
             window.orderOut(nil)
             window.contentView = nil
-            grainWindows.removeValue(forKey: screenID)
         }
     }
 
@@ -112,7 +113,7 @@ final class StaticWallpaperGrainManager {
         )
         window.setFrame(frame, display: true)
         window.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1) // 比桌面高一层
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        window.collectionBehavior = [.stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -133,7 +134,7 @@ final class StaticWallpaperGrainManager {
     func refreshWindows() {
         // 移除不再存在的屏幕的窗口
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
-        for (screenID, window) in grainWindows {
+        for (screenID, window) in Array(grainWindows) {
             if !currentScreenIDs.contains(screenID) {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -150,6 +151,16 @@ final class StaticWallpaperGrainManager {
             }
         }
 
+        updateOverlay()
+    }
+
+    private func recreateWindowsForCurrentSpace() {
+        guard ArcBackgroundSettings.shared.grainTextureEnabled,
+              ArcBackgroundSettings.shared.grainIntensity > 0.01 else {
+            hideOverlay()
+            return
+        }
+        hideOverlay()
         updateOverlay()
     }
 }

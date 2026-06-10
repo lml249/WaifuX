@@ -119,7 +119,7 @@ public final class LiquidGlassClockOverlayManager {
             .store(in: &cancellables)
     }
 
-    nonisolated deinit {
+    deinit {
         // Combine cancellables 自动清理
     }
 
@@ -233,15 +233,17 @@ public final class LiquidGlassClockOverlayManager {
     private func startClockTimer() {
         guard clockTickTimer == nil else { return }
         clockTickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.currentConfig.enabled else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self, self.currentConfig.enabled else { return }
 
-            // 轮询检测 Dock 区域变化（兜底：Dock 位置改变等无通知的变更）
-            self.pollDockInsets()
+                // 轮询检测 Dock 区域变化（兜底：Dock 位置改变等无通知的变更）
+                self.pollDockInsets()
 
-            if self.currentConfig.metalShaderEnabled {
-                // Metal 路径：手动触发重绘（shouldRedraw 内部会跳过无效帧）
-                for (_, mtkView) in self.metalViews {
-                    LiquidGlassMetalRenderer.shared.requestRedraw(view: mtkView)
+                if self.currentConfig.metalShaderEnabled {
+                    // Metal 路径：手动触发重绘（shouldRedraw 内部会跳过无效帧）
+                    for (_, mtkView) in self.metalViews {
+                        LiquidGlassMetalRenderer.shared.requestRedraw(view: mtkView)
+                    }
                 }
             }
         }
@@ -389,10 +391,11 @@ public final class LiquidGlassClockOverlayManager {
 
     /// 销毁所有屏幕的时钟窗口
     private func destroyAllWindows() {
-        for (screenID, window) in clockWindows {
+        let windows = clockWindows
+        clockWindows.removeAll()
+        for (_, window) in windows {
             window.orderOut(nil)
             window.contentView = nil
-            clockWindows.removeValue(forKey: screenID)
         }
         metalViews.removeAll()
     }

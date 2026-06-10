@@ -437,7 +437,7 @@ struct PaginationSkeletonRow: View {
     enum SkeletonRowStyle {
         case wallpaper   // 壁纸卡片：顶部图片 + 底部文字栏
         case media       // 媒体卡片：同壁纸但可能有播放按钮
-        case anime       // 动漫卡片：竖版比例 + 标题+集数
+        case portrait    // 竖版卡片：固定比例 + 标题+副标题
     }
 
     init(
@@ -471,8 +471,8 @@ struct PaginationSkeletonRow: View {
         switch style {
         case .wallpaper, .media:
             WallpaperPaginationSkeleton(cornerRadius: cornerRadius)
-        case .anime:
-            AnimePaginationSkeleton()
+        case .portrait:
+            PortraitPaginationSkeleton()
         }
     }
 }
@@ -524,12 +524,12 @@ struct WallpaperPaginationSkeleton: View {
     }
 }
 
-// MARK: - 动漫分页骨架卡片
+// MARK: - 竖版分页骨架卡片
 
-struct AnimePaginationSkeleton: View {
+struct PortraitPaginationSkeleton: View {
     var cardWidth: CGFloat = 160
 
-    // 与 AnimePortraitCard 一致：固定比例 10:14
+    // 固定竖版比例 10:14
     private var imageHeight: CGFloat { cardWidth * 1.4 }
     private var infoHeight: CGFloat { 44 }
 
@@ -784,19 +784,12 @@ struct BottomLoadingCard: View {
 
     @ViewBuilder
     private var glassBackground: some View {
-        if #available(macOS 26.0, *) {
-            Capsule(style: .continuous)
-                .fill(Color.clear)
-                .glassEffect(Glass.regular.tint(Color.white.opacity(0.1)), in: Capsule(style: .continuous))
-        } else {
-            // 使用 .popover 材质，比 hudWindow 更轻量，适合小卡片
-            Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.3))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-        }
+        Capsule(style: .continuous)
+            .fill(Color.black.opacity(0.3))
+            .overlay(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
     }
 }
 
@@ -835,19 +828,12 @@ struct BottomNoMoreCard: View {
 
     @ViewBuilder
     private var glassBackground: some View {
-        if #available(macOS 26.0, *) {
-            Capsule(style: .continuous)
-                .fill(Color.clear)
-                .glassEffect(Glass.regular.tint(Color.white.opacity(0.08)), in: Capsule(style: .continuous))
-        } else {
-            // 使用 SwiftUI 的 .ultraThinMaterial，轻量且渲染高效
-            Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.25))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-        }
+        Capsule(style: .continuous)
+            .fill(Color.black.opacity(0.25))
+            .overlay(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
     }
 }
 
@@ -927,18 +913,12 @@ struct BottomLoadingFailedCard: View {
 
     @ViewBuilder
     private var glassBackground: some View {
-        if #available(macOS 26.0, *) {
-            Capsule(style: .continuous)
-                .fill(Color.clear)
-                .glassEffect(Glass.regular.tint(Color.white.opacity(0.1)), in: Capsule(style: .continuous))
-        } else {
-            Capsule(style: .continuous)
-                .fill(Color.black.opacity(0.3))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-        }
+        Capsule(style: .continuous)
+            .fill(Color.black.opacity(0.3))
+            .overlay(
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
     }
 }
 

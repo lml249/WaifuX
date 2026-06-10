@@ -56,7 +56,7 @@ func createSnapshotViaRuntime(currentTime: CMTime? = nil) async -> AnyObject? {
 }
 
 private func loadSharedSnapshotImage() -> CGImage? {
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
         return nil
     }
 
@@ -94,7 +94,7 @@ private func sharedSnapshotCandidateURLs(in container: URL) -> [URL] {
 }
 
 private func currentPrefsPath(_ key: String) -> String? {
-    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.waifux.app") else {
+    guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.claretmoon.waifux.app") else {
         return nil
     }
     let prefsURL = container.appendingPathComponent("waifux-wallpaper-prefs.json")

@@ -325,6 +325,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 第1帧：基础设置
         DispatchQueue.main.async { [weak self] in
+            self?.cleanupLegacyAnimeDataIfNeeded()
+
             if #available(macOS 26.0, *) {
                 // ⚠️ 延迟到窗口显示后执行，避免启动卡死；在主线程执行避免后台线程调用
                 // Bundle/FileManager/NSWorkspace 等非线程安全 API 触发崩溃
@@ -346,24 +348,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     MediaLibraryService.shared.restoreSavedData()
 
-                    // 第4帧：动漫数据
+                    // 第4帧：路径修复和后台任务
                     DispatchQueue.main.async {
-                        AnimeFavoriteStore.shared.restoreSavedData()
-                        AnimeProgressStore.shared.restoreSavedData()
-
-                        // 第4.5帧：恢复未完成迁移 + 修复孤儿路径
-                        DispatchQueue.main.async {
-                            Task {
-                                await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
-                                await DirectoryMigrationService.shared.repairOrphanedPathsIfNeeded()
-                            }
+                        Task {
+                            await DirectoryMigrationService.shared.recoverIncompleteMigrationIfNeeded()
+                            await DirectoryMigrationService.shared.repairOrphanedPathsIfNeeded()
                         }
 
-                        // 第5帧：播放缓存和任务
+                        // 第5帧：下载、调度器和桌面槽位
                         DispatchQueue.main.async {
-                            PlaybackProgressCache.shared.restoreSavedData()
                             DownloadTaskService.shared.restoreSavedTasks()
                             WallpaperSchedulerService.shared.restoreSavedConfig()
+                            SpaceWallpaperCoordinator.shared.restore()
 
                             // 启动锁屏扩展 Socket IPC 服务端（仅 macOS 26+）
                             if #available(macOS 26.0, *) {
@@ -420,6 +416,74 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    private func cleanupLegacyAnimeDataIfNeeded() {
+        let defaults = UserDefaults.standard
+        let markerKey = "legacy_anime_data_cleanup_v1"
+        guard !defaults.bool(forKey: markerKey) else { return }
+
+        [
+            "anime_favorites_v1",
+            "anime_favorite_sort",
+            "anime_episode_progress_v1",
+            "anime_progress_summary_v1",
+            "playback_progress_cache",
+            "danmakuSettings",
+            "playerEnhancementSettings",
+            "gyl_cachedItems",
+            "gyl_lastUpdate",
+            "gyl_cacheVersion"
+        ].forEach { defaults.removeObject(forKey: $0) }
+
+        let removedFavorites = CachePersistenceService.shared.deleteAll(category: "anime/fav")
+        removeLegacyAnimeDirectory()
+
+        defaults.set(true, forKey: markerKey)
+        print("[WaifuXApp] Legacy anime data cleanup finished. Removed \(removedFavorites) cached favorite record(s).")
+    }
+
+    private func removeLegacyAnimeDirectory() {
+        let fileManager = FileManager.default
+        guard let supportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return
+        }
+
+        let candidates = [
+            supportDir
+                .appendingPathComponent("WaifuX", isDirectory: true)
+                .appendingPathComponent("AnimeRules", isDirectory: true),
+            fileManager.temporaryDirectory
+                .appendingPathComponent("WaifuX", isDirectory: true)
+                .appendingPathComponent("AnimeRules", isDirectory: true)
+        ]
+
+        for directory in candidates where fileManager.fileExists(atPath: directory.path) {
+            do {
+                try fileManager.removeItem(at: directory)
+            } catch {
+                print("[WaifuXApp] Failed to remove legacy anime directory \(directory.path): \(error)")
+            }
+        }
+
+        let legacyLibraryFiles = [
+            supportDir
+                .appendingPathComponent("WaifuX", isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("anime_favorites.json"),
+            supportDir
+                .appendingPathComponent("WaifuX", isDirectory: true)
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("watch_history.json")
+        ]
+
+        for file in legacyLibraryFiles where fileManager.fileExists(atPath: file.path) {
+            do {
+                try fileManager.removeItem(at: file)
+            } catch {
+                print("[WaifuXApp] Failed to remove legacy anime file \(file.path): \(error)")
+            }
+        }
+    }
+
     @MainActor func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // 当用户点击 Dock 图标时显示主窗口
         showMainWindow()
@@ -428,9 +492,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         guard !isDynamicWallpaperRendering else { return }
-        // 备用同步：当应用重新变为活跃时，检查并同步跨 Space 壁纸
-        // 因为 activeSpaceDidChangeNotification 在应用后台时可能不可靠
-        DesktopWallpaperSyncManager.shared.syncOnAppActivation()
+        Task { @MainActor in
+            await SpaceWallpaperCoordinator.shared.reconcileCurrentSpaces(source: "appActivation")
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -544,8 +608,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         guard let window else {
             DisplaySelectorManager.shared.cancelForMemoryRelease()
-            AnimeWindowManager.shared.closeAllWindowsForMemoryRelease()
-            AnimeVideoExtractor.shared.cancel()
             ForegroundPrefetchManager.shared.stopAll()
             KingfisherManager.shared.downloader.cancelAll()
             ImageCache.default.clearMemoryCache()
@@ -558,8 +620,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 await MediaService.shared.clearCache()
                 await ContentService.shared.clearCache()
                 await NetworkService.shared.clearCache()
-                await KazumiRuleLoader.shared.clearCache()
-                await AnimeRuleStore.shared.clearInMemoryCache()
                 await RuleLoader.shared.clearInMemoryCache()
                 await RuleRepository.shared.clearCache()
             }
@@ -584,8 +644,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         NotificationCenter.default.post(name: .appShouldReleaseForegroundMemory, object: nil)
         DisplaySelectorManager.shared.cancelForMemoryRelease()
-        AnimeWindowManager.shared.closeAllWindowsForMemoryRelease()
-        AnimeVideoExtractor.shared.cancel()
 
         // 释放视图树是回收系统图形缓存（IOSurface、CALayer backing store）的关键。
         // 只清前台浏览/预览缓存；动态壁纸渲染、调度器、下载任务和状态栏继续运行。
@@ -609,8 +667,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             await MediaService.shared.clearCache()
             await ContentService.shared.clearCache()
             await NetworkService.shared.clearCache()
-            await KazumiRuleLoader.shared.clearCache()
-            await AnimeRuleStore.shared.clearInMemoryCache()
             await RuleLoader.shared.clearInMemoryCache()
             await RuleRepository.shared.clearCache()
         }
@@ -767,7 +823,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 计算需要清理的过期扩展列表。
     /// 只读取当前进程表和 PlugInKit 登记项，避免启动时枚举 `/private/tmp` / build 大目录。
-    private func computeStaleWallpaperExtensionCandidates(currentExtensionURL: URL, currentAppURL: URL) -> [URL] {
+    private nonisolated func computeStaleWallpaperExtensionCandidates(currentExtensionURL: URL, currentAppURL: URL) -> [URL] {
         let candidates = wallpaperExtensionRegistrationCandidates(currentAppURL: currentAppURL)
         return candidates.filter { candidate in
             guard candidate.standardizedFileURL.path != currentExtensionURL.standardizedFileURL.path else {
@@ -780,17 +836,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func registerBundleWithLaunchServices(_ url: URL) {
+    private nonisolated func registerBundleWithLaunchServices(_ url: URL) {
         let tool = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         guard FileManager.default.isExecutableFile(atPath: tool) else { return }
         runRegistrationTool(tool, arguments: ["-f", url.path], label: "lsregister")
     }
 
-    private func registerBundleWithPlugInKit(_ url: URL) {
+    private nonisolated func registerBundleWithPlugInKit(_ url: URL) {
         runRegistrationTool("/usr/bin/pluginkit", arguments: ["-a", url.path], label: "pluginkit add")
     }
 
-    private func wallpaperExtensionRegistrationCandidates(currentAppURL: URL) -> [URL] {
+    private nonisolated func wallpaperExtensionRegistrationCandidates(currentAppURL: URL) -> [URL] {
         var result: [URL] = []
         var seen = Set<String>()
 
@@ -798,7 +854,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let standardized = url.standardizedFileURL
             let path = standardized.path
             guard seen.insert(path).inserted else { return }
-            guard wallpaperExtensionBundleID(at: standardized) == "com.waifux.app.wallpaperextension" else {
+            guard wallpaperExtensionBundleID(at: standardized) == "com.claretmoon.waifux.app.wallpaperextension" else {
                 return
             }
             if !path.hasPrefix(currentAppURL.path + "/") {
@@ -816,7 +872,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return result
     }
 
-    private func runningWallpaperExtensionCandidates() -> [URL] {
+    private nonisolated func runningWallpaperExtensionCandidates() -> [URL] {
         let output = processOutput(
             launchPath: "/bin/ps",
             arguments: ["-axo", "command="]
@@ -838,10 +894,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return result
     }
 
-    private func plugInKitWallpaperExtensionCandidates() -> [URL] {
+    private nonisolated func plugInKitWallpaperExtensionCandidates() -> [URL] {
         let output = processOutput(
             launchPath: "/usr/bin/pluginkit",
-            arguments: ["-m", "-A", "-D", "-v", "-i", "com.waifux.app.wallpaperextension"]
+            arguments: ["-m", "-A", "-D", "-v", "-i", "com.claretmoon.waifux.app.wallpaperextension"]
         )
 
         var result: [URL] = []
@@ -860,13 +916,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return result
     }
 
-    private func unregisterBundleWithLaunchServices(_ url: URL) {
+    private nonisolated func unregisterBundleWithLaunchServices(_ url: URL) {
         let tool = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         guard FileManager.default.isExecutableFile(atPath: tool) else { return }
         runRegistrationTool(tool, arguments: ["-u", url.path], label: "lsregister unregister")
     }
 
-    private func hostAppURL(forWallpaperExtensionURL url: URL) -> URL? {
+    private nonisolated func hostAppURL(forWallpaperExtensionURL url: URL) -> URL? {
         let plugInsURL = url.deletingLastPathComponent()
         guard plugInsURL.lastPathComponent == "PlugIns" else { return nil }
         let contentsURL = plugInsURL.deletingLastPathComponent()
@@ -876,13 +932,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return appURL
     }
 
-    private func wallpaperExtensionBundleID(at url: URL) -> String? {
+    private nonisolated func wallpaperExtensionBundleID(at url: URL) -> String? {
         // ⚠️ 只能在后台线程调用，不能使用 Bundle(url:)（非线程安全）
         let infoURL = url.appendingPathComponent("Contents/Info.plist")
         return (NSDictionary(contentsOf: infoURL) as? [String: Any])?["CFBundleIdentifier"] as? String
     }
 
-    private func isStaleWaifuXBuildPath(_ url: URL) -> Bool {
+    private nonisolated func isStaleWaifuXBuildPath(_ url: URL) -> Bool {
         let path = url.standardizedFileURL.path
         if path.hasPrefix("/private/tmp/") {
             return true
@@ -893,7 +949,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return false
     }
 
-    private func terminateStaleWallpaperExtensionProcesses(currentAppURL: URL) {
+    private nonisolated func terminateStaleWallpaperExtensionProcesses(currentAppURL: URL) {
         let currentPrefix = currentAppURL.standardizedFileURL.path + "/"
         // ⚠️ NSWorkspace 只能在主线程访问
         let runningApps = if Thread.isMainThread {
@@ -902,7 +958,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             DispatchQueue.main.sync { NSWorkspace.shared.runningApplications }
         }
         let staleApps = runningApps.compactMap { app -> (app: NSRunningApplication, path: String)? in
-            guard app.bundleIdentifier == "com.waifux.app.wallpaperextension",
+            guard app.bundleIdentifier == "com.claretmoon.waifux.app.wallpaperextension",
                   let executableURL = app.executableURL?.standardizedFileURL,
                   !executableURL.path.hasPrefix(currentPrefix) else {
                 return nil
@@ -918,7 +974,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: URL) {
+    private nonisolated func terminateStaleWallpaperExtensionProcessesByPID(currentAppURL: URL) {
         let currentPrefix = currentAppURL.standardizedFileURL.path + "/"
         let output = processOutput(
             launchPath: "/bin/ps",
@@ -945,7 +1001,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func runRegistrationTool(_ launchPath: String, arguments: [String], label: String) {
+    private nonisolated func runRegistrationTool(_ launchPath: String, arguments: [String], label: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
         process.arguments = arguments
@@ -961,7 +1017,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func processOutput(launchPath: String, arguments: [String]) -> String {
+    private nonisolated func processOutput(launchPath: String, arguments: [String]) -> String {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: launchPath)
