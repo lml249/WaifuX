@@ -594,46 +594,6 @@ final class ExploreAtmosphereController: ObservableObject {
         }
     }
 
-    func updateFirstAnime(coverURL: String) {
-        guard !coverURL.isEmpty else {
-            resetToFallback()
-            return
-        }
-
-        let key = "a:\(coverURL)"
-        if key == activeFirstItemKey, referenceImage != nil {
-            return
-        }
-        activeFirstItemKey = key
-        loadTask?.cancel()
-        loadTask = nil
-        referenceImage = nil
-
-        tint = .mediaFallback
-
-        guard let url = URL(string: coverURL) else { return }
-
-        loadTask = Task {
-            guard let image = await retrieveAtmosphereImage(from: url),
-                  !Task.isCancelled else { return }
-
-            let processed = await Task.detached(priority: .userInitiated) {
-                let small = image.constrainedForAtmosphereBackdrop()
-                let sampledColors = ExploreImageColorSampler.triplet(from: small)
-                return (small, sampledColors)
-            }.value
-
-            guard !Task.isCancelled else { return }
-
-            await MainActor.run {
-                self.referenceImage = processed.0
-                if let (c1, c2, c3) = processed.1 {
-                    self.tint = ExploreAtmosphereTint.fromSampledTriplet(c1, c2, c3)
-                }
-            }
-        }
-    }
-
     /// 从任意图片 URL 更新氛围背景（用于随机切换，不持久化）
     func updateFromImageURL(_ url: URL?, keyPrefix: String = "rand") {
         guard let url else {

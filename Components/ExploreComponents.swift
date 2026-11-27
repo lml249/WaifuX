@@ -255,7 +255,10 @@ private final class ScrollToTopNSView: NSView {
         guard let scrollView = findParentScrollView() else { return }
 
         observation = scrollView.contentView.observe(\.bounds, options: [.new, .initial]) { [weak self] clipView, _ in
-            self?.onOffsetChange?(clipView.bounds.origin.y)
+            DispatchQueue.main.async {
+                let offsetY = clipView.bounds.origin.y
+                self?.onOffsetChange?(offsetY)
+            }
         }
     }
 

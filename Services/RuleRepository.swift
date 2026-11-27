@@ -127,8 +127,7 @@ actor RuleRepository {
 
     // MARK: - 同步规则
 
-    /// 同步所有规则（壁纸 + 媒体，不包括动漫）
-    /// 动漫规则完全由 AnimeRuleStore/KazumiRuleLoader 独立管理
+    /// 同步所有规则（壁纸 + 媒体）。
     func syncAllRules() async throws {
         print("[RuleRepository] Syncing all rules...")
 
@@ -137,9 +136,6 @@ actor RuleRepository {
 
         // 同步壁纸规则
         try await syncWallpaperRules()
-
-        // 注意：动漫规则不由 RuleRepository 管理
-        // 动漫规则由 AnimeRuleStore 独立从 Kazumi 仓库加载
 
         print("[RuleRepository] Sync completed")
     }
@@ -282,8 +278,6 @@ struct RepositoryIndex: Codable {
     struct RuleCategories: Codable {
         let wallpaper: WallpaperCategory?
         let media: MediaCategory?
-        // 注意：anime 类别不由 RuleRepository 管理
-        // 动漫规则由 AnimeRuleStore/KazumiRuleLoader 独立管理
     }
 
     struct WallpaperCategory: Codable {

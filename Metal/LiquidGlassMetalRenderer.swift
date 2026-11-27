@@ -12,8 +12,7 @@ import SwiftUI
 // ═══════════════════════════════════════════════════════════
 // 架构说明：
 //   本渲染器管理 MTLDevice → MTLCommandQueue → MTKView 管线。
-//   着色器代码以内嵌字符串方式编译（无需 .metal 文件参与 Xcode 构建），
-//   与 AnimeVideoEnhancer 模式一致。
+//   着色器代码以内嵌字符串方式编译，无需 .metal 文件参与 Xcode 构建。
 //
 // 未来自定义参数扩展口（已预留）：
 //   - metalShaderEffect: 切换不同着色器效果 ("glass"|"glow"|"frost")

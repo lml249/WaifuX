@@ -297,6 +297,7 @@ struct SteamLoginWebView: NSViewRepresentable {
 
 /// 将 WKWebView 默认数据存储中的 Steam 登录 Cookie 同步到共享 HTTPCookieStorage，
 /// 确保后续 URLSession 请求（NetworkService）携带有效的登录会话
+@MainActor
 private func transferSteamCookiesToSharedStorage() async {
     await withCheckedContinuation { continuation in
         let cookieStore = WKWebsiteDataStore.default().httpCookieStore

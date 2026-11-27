@@ -6,6 +6,7 @@ actor RuleLoader {
     static let shared = RuleLoader()
 
     private var rules: [String: DataSourceRule] = [:]
+    private var hasLoadedRules = false
     private let rulesDirectory: URL
     private let fileManager = FileManager.default
 
@@ -15,6 +16,10 @@ actor RuleLoader {
             self.rulesDirectory = fileManager.temporaryDirectory
                 .appendingPathComponent("WaifuX", isDirectory: true)
                 .appendingPathComponent("Rules", isDirectory: true)
+            try? fileManager.createDirectory(at: rulesDirectory, withIntermediateDirectories: true)
+            Task {
+                await copyDefaultRulesFromBundle()
+            }
             return
         }
         self.rulesDirectory = supportDir
@@ -36,11 +41,15 @@ actor RuleLoader {
         // 检查是否已经复制过
         let copiedKey = "default_rules_copied_v1"
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: copiedKey) else { return }
+        guard !defaults.bool(forKey: copiedKey) else {
+            _ = await loadAllRules()
+            return
+        }
 
         // 从 Bundle 加载默认规则
         guard let rulesURL = Bundle.main.url(forResource: "Rules", withExtension: nil) else {
             print("[RuleLoader] Rules directory not found in bundle")
+            _ = await loadAllRules()
             return
         }
 
@@ -75,15 +84,24 @@ actor RuleLoader {
         }
 
         var loadedRules: [DataSourceRule] = []
+        var nextRules: [String: DataSourceRule] = [:]
 
         for file in files {
-            if let rule = try? loadRule(from: file) {
+            do {
+                let rule = try loadRule(from: file)
                 // 检查是否已存在，如果存在则覆盖
-                rules[rule.id] = rule
+                nextRules[rule.id] = rule
                 loadedRules.append(rule)
+            } catch {
+                if isLegacyAnimeRule(at: file) {
+                    try? fileManager.removeItem(at: file)
+                    print("[RuleLoader] Removed legacy anime rule: \(file.lastPathComponent)")
+                }
             }
         }
 
+        rules = nextRules
+        hasLoadedRules = true
         return loadedRules
     }
 
@@ -91,6 +109,9 @@ actor RuleLoader {
 
     func loadRule(from url: URL) throws -> DataSourceRule {
         let data = try Data(contentsOf: url)
+        guard !Self.isLegacyAnimeRuleData(data) else {
+            throw RuleError.invalidRule
+        }
         return try JSONDecoder().decode(DataSourceRule.self, from: data)
     }
 
@@ -101,6 +122,7 @@ actor RuleLoader {
         let filePath = rulesDirectory.appendingPathComponent("\(rule.id).json")
         try data.write(to: filePath)
         rules[rule.id] = rule
+        hasLoadedRules = true
     }
 
     // MARK: - 从 URL 下载并安装
@@ -117,6 +139,9 @@ actor RuleLoader {
             throw RuleError.downloadFailed
         }
 
+        guard !Self.isLegacyAnimeRuleData(data) else {
+            throw RuleError.invalidRule
+        }
         let rule = try JSONDecoder().decode(DataSourceRule.self, from: data)
 
         // 保存到本地
@@ -132,36 +157,17 @@ actor RuleLoader {
         return try await installRule(from: rawURL)
     }
 
-    // MARK: - 批量安装 KazumiRules
-
-    func installKazumiRules(repo: String = "Predidit/KazumiRules", rules: [String]) async throws -> [DataSourceRule] {
-        var installedRules: [DataSourceRule] = []
-
-        for ruleFile in rules {
-            do {
-                let rule = try await installRuleFromGitHub(
-                    owner: "Predidit",
-                    repo: repo,
-                    path: ruleFile
-                )
-                installedRules.append(rule)
-            } catch {
-                print("[RuleLoader] Failed to install \(ruleFile): \(error)")
-            }
-        }
-
-        return installedRules
-    }
-
     // MARK: - 获取规则
 
-    func rule(for id: String) -> DataSourceRule? {
+    func rule(for id: String) async -> DataSourceRule? {
+        await loadRulesIfNeeded()
         return rules[id]
     }
 
     // MARK: - 按类型获取规则
 
-    func rules(for contentType: ContentType) -> [DataSourceRule] {
+    func rules(for contentType: ContentType) async -> [DataSourceRule] {
+        await loadRulesIfNeeded()
         return rules.values
             .filter { $0.contentType == contentType && !$0.deprecated }
             .sorted { $0.name < $1.name }
@@ -169,13 +175,15 @@ actor RuleLoader {
 
     // MARK: - 获取所有规则
 
-    func allRules() -> [DataSourceRule] {
+    func allRules() async -> [DataSourceRule] {
+        await loadRulesIfNeeded()
         return Array(rules.values).sorted { $0.name < $1.name }
     }
 
     /// 后台释放前台资源时只清内存，不删除用户安装/同步到本地的规则文件。
     func clearInMemoryCache() {
         rules.removeAll(keepingCapacity: false)
+        hasLoadedRules = false
     }
 
     // MARK: - 删除规则
@@ -186,6 +194,7 @@ actor RuleLoader {
         if fileManager.fileExists(atPath: filePath.path) {
             try fileManager.removeItem(at: filePath)
         }
+        hasLoadedRules = true
     }
 
     // MARK: - 导出规则
@@ -209,5 +218,26 @@ actor RuleLoader {
         let rule = try loadRule(from: filePath)
         rules[id] = rule
         return rule
+    }
+
+    private func isLegacyAnimeRule(at url: URL) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return false }
+        return Self.isLegacyAnimeRuleData(data)
+    }
+
+    private func loadRulesIfNeeded() async {
+        if !hasLoadedRules {
+            _ = await loadAllRules()
+        }
+    }
+
+    private static func isLegacyAnimeRuleData(_ data: Data) -> Bool {
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let rawContentType = object["contentType"] as? String
+        else {
+            return false
+        }
+        return rawContentType.caseInsensitiveCompare("anime") == .orderedSame
     }
 }

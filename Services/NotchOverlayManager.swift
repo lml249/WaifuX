@@ -58,7 +58,7 @@ final class NotchOverlayManager {
 
         // 移除不再存在的屏幕的窗口
         let currentScreenIDs = Set(NSScreen.screens.map { $0.wallpaperScreenIdentifier })
-        for (screenID, window) in overlayWindows {
+        for (screenID, window) in Array(overlayWindows) {
             if !currentScreenIDs.contains(screenID) {
                 window.orderOut(nil)
                 window.contentView = nil
@@ -86,10 +86,11 @@ final class NotchOverlayManager {
     }
 
     private func destroyOverlays() {
-        for (screenID, window) in overlayWindows {
+        let windows = overlayWindows
+        overlayWindows.removeAll()
+        for (_, window) in windows {
             window.orderOut(nil)
             window.contentView = nil
-            overlayWindows.removeValue(forKey: screenID)
         }
     }
 

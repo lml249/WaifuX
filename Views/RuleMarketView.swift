@@ -228,7 +228,7 @@ struct RuleMarketItemView: View {
                             .cornerRadius(4)
                     }
                     if isInstalled {
-                        Text(t("animeRules.installed"))
+                        Text(t("sourceRules.installed"))
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -289,7 +289,6 @@ struct RuleMarketItemView: View {
     private var categoryIcon: String {
         switch rule.type {
         case "wallpaper": return "photo"
-        case "anime": return "play.tv"
         case "video": return "film"
         default: return "doc"
         }
@@ -298,7 +297,6 @@ struct RuleMarketItemView: View {
     private var categoryColor: Color {
         switch rule.type {
         case "wallpaper": return .blue
-        case "anime": return .purple
         case "video": return .orange
         default: return .gray
         }
@@ -310,14 +308,12 @@ struct RuleMarketItemView: View {
 enum RuleCategory: String, CaseIterable {
     case all
     case wallpaper
-    case anime
     case video
 
     var displayName: String {
         switch self {
         case .all: return t("ruleMarket.all")
         case .wallpaper: return t("ruleMarket.wallpaper")
-        case .anime: return t("ruleMarket.anime")
         case .video: return t("ruleMarket.video")
         }
     }
@@ -326,7 +322,6 @@ enum RuleCategory: String, CaseIterable {
         switch self {
         case .all: return "square.grid.2x2"
         case .wallpaper: return "photo"
-        case .anime: return "play.tv"
         case .video: return "film"
         }
     }
@@ -359,7 +354,6 @@ class RuleMarketViewModel: ObservableObject {
 
     private let ruleRepository = RuleRepository.shared
     private let ruleLoader = RuleLoader.shared
-    private let animeRuleStore = AnimeRuleStore.shared
 
     var filteredRules: [RemoteRuleInfo] {
         var result = rules
@@ -437,12 +431,7 @@ class RuleMarketViewModel: ObservableObject {
 
     private func loadInstalledRules() async {
         let dataSourceRules = await ruleLoader.allRules()
-        let dataSourceIds = Set(dataSourceRules.map { $0.id })
-
-        let animeRules = await animeRuleStore.allRules()
-        let animeIds = Set(animeRules.map { $0.id })
-
-        installedRuleIds = dataSourceIds.union(animeIds)
+        installedRuleIds = Set(dataSourceRules.map { $0.id })
     }
 
     func installRule(_ rule: RemoteRuleInfo) {
@@ -450,11 +439,7 @@ class RuleMarketViewModel: ObservableObject {
 
         Task {
             do {
-                if rule.type == "anime" {
-                    _ = try await animeRuleStore.installRule(from: rule.url)
-                } else {
-                    _ = try await ruleLoader.installRule(from: rule.url)
-                }
+                _ = try await ruleLoader.installRule(from: rule.url)
                 installedRuleIds.insert(rule.id)
                 installingRuleIds.remove(rule.id)
             } catch {
@@ -469,11 +454,7 @@ class RuleMarketViewModel: ObservableObject {
 
         Task {
             do {
-                if rule.type == "anime" {
-                    _ = try await animeRuleStore.installRule(from: rule.url)
-                } else {
-                    _ = try await ruleLoader.installRule(from: rule.url)
-                }
+                _ = try await ruleLoader.installRule(from: rule.url)
                 installingRuleIds.remove(rule.id)
             } catch {
                 print("[RuleMarket] Failed to update rule: \(error)")
@@ -485,11 +466,7 @@ class RuleMarketViewModel: ObservableObject {
     func removeRule(_ rule: RemoteRuleInfo) {
         Task {
             do {
-                if rule.type == "anime" {
-                    try await animeRuleStore.removeRule(id: rule.id)
-                } else {
-                    try await ruleLoader.removeRule(id: rule.id)
-                }
+                try await ruleLoader.removeRule(id: rule.id)
                 installedRuleIds.remove(rule.id)
             } catch {
                 print("[RuleMarket] Failed to remove rule: \(error)")

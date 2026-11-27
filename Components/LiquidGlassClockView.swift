@@ -156,42 +156,22 @@ private struct ClockGlassSurfaceModifier: ViewModifier {
     let config: LiquidGlassClockConfiguration
 
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            // ── 原生 Glass API（Metal 离屏渲染） ──
-            let shape = RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
-            content
-                .padding(1)
-                .background(
-                    shape
-                        .fill(.clear)
-                        .glassEffect(.regular.tint(config.accentColor.opacity(0.15)), in: shape)
-                )
-                .clipShape(shape)
-                .background(
-                    shape
-                        .stroke(config.accentColor.opacity(0.25), lineWidth: 1)
-                        .shadow(color: .black.opacity(0.15), radius: 12, x: 0, y: 4)
-                )
-                .opacity(config.opacity)
-        } else {
-            // ── Fallback 模拟玻璃（macOS 14~25） ──
-            content
-                .background(
-                    RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
-                                .fill(config.accentColor.opacity(0.08))
-                        )
-                )
-                .clipShape(.rect(cornerRadius: config.cornerRadius, style: .continuous))
-                .background(
-                    RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
-                        .stroke(config.accentColor.opacity(0.2), lineWidth: 1)
-                        .shadow(color: .black.opacity(0.2), radius: 16, x: 0, y: 6)
-                )
-                .opacity(config.opacity)
-        }
+        content
+            .background(
+                RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
+                            .fill(config.accentColor.opacity(0.08))
+                    )
+            )
+            .clipShape(.rect(cornerRadius: config.cornerRadius, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: config.cornerRadius, style: .continuous)
+                    .stroke(config.accentColor.opacity(0.2), lineWidth: 1)
+                    .shadow(color: .black.opacity(0.2), radius: 16, x: 0, y: 6)
+            )
+            .opacity(config.opacity)
     }
 }
 

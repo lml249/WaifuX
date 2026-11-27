@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - 数据源规则配置（参考 Kazumi）
+// MARK: - 数据源规则配置
 
 struct DataSourceRule: Identifiable, Codable {
     let id: String
@@ -67,16 +67,9 @@ struct DetailXPath: Codable {
     let resolution: String?
     let fileSize: String?
 
-    // 动漫专用
-    let episodes: String?
-    let episodeName: String?
-    let episodeLink: String?
-    let episodeThumb: String?
-
     enum CodingKeys: String, CodingKey {
         case title, cover, description
         case fullImage, resolution, fileSize
-        case episodes, episodeName, episodeLink, episodeThumb
     }
 }
 

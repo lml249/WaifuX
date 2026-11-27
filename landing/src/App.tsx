@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import LineWaves from "./components/LineWaves/LineWaves"
 import ScrollReveal from "./components/ScrollReveal/ScrollReveal"
-import { Download, Search, Sparkles, Film, RefreshCw, Settings, Play, Tv, Heart, Star, ArrowRight, ExternalLink, ChevronRight, Command, Zap, Layers } from "lucide-react"
+import { Download, Search, Film, RefreshCw, Settings, Play, MonitorCog, Heart, Star, ArrowRight, ExternalLink, ChevronRight, Command, Zap, Layers } from "lucide-react"
 import { useLanguage } from "./contexts/LanguageContext"
 import { LanguageSwitcher } from "./components/LanguageSwitcher"
 import "./App.css"
@@ -42,7 +42,7 @@ function FeatureGrid() {
     const cardList: any[] = [
         { title: cards.search.title, desc: cards.search.desc, iconBg: cards.search.iconBg, icon: Search },
         { title: cards.dynamic.title, desc: cards.dynamic.desc, iconBg: cards.dynamic.iconBg, icon: Film },
-        { title: cards.anime.title, desc: cards.anime.desc, iconBg: cards.anime.iconBg, icon: Sparkles },
+        { title: cards.slots.title, desc: cards.slots.desc, iconBg: cards.slots.iconBg, icon: MonitorCog },
         { title: cards.sync.title, desc: cards.sync.desc, iconBg: cards.sync.iconBg, icon: RefreshCw },
         { title: cards.download.title, desc: cards.download.desc, iconBg: cards.download.iconBg, icon: Download },
         { title: cards.custom.title, desc: cards.custom.desc, iconBg: cards.custom.iconBg, icon: Settings, tags: cards.custom.tags },
@@ -110,7 +110,7 @@ function SourceSection() {
                 </ScrollReveal>
             </div>
 
-            {/* Dynamic & Anime Row */}
+            {/* Dynamic & Desktop Slots Row */}
             <div className="nt-source-row">
                 <ScrollReveal delay={240}>
                     <div className="nt-source-card nt-source-mini">
@@ -130,11 +130,11 @@ function SourceSection() {
 
                 <ScrollReveal delay={320}>
                     <div className="nt-source-card nt-source-mini">
-                        <Tv className="w-6 h-6 mb-4" strokeWidth={1.5} />
-                        <h3>{t.sources.anime.name}</h3>
-                        <p>{t.sources.anime.desc}</p>
+                        <MonitorCog className="w-6 h-6 mb-4" strokeWidth={1.5} />
+                        <h3>{t.sources.slots.name}</h3>
+                        <p>{t.sources.slots.desc}</p>
                         <div className="nt-tags-sm">
-                            {t.sources.anime.tags.map((tag: string, i: number) => (
+                            {t.sources.slots.tags.map((tag: string, i: number) => (
                                 <span key={i} className="nt-tag-sm">{tag}</span>
                             ))}
                         </div>
@@ -190,7 +190,7 @@ function App() {
                     <div className="nt-nav-actions">
                         <LanguageSwitcher />
                         <a 
-                            href="https://github.com/jipika/WaifuX" 
+                            href="https://github.com/lml249/WaifuX"
                             target="_blank" 
                             rel="noopener noreferrer" 
                             className="nt-btn-icon"
@@ -199,7 +199,7 @@ function App() {
                             <GithubIcon className="w-4 h-4" />
                         </a>
                         <a
-                            href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
+                            href="https://github.com/lml249/WaifuX/releases/latest/download/WaifuX.dmg"
                             className="nt-btn-primary"
                         >
                             <Download className="w-3.5 h-3.5" />
@@ -233,7 +233,7 @@ function App() {
                         {/* CTA Buttons */}
                         <div className="nt-hero-actions">
                             <a
-                                href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
+                                href="https://github.com/lml249/WaifuX/releases/latest/download/WaifuX.dmg"
                                 className="nt-btn-hero"
                             >
                                 <Download className="w-[18px] h-[18px]" />
@@ -241,7 +241,7 @@ function App() {
                                 <ArrowRight className="w-4 h-4 ml-auto opacity-60 group-hover:translate-x-0.5 transition-transform" />
                             </a>
                             <a
-                                href="https://github.com/jipika/WaifuX"
+                                href="https://github.com/lml249/WaifuX"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="nt-btn-ghost"
@@ -348,7 +348,7 @@ function App() {
                             
                             <div className="nt-cta-actions">
                                 <a
-                                    href="https://github.com/jipika/WaifuX/releases/latest/download/WaifuX.dmg"
+                                    href="https://github.com/lml249/WaifuX/releases/latest/download/WaifuX.dmg"
                                     className="nt-btn-hero large"
                                 >
                                     <Download className="w-5 h-5" />
@@ -356,7 +356,7 @@ function App() {
                                     <ArrowRight className="w-4 h-4" />
                                 </a>
                                 <a
-                                    href="https://github.com/jipika/WaifuX"
+                                    href="https://github.com/lml249/WaifuX"
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="nt-btn-ghost large"
@@ -388,10 +388,10 @@ function App() {
                         <div className="nt-footer-links">
                             <div className="nt-footer-col">
                                 <h4>{t.footer.links}</h4>
-                                <a href="https://github.com/jipika/WaifuX" target="_blank" rel="noopener noreferrer">
+                                <a href="https://github.com/lml249/WaifuX" target="_blank" rel="noopener noreferrer">
                                     <GithubIcon className="w-3.5 h-3.5" />{t.footer.github}
                                 </a>
-                                <a href="https://github.com/jipika/WaifuX-Profiles" target="_blank" rel="noopener noreferrer">
+                                <a href="https://github.com/lml249/WaifuX-Profiles" target="_blank" rel="noopener noreferrer">
                                     <ExternalLink className="w-3 h-3" />{t.footer.rules}
                                 </a>
                             </div>

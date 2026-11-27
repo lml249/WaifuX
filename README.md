@@ -10,29 +10,29 @@
 
 <p align="center">
   <samp>
-    <b>macOS 开源 ACG 一站式应用</b><br>
-    <b>静态壁纸 · 动态壁纸 · 动漫视频</b><br>
-    <b>多源聚合，全场景覆盖</b>
+    <b>macOS 开源壁纸管理应用</b><br>
+    <b>静态壁纸 · 动态壁纸 · 桌面槽位</b><br>
+    <b>多源聚合，多桌面覆盖</b>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/lml249/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/WaifuX/forks">
-    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/lml249/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/lml249/WaifuX?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/lml249/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/WaifuX">
+  <a href="https://github.com/lml249/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -52,10 +52,6 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">动态壁纸 - MotionBG</p></td>
-    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">动漫详情 - 多源解析</p></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">视频播放 - 选集管理</p></td>
     <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">我的库 - 设置</p></td>
   </tr>
 </table>
@@ -68,7 +64,7 @@
 |------|:----:|------|
 | 🖼 **静态壁纸** | ✅ | 双源切换：Wallhaven + 4K Wall，4K/8K 全分辨率覆盖 |
 | 🎬 **动态壁纸** | ✅ | 支持 MotionBGs 等动态背景源，让桌面"活"起来 |
-| 📺 **动漫视频** | ✅ | 内置多源解析引擎，追番观影一站式完成 |
+| 🖥 **桌面槽位** | ✅ | 为 macOS 多个桌面分别维护壁纸槽位，例如桌面 1、桌面 2 |
 | 🔍 **智能搜索与筛选** | ✅ | 关键词、标签、分类、颜色、分辨率等多维度筛选 |
 | ⭐ **收藏系统** | ✅ | 收藏喜欢的壁纸、视频，建立个人 ACG 资源库 |
 | ⚡️ **一键设为桌面** | ✅ | 浏览中即可快速设置为桌面壁纸或动态桌面 |
@@ -82,24 +78,19 @@
 
 ## 📥 安装
 
-### 方式一：官网下载（推荐）
+### 方式一：GitHub Releases（推荐）
 
-👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
+👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### 方式二：GitHub Releases
-
-👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
-
-### 方式三：Homebrew
+### 方式二：源码构建
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
 
-### 方式四：夸克网盘
-
-👉 **[https://pan.quark.cn/s/aa3ed02db5cf](https://pan.quark.cn/s/aa3ed02db5cf)**
+在 Xcode 中选择 WaifuX scheme 后构建运行。
 
 > ⚠️ 首次打开可能需要在「系统设置 → 隐私与安全性」中允许运行。
 
@@ -124,7 +115,7 @@ WaifuX 的主要数据源 [Wallhaven](https://wallhaven.cc) 托管在海外服�
 
 WaifuX 采用动态规则机制，爬取逻辑与客户端分离：
 
-- 规则托管于独立仓库：**[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
+- 规则托管于独立仓库：**[WaifuX-Profiles](https://github.com/lml249/WaifuX-Profiles)**
 - 应用启动时自动同步最新规则
 - 支持用户自定义导入规则
 - 源站页面结构调整时，仅需更新规则即可适配，无需发版
@@ -180,7 +171,6 @@ WaifuX 是一个**完全免费、开源**的个人项目。开发和维护一个
 WaifuX 本身**不存储、不托管任何内容**，仅作为第三方内容的聚合与展示工具：
 - [Wallhaven](https://wallhaven.cc) 壁纸通过其公开 API 获取
 - [MotionBGs](https://motionbgs.com) 内容由用户自行配置源地址
-- 动漫视频解析源由用户自行提供与配置
 - 所有内容的版权归原网站及原作者所有
 
 ### 2. Wallpaper Engine 兼容性声明（实验性 / Beta）
@@ -215,19 +205,20 @@ WaifuX **并非 Wallpaper Engine 官方产品**，与 Valve Corporation、Kristj
 ## 🌟 Star 历史
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=lml249/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?style=social" alt="Stars">
   </a>
 </p>

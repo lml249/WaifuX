@@ -16,7 +16,6 @@ import Cache
 /// - `wallpaper/dl`  — 壁纸下载
 /// - `media/fav`     — 媒体收藏
 /// - `media/dl`      — 媒体下载
-/// - `anime/fav`     — 动漫收藏
 @MainActor
 final class CachePersistenceService {
     static let shared = CachePersistenceService()
@@ -27,7 +26,7 @@ final class CachePersistenceService {
         let appSupport = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
-            .appendingPathComponent("com.waifux.app/CachePersistence")
+            .appendingPathComponent("io.github.lml249.waifux.app/CachePersistence")
 
         let diskConfig = DiskConfig(
             name: "Records",
@@ -127,6 +126,26 @@ final class CachePersistenceService {
             }
         }
         return results
+    }
+
+    /// 删除分类索引和索引中记录的所有对象。用于移除已经下线的功能数据。
+    @discardableResult
+    func deleteAll(category: String) -> Int {
+        let ids = loadIndex(key: "index/\(category)")
+        var deletedCount = 0
+
+        for id in ids {
+            let key = "\(category)/\(id)"
+            guard exists(key: key), delete(key: key) else { continue }
+            deletedCount += 1
+        }
+
+        let indexKey = "index/\(category)"
+        if exists(key: indexKey) {
+            _ = delete(key: indexKey)
+        }
+
+        return deletedCount
     }
 
     /// 全量覆盖保存（用于迁移/批量重建）

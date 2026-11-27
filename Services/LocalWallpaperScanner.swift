@@ -1,6 +1,6 @@
 import Foundation
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 
 /// 本地壁纸扫描服务
 /// 自动检测用户复制到下载目录的壁纸和媒体文件，生成基本元数据

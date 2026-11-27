@@ -145,6 +145,8 @@ final class WallpaperEngineXBridge: ObservableObject {
     private var lastWallpaperPath: String?
     private var targetScreenIDs = Set<String>()
     private var targetScreenFingerprints = Set<String>()
+    private var targetSlotIDsByScreenID: [String: String] = [:]
+    private var pendingKindByScreenID: [String: DesktopSlotPendingKind] = [:]
     private var cancellables = Set<AnyCancellable>()
 
     private let lastWallpaperPathKey = "we_last_wallpaper_path_v1"
@@ -219,7 +221,13 @@ final class WallpaperEngineXBridge: ObservableObject {
     ///   - path: 壁纸目录或 scene.pkg 路径
     ///   - assetsPath: assets-pc 资源目录路径（nil 时从内嵌 assets 解压）
     ///   - targetScreens: 目标屏幕列表（nil 表示所有屏幕）
-    func setWallpaper(path: String, assetsPath: String? = nil, targetScreens: [NSScreen]? = nil) async throws {
+    func setWallpaper(
+        path: String,
+        assetsPath: String? = nil,
+        targetScreens: [NSScreen]? = nil,
+        preferredSlotIDByScreenID: [String: String] = [:],
+        pendingKind: DesktopSlotPendingKind = .pendingUserSet
+    ) async throws {
         print("[WallpaperEngineXBridge] >>> setWallpaper START path=\(path)")
 
         // 处理之前堆积的进程终止事件
@@ -286,6 +294,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         if let screens = targetScreens, !screens.isEmpty {
             targetScreenIDs = Set(screens.map(\.wallpaperScreenIdentifier))
             targetScreenFingerprints = Set(screens.map(\.wallpaperScreenFingerprint))
+            targetSlotIDsByScreenID = preferredSlotIDByScreenID
+            pendingKindByScreenID = Dictionary(uniqueKeysWithValues: screens.map { ($0.wallpaperScreenIdentifier, pendingKind) })
             // ⚠️ 多显示器提示：wallpaper-wgpu 实时渲染仅支持主屏
             if screens.count > 1 {
                 print("[WallpaperEngineXBridge] ⚠️ 检测到 \(screens.count) 个目标屏幕，但 wallpaper-wgpu 实时渲染只支持主屏")
@@ -293,6 +303,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         } else {
             targetScreenIDs = Set(NSScreen.screens.map(\.wallpaperScreenIdentifier))
             targetScreenFingerprints = Set(NSScreen.screens.map(\.wallpaperScreenFingerprint))
+            targetSlotIDsByScreenID = preferredSlotIDByScreenID
+            pendingKindByScreenID = Dictionary(uniqueKeysWithValues: NSScreen.screens.map { ($0.wallpaperScreenIdentifier, pendingKind) })
             if NSScreen.screens.count > 1 {
                 print("[WallpaperEngineXBridge] ⚠️ 检测到 \(NSScreen.screens.count) 个显示器，但 wallpaper-wgpu 实时渲染只支持主屏")
             }
@@ -424,6 +436,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         isExternalPaused = false
         targetScreenIDs.removeAll()
         targetScreenFingerprints.removeAll()
+        targetSlotIDsByScreenID.removeAll()
+        pendingKindByScreenID.removeAll()
         lastAppliedScreenConfigurations.removeAll()
         UserDefaults.standard.removeObject(forKey: controllingExternalKey)
         UserDefaults.standard.removeObject(forKey: targetScreenIDsKey)
@@ -441,6 +455,8 @@ final class WallpaperEngineXBridge: ObservableObject {
         isExternalPaused = false
         targetScreenIDs.removeAll()
         targetScreenFingerprints.removeAll()
+        targetSlotIDsByScreenID.removeAll()
+        pendingKindByScreenID.removeAll()
         lastAppliedScreenConfigurations.removeAll()
     }
 
@@ -791,6 +807,8 @@ final class WallpaperEngineXBridge: ObservableObject {
                 isExternalPaused = false
                 targetScreenIDs.removeAll()
                 targetScreenFingerprints.removeAll()
+                targetSlotIDsByScreenID.removeAll()
+                pendingKindByScreenID.removeAll()
             }
         }
     }
@@ -820,6 +838,8 @@ final class WallpaperEngineXBridge: ObservableObject {
             lastWallpaperPath = nil
             targetScreenIDs.removeAll()
             targetScreenFingerprints.removeAll()
+            targetSlotIDsByScreenID.removeAll()
+            pendingKindByScreenID.removeAll()
             return
         }
 
@@ -1074,13 +1094,24 @@ final class WallpaperEngineXBridge: ObservableObject {
         var didApply = false
         let screens = activeTargetScreens()
         for screen in screens.isEmpty ? NSScreen.screens : screens {
-            do {
-                try NSWorkspace.shared.setDesktopImageURLForAllSpaces(fileURL, for: screen, options: fillOptions)
-                DesktopWallpaperSyncManager.shared.registerWallpaperSet(fileURL, for: screen, options: fillOptions)
-                print("[WallpaperEngineXBridge] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName))")
-                didApply = true
-            } catch {
-                print("[WallpaperEngineXBridge] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
+            didApply = true
+            let screenID = screen.wallpaperScreenIdentifier
+            let preferredSlotID = targetSlotIDsByScreenID[screenID]
+            let pendingKind = pendingKindByScreenID[screenID] ?? .pendingUserSet
+            Task { @MainActor in
+                do {
+                    try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+                        fileURL,
+                        option: .desktop,
+                        targetScreen: screen,
+                        preferredSlotID: preferredSlotID,
+                        pendingKind: pendingKind,
+                        options: fillOptions
+                    )
+                    print("[WallpaperEngineXBridge] ✅ 静态 fallback 壁纸已设置 (screen: \(screen.localizedName))")
+                } catch {
+                    print("[WallpaperEngineXBridge] ⚠️ 设置静态壁纸失败 (screen: \(screen.localizedName)): \(error.localizedDescription)")
+                }
             }
         }
         return didApply
@@ -1651,7 +1682,7 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             defer: false
         )
         window.level = .init(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
-        window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        window.collectionBehavior = [.stationary, .fullScreenAuxiliary, .ignoresCycle]
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -2172,11 +2203,24 @@ private final class WebRendererBridge: NSObject, WKNavigationDelegate {
             screens = NSScreen.screens
         }
         for screen in screens {
-            try? NSWorkspace.shared.setDesktopImageURLForAllSpaces(dst, for: screen, options: [
+            let fillOptions: [NSWorkspace.DesktopImageOptionKey: Any] = [
                 .imageScaling: NSNumber(value: NSImageScaling.scaleProportionallyUpOrDown.rawValue),
                 .allowClipping: true
-            ])
-            DesktopWallpaperSyncManager.shared.registerWallpaperSet(dst, for: screen)
+            ]
+            Task { @MainActor in
+                do {
+                    try await SpaceWallpaperCoordinator.shared.registerAppliedWallpaper(
+                        dst,
+                        for: screen,
+                        preferredSlotID: nil,
+                        pendingKind: .pendingUserSet,
+                        options: fillOptions,
+                        runtimeState: .activeDynamic
+                    )
+                } catch {
+                    print("[WebRendererBridge] 静态捕获 token 写入失败: \(error.localizedDescription)")
+                }
+            }
         }
     }
 }

@@ -10,29 +10,29 @@
 
 <p align="center">
   <samp>
-    <b>Open Source All-in-One ACG App for macOS</b><br>
-    <b>Static Wallpapers · Dynamic Wallpapers · Anime Videos</b><br>
-    <b>Multi-source Aggregation, Full-scenario Coverage</b>
+    <b>Open Source Wallpaper Manager for macOS</b><br>
+    <b>Static Wallpapers · Dynamic Wallpapers · Desktop Slots</b><br>
+    <b>Multi-source Aggregation, Multi-desktop Coverage</b>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/lml249/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/WaifuX/forks">
-    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/lml249/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/lml249/WaifuX?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/lml249/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/WaifuX">
+  <a href="https://github.com/lml249/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -52,10 +52,6 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">Live Wallpapers - MotionBG</p></td>
-    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">Anime Detail - Multi-source</p></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">Video Player - Episode Select</p></td>
     <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">My Library - Settings</p></td>
   </tr>
 </table>
@@ -68,7 +64,7 @@
 |---------|:------:|-------------|
 | 🖼 **Static Wallpapers** | ✅ | Dual source switching: Wallhaven + 4K Wall, full 4K/8K resolution coverage |
 | 🎬 **Dynamic Wallpapers** | ✅ | Support for MotionBGs and other dynamic background sources — bring your desktop to life |
-| 📺 **Anime Videos** | ✅ | Built-in multi-source parsing engine for streaming and watching anime |
+| 🖥 **Desktop Slots** | ✅ | Maintain separate wallpaper slots for macOS Spaces, such as Desktop 1 and Desktop 2 |
 | 🔍 **Smart Search & Filter** | ✅ | Keywords, tags, categories, color, resolution — find exactly what you want |
 | ⭐ **Collections** | ✅ | Save favorite wallpapers and videos to build your personal ACG library |
 | ⚡️ **One-click Apply** | ✅ | Set as desktop wallpaper or dynamic desktop directly while browsing |
@@ -82,20 +78,19 @@
 
 ## 📥 Installation
 
-### Method 1: Official Website (Recommended)
+### Method 1: GitHub Releases (Recommended)
 
-👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
+👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### Method 2: GitHub Releases
-
-👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
-
-### Method 3: Homebrew
+### Method 2: Build from Source
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
+
+Select the WaifuX scheme in Xcode, then build and run.
 
 > ⚠️ On first launch, you may need to allow execution in "System Settings → Privacy & Security".
 
@@ -120,7 +115,7 @@ WaifuX's primary data source, [Wallhaven](https://wallhaven.cc), is hosted on ov
 
 WaifuX uses a dynamic rule system with scraping logic decoupled from the client:
 
-- Rules are hosted in a separate repository: **[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
+- Rules are hosted in a separate repository: **[WaifuX-Profiles](https://github.com/lml249/WaifuX-Profiles)**
 - Latest rules are automatically synced on app startup
 - Supports custom user-imported rules
 - When source site layouts change, only rules need updating — no app release required
@@ -172,7 +167,6 @@ This project is open-sourced under the [GNU General Public License v3.0 (GPL-3.0
 WaifuX does **not store or host any content** itself — it acts solely as an aggregator and viewer for third-party content:
 - [Wallhaven](https://wallhaven.cc) wallpapers are fetched via their public API
 - [MotionBGs](https://motionbgs.com) content is configured by users themselves
-- Anime video parsing sources are provided and configured by users
 - All content copyrights belong to the original websites and authors
 
 ### 2. Wallpaper Engine Compatibility (Experimental / Beta)
@@ -207,19 +201,20 @@ This application is provided **"AS IS"**, and the developer assumes no liability
 ## 🌟 Star History
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=lml249/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?style=social" alt="Stars">
   </a>
 </p>

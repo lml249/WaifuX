@@ -298,46 +298,9 @@ private extension GlassVariant {
 public enum LiquidGlassEnvironment {
     /// 检查是否支持原生 Liquid Glass API (macOS 26+)
     public static var supportsNativeLiquidGlass: Bool {
-        if #available(macOS 26.0, *) {
-            return true
-        }
+        // Built with the macOS 15 SDK, so macOS 26 Liquid Glass symbols are
+        // not available at compile time. Keep using the fallback renderer.
         return false
-    }
-}
-
-@available(macOS 26.0, *)
-private extension LiquidGlassLevel {
-    var nativeGlass: Glass {
-        switch self {
-        case .subtle:
-            return .clear
-        case .regular, .prominent, .max:
-            return .regular
-        }
-    }
-
-    func configuredNativeGlass(tint: Color?) -> Glass {
-        var glass = nativeGlass
-        if let tint {
-            glass = glass.tint(tint)
-        }
-        return glass
-    }
-}
-
-@available(macOS 26.0, *)
-private extension GlassVariant {
-    var nativeGlass: Glass {
-        switch self {
-        case .regular, .prominent:
-            return .regular
-        case .interactive:
-            return .regular.interactive()
-        case .tinted(let color):
-            return .regular.tint(color)
-        case .clear:
-            return .clear
-        }
     }
 }
 
@@ -544,15 +507,7 @@ public struct OptimizedGlassContainer<Content: View>: View {
     }
 
     public var body: some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                GlassEffectContainer(spacing: spacing) {
-                    content
-                }
-            } else {
-                content
-            }
-        }
+        content
     }
 }
 
@@ -691,25 +646,13 @@ struct AdaptiveVariantGlassModifier<S: Shape>: ViewModifier {
     let variant: GlassVariant
 
     func body(content: Content) -> some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                content.modifier(
-                    NativeGlassModifier(
-                        shape: shape,
-                        glass: variant.nativeGlass,
-                        backdropOpacity: variant.defaultLevel.nativeBackdropOpacity
-                    )
-                )
-            } else {
-                content.modifier(
-                    FallbackGlassModifier(
-                        shape: shape,
-                        level: variant.defaultLevel,
-                        tint: variant.tintColor
-                    )
-                )
-            }
-        }
+        content.modifier(
+            FallbackGlassModifier(
+                shape: shape,
+                level: variant.defaultLevel,
+                tint: variant.tintColor
+            )
+        )
     }
 }
 
@@ -720,38 +663,14 @@ struct AdaptiveLevelGlassModifier<S: Shape>: ViewModifier {
     var lightweight: Bool = false
 
     func body(content: Content) -> some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                content.modifier(
-                    NativeGlassModifier(
-                        shape: shape,
-                        glass: level.configuredNativeGlass(tint: tint),
-                        backdropOpacity: level.nativeBackdropOpacity
-                    )
-                )
-            } else {
-                content.modifier(
-                    FallbackGlassModifier(
-                        shape: shape,
-                        level: level,
-                        tint: tint,
-                        lightweight: lightweight
-                    )
-                )
-            }
-        }
-    }
-}
-
-@available(macOS 26.0, *)
-struct NativeGlassModifier<S: Shape>: ViewModifier {
-    let shape: S
-    let glass: Glass
-    let backdropOpacity: Double
-
-    func body(content: Content) -> some View {
-        content
-            .glassEffect(glass, in: shape)
+        content.modifier(
+            FallbackGlassModifier(
+                shape: shape,
+                level: level,
+                tint: tint,
+                lightweight: lightweight
+            )
+        )
     }
 }
 

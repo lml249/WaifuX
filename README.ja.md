@@ -10,29 +10,29 @@
 
 <p align="center">
   <samp>
-    <b>macOS オープンソース ACG 統合アプリ</b><br>
-    <b>静的壁紙 · ダイナミック壁紙 · アニメ動画</b><br>
-    <b>マルチソース統合、全シナリオ対応</b>
+    <b>macOS オープンソース壁紙管理アプリ</b><br>
+    <b>静的壁紙 · ダイナミック壁紙 · デスクトップスロット</b><br>
+    <b>マルチソース統合、複数デスクトップ対応</b>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/v/release/jipika/WaifuX?color=6366f1&style=flat-square" alt="Release">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/v/release/lml249/WaifuX?color=6366f1&style=flat-square" alt="Release">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0-06b6d4?style=flat-square" alt="License">
   </a>
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?color=f59e0b&style=flat-square" alt="Stars">
   </a>
-  <a href="https://github.com/jipika/WaifuX/forks">
-    <img src="https://img.shields.io/github/forks/jipika/WaifuX?color=10b981&style=flat-square" alt="Forks">
+  <a href="https://github.com/lml249/WaifuX/forks">
+    <img src="https://img.shields.io/github/forks/lml249/WaifuX?color=10b981&style=flat-square" alt="Forks">
   </a>
-  <a href="https://github.com/jipika/WaifuX/releases">
-    <img src="https://img.shields.io/github/downloads/jipika/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
+  <a href="https://github.com/lml249/WaifuX/releases">
+    <img src="https://img.shields.io/github/downloads/lml249/WaifuX/total?color=8b5cf6&style=flat-square" alt="Downloads">
   </a>
-  <a href="https://jipika.github.io/WaifuX">
+  <a href="https://github.com/lml249/WaifuX">
     <img src="https://img.shields.io/badge/Website-🌐-ec4899?style=flat-square" alt="Website">
   </a>
 </p>
@@ -52,10 +52,6 @@
   </tr>
   <tr>
     <td width="50%"><img src="screenshots/motionbg.png" width="100%" /><br><p align="center">動的壁紙 - MotionBG</p></td>
-    <td width="50%"><img src="screenshots/anime_detail.png" width="100%" /><br><p align="center">アニメ詳細 - マルチソース</p></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="screenshots/anime_video.png" width="100%" /><br><p align="center">ビデオ再生 - エピソード選択</p></td>
     <td width="50%"><img src="screenshots/paging_mode.png" width="100%" /><br><p align="center">マイライブラリ - 設定</p></td>
   </tr>
 </table>
@@ -68,7 +64,7 @@
 |------|:----:|------|
 | 🖼 **静的壁紙** | ✅ | デュアルソース切替：Wallhaven + 4K Wall、4K/8K フル解像度カバー |
 | 🎬 **ダイナミック壁紙** | ✅ | MotionBGs などの動的背景ソース対応、デスクトップを"生きている"状態に |
-| 📺 **アニメ動画** | ✅ | ビルトインマルチソース解析エンジンでストリーミング・視聴 |
+| 🖥 **デスクトップスロット** | ✅ | macOS の複数デスクトップごとに、デスクトップ 1 / 2 のような壁紙スロットを管理 |
 | 🔍 **スマート検索＆フィルタ** | ✅ | キーワード、タグ、カテゴリ、色、解像度 — 目的のコンテンツを素早く発見 |
 | ⭐ **コレクション** | ✅ | 気に入った壁紙や動画を保存して個人 ACG ライブラリーを構築 |
 | ⚡️ **ワンクリック適用** | ✅ | 閲覧中にそのままデスクトップ壁紙やダイナミック壁紙に設定可能 |
@@ -82,20 +78,19 @@
 
 ## 📥 インストール
 
-### 方法1：公式ウェブサイト（推奨）
+### 方法1：GitHub Releases（推奨）
 
-👉 **[https://jipika.github.io/WaifuX](https://jipika.github.io/WaifuX)**
+👉 **[Releases](https://github.com/lml249/WaifuX/releases)**
 
-### 方法2：GitHub Releases
-
-👉 **[Releases](https://github.com/jipika/WaifuX/releases)**
-
-### 方法3：Homebrew
+### 方法2：ソースからビルド
 
 ```bash
-brew tap jipika/waifux
-brew install --cask waifux
+git clone https://github.com/lml249/WaifuX.git
+cd WaifuX
+open WaifuX.xcodeproj
 ```
+
+Xcode で WaifuX scheme を選択してビルド・実行してください。
 
 > ⚠️ 初回起動時、「システム設定 → プライバシーとセキュリティ」で実行許可が必要な場合があります。
 
@@ -120,7 +115,7 @@ WaifuX の主要データソースである [Wallhaven](https://wallhaven.cc) �
 
 WaifuX はダイナミックルールシステムを採用しており、スクレイピングロジックとクライアントを分離しています：
 
-- ルールは独立リポジトリで管理：**[WaifuX-Profiles](https://github.com/jipika/WaifuX-Profiles)**
+- ルールは独立リポジトリで管理：**[WaifuX-Profiles](https://github.com/lml249/WaifuX-Profiles)**
 - アプリ起動時に最新ルールを自動同期
 - ユーザーによるカスタムルールインポートに対応
 - ソースサイトのレイアウト変更時、ルールのみ更新すれば適応可能（アプリ再リリース不要）
@@ -172,7 +167,6 @@ WaifuX は**完全無料のオープンソース**個人プロジェクトです
 WaifuX 自体は**いかなるコンテンツも保存・ホストしておらず**、純粋に第三者コンテンツの集約・表示ツールとして機能します：
 - [Wallhaven](https://wallhaven.cc) の壁紙は公開 API 経由で取得されます
 - [MotionBGs](https://motionbgs.com) のコンテンツはユーザー自身がソースアドレスを設定します
-- アニメ動画の解析ソースはユーザー自身が提供・設定します
 - 全てのコンテンツの著作権は元サイトおよび作者に帰属します
 
 ### 2. Wallpaper Engine 互換性に関する声明（実験的 / Beta）
@@ -207,19 +201,20 @@ WaifuX は **Wallpaper Engine の公式製品ではありません**。Valve Cor
 ## 🌟 Star 履歴
 
 <p align="center">
-  <img src="https://api.star-history.com/svg?repos=jipika/WaifuX&type=Date" alt="Star History Chart">
+  <img src="https://api.star-history.com/svg?repos=lml249/WaifuX&type=Date" alt="Star History Chart">
 </p>
 
 ---
 
 <p align="center">
   <samp>
-    Made with 💜 by <a href="https://github.com/jipika">@jipika</a>
+    Desktop slot build maintained by <a href="https://github.com/lml249">@lml249</a><br>
+    Based on the original WaifuX project by <a href="https://github.com/jipika">@jipika</a>
   </samp>
 </p>
 
 <p align="center">
-  <a href="https://github.com/jipika/WaifuX/stargazers">
-    <img src="https://img.shields.io/github/stars/jipika/WaifuX?style=social" alt="Stars">
+  <a href="https://github.com/lml249/WaifuX/stargazers">
+    <img src="https://img.shields.io/github/stars/lml249/WaifuX?style=social" alt="Stars">
   </a>
 </p>

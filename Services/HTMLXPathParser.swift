@@ -1,12 +1,22 @@
 import Foundation
 import Kanna
 
-// MARK: - XPath HTML 解析器 (用于 Kazumi 规则)
+// MARK: - XPath HTML 解析器
+
+enum HTMLXPathParserError: Error, LocalizedError {
+    case parseFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .parseFailed(let message):
+            return message
+        }
+    }
+}
 
 class HTMLXPathParser {
 
     /// 使用 XPath 解析搜索结果
-    /// 参考 Kazumi Plugin.queryBangumi
     static func parseSearchResults(
         html: String,
         searchList: String,
@@ -15,7 +25,7 @@ class HTMLXPathParser {
         searchQuery: String? = nil
     ) throws -> [(name: String, src: String)] {
         guard let doc = try? HTML(html: html, encoding: .utf8) else {
-            throw AnimeParserError.parseError("无法解析 HTML")
+            throw HTMLXPathParserError.parseFailed("无法解析 HTML")
         }
 
         var results: [(name: String, src: String)] = []
@@ -42,8 +52,7 @@ class HTMLXPathParser {
                     continue
                 }
 
-                // 注意：与 Kazumi 保持一致，不做关键词匹配过滤
-                // Kazumi 的搜索逻辑仅依赖 XPath，不做标题-关键词启发式过滤
+                // 规则侧 XPath 解析只依赖选择器，不做标题-关键词启发式过滤。
                 
                 // 过滤无效路径（只匹配完整的无效路径，不使用 hasSuffix 避免误判）
                 let lowerSrc = src.lowercased()
@@ -74,65 +83,7 @@ class HTMLXPathParser {
         return results
     }
 
-    /// 使用 XPath 解析剧集列表 (Roads)
-    /// 参考 Kazumi Plugin.querychapterRoads
-    static func parseChapterRoads(
-        html: String,
-        chapterRoads: String,
-        chapterResult: String
-    ) throws -> [(roadName: String, episodes: [(name: String, url: String)])] {
-        guard let doc = try? HTML(html: html, encoding: .utf8) else {
-            throw AnimeParserError.parseError("无法解析 HTML")
-        }
-
-        var roads: [(roadName: String, episodes: [(name: String, url: String)])] = []
-
-        // 使用 chapterRoads XPath 查找所有播放列表
-        let roadElements = doc.xpath(chapterRoads)
-        print("[HTMLXPathParser] chapterRoads '\(chapterRoads)' 找到 \(roadElements.count) 个播放列表容器")
-
-        var count = 1
-        for element in roadElements {
-            var chapterUrlList: [String] = []
-            var chapterNameList: [String] = []
-
-            // 在当前播放列表容器内查找剧集链接
-            // 关键修复：使用 CSS 选择器在 element 范围内查找，而不是 XPath
-            // 因为 Kanna 的 element.xpath() 可能无法正确限制范围
-            let episodeElements = extractElementsFromNode(element, xpath: chapterResult)
-            
-            print("[HTMLXPathParser] 播放列表 \(count): chapterResult '\(chapterResult)' 找到 \(episodeElements.count) 个剧集")
-
-            for item in episodeElements {
-                let itemUrl = item["href"] ?? ""
-                let itemName = item.text?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) ?? ""
-                    .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-
-                if !itemUrl.isEmpty && !itemName.isEmpty {
-                    chapterUrlList.append(itemUrl)
-                    chapterNameList.append(itemName)
-                }
-            }
-
-            if !chapterUrlList.isEmpty && !chapterNameList.isEmpty {
-                let roadName = "播放列表\(count)"
-                let episodes = zip(chapterNameList, chapterUrlList).map { (name, url) in
-                    (name: name, url: url)
-                }
-                roads.append((roadName: roadName, episodes: episodes))
-                print("[HTMLXPathParser] ✓ 播放列表 \(count): \(episodes.count) 集")
-                count += 1
-            } else {
-                print("[HTMLXPathParser] ⚠️ 播放列表 \(count): 没有有效剧集")
-            }
-        }
-
-        print("[HTMLXPathParser] 总计: \(roads.count) 个播放列表, \(roads.reduce(0) { $0 + $1.episodes.count }) 集")
-        return roads
-    }
-
-    /// 检测验证码
-    /// 参考 Kazumi 的 antiCrawlerConfig 检测
+    /// 检测验证码。
     static func detectCaptcha(
         html: String,
         captchaImageXPath: String?,
@@ -214,32 +165,6 @@ class HTMLXPathParser {
         return nil
     }
 
-    /// 从节点中提取子元素
-    /// 关键修复：确保只在当前节点范围内查找
-    private static func extractElementsFromNode(_ node: Kanna.XMLElement, xpath: String) -> [Kanna.XMLElement] {
-        // 尝试使用 Kanna 的 css 方法（CSS 选择器通常在子树查找更可靠）
-        if let cssSelector = convertXPathToCSS(xpath) {
-            let cssResults = node.css(cssSelector)
-            // 转换为数组
-            var results: [Kanna.XMLElement] = []
-            for element in cssResults {
-                results.append(element)
-            }
-            if !results.isEmpty {
-                return results
-            }
-        }
-        
-        // 回退到 xpath
-        let relativeXPath = makeRelativeXPath(xpath)
-        let xpathResults = node.xpath(relativeXPath)
-        var results: [Kanna.XMLElement] = []
-        for element in xpathResults {
-            results.append(element)
-        }
-        return results
-    }
-
     /// 将绝对 XPath 转换为相对 XPath
     /// 在 element.xpath() 中使用时，绝对路径（如 //div）会在整个文档中查找
     /// 而相对路径（如 .//div）才会在当前元素内部查找
@@ -262,10 +187,5 @@ class HTMLXPathParser {
         }
 
         return trimmed
-    }
-    
-    /// 使用 HTMLParser 的 convertXPathToCSS 方法
-    private static func convertXPathToCSS(_ xpath: String) -> String? {
-        return HTMLParser.shared.convertXPathToCSS(xpath)
     }
 }

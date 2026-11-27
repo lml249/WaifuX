@@ -1,6 +1,6 @@
 import SwiftUI
 import AVKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import AppKit
 import Kingfisher
 import WebKit
@@ -2977,8 +2977,11 @@ struct MediaDetailSheet: View {
                     do {
                         let targetScreens = selectedScreen.map { [$0] } ?? screens
                         for screen in targetScreens {
-                            try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: screen)
-                            DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: screen)
+                            try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+                                imageURL,
+                                option: .desktop,
+                                targetScreen: screen
+                            )
                         }
                         WallpaperSchedulerService.shared.notifyManualWallpaperChange(screenID: selectedScreen?.wallpaperScreenIdentifier)
                     } catch {
@@ -2994,8 +2997,11 @@ struct MediaDetailSheet: View {
             Task { @MainActor in
                 do {
                     if let mainScreen = screens.first {
-                        try NSWorkspace.shared.setDesktopImageURLForAllSpaces(imageURL, for: mainScreen)
-                        DesktopWallpaperSyncManager.shared.registerWallpaperSet(imageURL, for: mainScreen)
+                        try await SpaceWallpaperCoordinator.shared.setStaticWallpaper(
+                            imageURL,
+                            option: .desktop,
+                            targetScreen: mainScreen
+                        )
                     }
                     WallpaperSchedulerService.shared.notifyManualWallpaperChange(
                         screenID: NSScreen.screens.first?.wallpaperScreenIdentifier

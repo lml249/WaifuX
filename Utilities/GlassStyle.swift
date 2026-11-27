@@ -741,107 +741,57 @@ extension View {
 private struct DetailGlassTitleModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            // macOS 26+: 使用原生 Liquid Glass 透明文字效果
+        ZStack {
             content
-                .glassEffect(
-                    Glass.regular.tint(Color.white.opacity(0.18)),
-                    in: .rect
-                )
+                .foregroundStyle(.black.opacity(0.35))
+                .blur(radius: 14)
+                .offset(y: 8)
+
+            content
                 .foregroundStyle(.clear)
-                .background(
-                    // 使用 glass 材质作为文字的背景，实现透明效果
-                    content
-                        .foregroundStyle(.white)
-                        .glassEffect(
-                            Glass.regular.tint(Color.white.opacity(0.25)),
-                            in: .rect
-                        )
-                        .compositingGroup()
-                )
+                .background(.ultraThinMaterial.opacity(0.7))
                 .mask {
-                    // 用原文字作为 mask，让玻璃效果只在文字形状内显示
                     content
                         .foregroundStyle(.white)
                 }
-                .overlay(
-                    // 顶部高光增强玻璃质感
-                    content
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(0.92),
-                                    Color.white.opacity(0.45),
-                                    Color.clear
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .blendMode(.overlay)
-                        .mask {
-                            content
-                                .foregroundStyle(.white)
-                        }
+
+            content
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.85),
+                            Color.white.opacity(0.45),
+                            Color.white.opacity(0.2)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
-        } else {
-            // Fallback: 使用 ultraThinMaterial 模拟透明玻璃文字
-            ZStack {
-                // 底层阴影
-                content
-                    .foregroundStyle(.black.opacity(0.35))
-                    .blur(radius: 14)
-                    .offset(y: 8)
+                .blendMode(.screen)
+                .mask {
+                    content
+                        .foregroundStyle(.white)
+                }
 
-                // 透明玻璃层 - 使用 material
-                content
-                    .foregroundStyle(.clear)
-                    .background(.ultraThinMaterial.opacity(0.7))
-                    .mask {
-                        content
-                            .foregroundStyle(.white)
-                    }
-
-                // 玻璃反光层
-                content
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.85),
-                                Color.white.opacity(0.45),
-                                Color.white.opacity(0.2)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
+            content
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.95),
+                            Color.white.opacity(0.5),
+                            Color.clear
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
-                    .blendMode(.screen)
-                    .mask {
-                        content
-                            .foregroundStyle(.white)
-                    }
-
-                // 顶部高光
-                content
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.95),
-                                Color.white.opacity(0.5),
-                                Color.clear
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .blendMode(.overlay)
-                    .mask {
-                        content
-                            .foregroundStyle(.white)
-                    }
-            }
-            .compositingGroup()
+                )
+                .blendMode(.overlay)
+                .mask {
+                    content
+                        .foregroundStyle(.white)
+                }
         }
+        .compositingGroup()
     }
 }
 
@@ -899,98 +849,43 @@ struct DetailGlassPopoverCard<Content: View>: View {
     }
 
     var body: some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                ZStack {
-                    NativeAppKitGlassEffectView(
-                        cornerRadius: 28,
-                        tintColor: variant.tintColor,
-                        style: .regular
+        ZStack {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.black.opacity(0.45),
+                            Color.black.opacity(0.38)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
+                )
 
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 18) {
-                            content()
-                        }
-                        .padding(20)
-                    }
-                }
-                .frame(width: width)
-                .frame(maxHeight: maxHeight)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: variant.borderColors,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.9
-                        )
-                }
-                .shadow(color: .black.opacity(variant.shadowOpacity), radius: 22, y: 10)
-            } else {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color.black.opacity(0.45),
-                                    Color.black.opacity(0.38)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.ultraThickMaterial.opacity(variant.backdropOpacity))
 
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(.ultraThickMaterial.opacity(variant.backdropOpacity))
-
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 18) {
-                            content()
-                        }
-                        .padding(20)
-                    }
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    content()
                 }
-                .frame(width: width)
-                .frame(maxHeight: maxHeight)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: variant.borderColors,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.9
-                        )
-                }
-                .shadow(color: .black.opacity(variant.shadowOpacity), radius: 22, y: 10)
+                .padding(20)
             }
         }
-    }
-}
-
-@available(macOS 26.0, *)
-private struct NativeAppKitGlassEffectView: NSViewRepresentable {
-    var cornerRadius: CGFloat
-    var tintColor: NSColor?
-    var style: NSGlassEffectView.Style = .regular
-
-    func makeNSView(context: Context) -> NSGlassEffectView {
-        let view = NSGlassEffectView()
-        view.cornerRadius = cornerRadius
-        view.tintColor = tintColor
-        view.style = style
-        view.contentView = NSView(frame: .zero)
-        return view
-    }
-
-    func updateNSView(_ nsView: NSGlassEffectView, context: Context) {
-        nsView.cornerRadius = cornerRadius
-        nsView.tintColor = tintColor
-        nsView.style = style
+        .frame(width: width)
+        .frame(maxHeight: maxHeight)
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: variant.borderColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+        }
+        .shadow(color: .black.opacity(variant.shadowOpacity), radius: 22, y: 10)
     }
 }
 

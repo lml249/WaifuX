@@ -9,16 +9,23 @@ private enum HomePrefetchNamespace {
 // MARK: - CarouselTimerManager（管理轮播定时器的引用类型）
 @MainActor
 final class CarouselTimerManager: ObservableObject {
-    var timer: Timer?
-    var loopResetWorkItem: DispatchWorkItem?
-    var interactionResetWorkItem: DispatchWorkItem?
+    var timer: Timer? {
+        didSet { deinitTimer = timer }
+    }
+    private nonisolated(unsafe) var deinitTimer: Timer?
+    var loopResetWorkItem: DispatchWorkItem? {
+        didSet { deinitLoopResetWorkItem = loopResetWorkItem }
+    }
+    private nonisolated(unsafe) var deinitLoopResetWorkItem: DispatchWorkItem?
+    var interactionResetWorkItem: DispatchWorkItem? {
+        didSet { deinitInteractionResetWorkItem = interactionResetWorkItem }
+    }
+    private nonisolated(unsafe) var deinitInteractionResetWorkItem: DispatchWorkItem?
 
-    nonisolated deinit {
-        MainActor.assumeIsolated {
-            timer?.invalidate()
-            loopResetWorkItem?.cancel()
-            interactionResetWorkItem?.cancel()
-        }
+    deinit {
+        deinitTimer?.invalidate()
+        deinitLoopResetWorkItem?.cancel()
+        deinitInteractionResetWorkItem?.cancel()
     }
 
     func invalidateAll() {

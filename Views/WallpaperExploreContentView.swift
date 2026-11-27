@@ -1306,7 +1306,7 @@ private struct WallpaperGridContainerView: View, Equatable {
         HStack(alignment: .top, spacing: config.spacing) {
             ForEach(0..<config.columnCount, id: \.self) { columnIndex in
                 LazyVStack(spacing: config.spacing) {
-                    ForEach(columnItems[safe: columnIndex] ?? []) { wallpaper in
+                    ForEach(columnIndex < columnItems.count ? columnItems[columnIndex] : []) { wallpaper in
                         WallpaperCardView(
                             wallpaper: wallpaper,
                             isFavorite: favoriteIDs.contains(wallpaper.id),

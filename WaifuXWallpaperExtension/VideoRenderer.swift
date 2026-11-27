@@ -604,6 +604,7 @@ final class VideoRenderer: @unchecked Sendable {
     // MARK: - Background Frame（底图）
 
     private func generateBackgroundFrame(for sourceAsset: AVURLAsset) {
+        let sourceURL = sourceAsset.url
         Task.detached(priority: .utility) { [weak self] in
             let generator = AVAssetImageGenerator(asset: sourceAsset)
             generator.appliesPreferredTrackTransform = true
@@ -613,11 +614,14 @@ final class VideoRenderer: @unchecked Sendable {
                 return
             }
 
-            DispatchQueue.main.async {
-                guard let self, self.asset.url == sourceAsset.url else { return }
-                self.backgroundFrameLayer.contents = cgImage
-                self.backgroundFrameLayer.opacity = 1
-                extLog("  [Renderer] 底图封面已渲染: \(sourceAsset.url.lastPathComponent)")
+            self?.queue.async { [weak self] in
+                guard let self, self.asset.url == sourceURL else { return }
+                let backgroundFrameLayer = self.backgroundFrameLayer
+                DispatchQueue.main.async {
+                    backgroundFrameLayer.contents = cgImage
+                    backgroundFrameLayer.opacity = 1
+                    extLog("  [Renderer] 底图封面已渲染: \(sourceURL.lastPathComponent)")
+                }
             }
         }
     }
@@ -627,6 +631,7 @@ final class VideoRenderer: @unchecked Sendable {
     private func generateStillFrame() {
         let captureTime = CMTimebaseGetTime(timebase)
         let currentAsset = asset
+        let currentURL = currentAsset.url
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let generator = AVAssetImageGenerator(asset: currentAsset)
@@ -639,10 +644,13 @@ final class VideoRenderer: @unchecked Sendable {
                 return
             }
 
-            DispatchQueue.main.async {
-                guard let self, self.isPaused else { return }
-                self.stillFrameLayer.contents = cgImage
-                self.stillFrameLayer.opacity = 1
+            self?.queue.async { [weak self] in
+                guard let self, self.isPaused, self.asset.url == currentURL else { return }
+                let stillFrameLayer = self.stillFrameLayer
+                DispatchQueue.main.async {
+                    stillFrameLayer.contents = cgImage
+                    stillFrameLayer.opacity = 1
+                }
             }
         }
     }

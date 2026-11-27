@@ -2,7 +2,6 @@ import SwiftUI
 import WebKit
 
 // MARK: - 验证码验证 WebView
-// 参考 Kazumi 的 WebView 验证码处理逻辑
 
 struct CaptchaVerificationWebView: NSViewRepresentable {
     let url: URL

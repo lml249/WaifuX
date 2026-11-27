@@ -94,3 +94,12 @@ Resources/assets/
 node_modules/
 package-lock.json
 package.json
+
+# Local build artifacts, signing profiles, and test outputs
+tmp/
+dist/
+*.zip
+*.provisionprofile
+*.mobileprovision
+*.xcresult
+test-results/
